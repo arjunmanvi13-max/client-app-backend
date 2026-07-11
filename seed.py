@@ -225,6 +225,17 @@ async def _backfill_staff_user_accounts() -> None:
 
 
 async def seed_data():
+    """Idempotent startup seed. Never raises — safe to call on every boot."""
+    logger.info("Starting idempotent seed (insert-only, no production user overwrites)")
+    try:
+        await _run_seed()
+    except DuplicateKeyError as exc:
+        logger.warning("Seed duplicate key (non-fatal, startup continues): %s", exc)
+    except Exception as exc:
+        logger.exception("Seed failed (non-fatal, startup continues): %s", exc)
+
+
+async def _run_seed():
     """Idempotent startup seed. Never overwrites existing production records."""
     await _ensure_indexes()
     await _sanitize_null_mobile_fields()
