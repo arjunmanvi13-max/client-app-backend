@@ -1,6 +1,8 @@
-from fastapi import APIRouter, Depends
-from core import db, get_current_user, now_utc
+from fastapi import APIRouter, Depends, Query
+from typing import Optional
+from core import db, get_current_user, now_utc, is_super_admin
 from notifications_service import unread_count_for_user
+from dashboard_mvp import build_mvp_dashboard
 
 router = APIRouter(tags=["dashboard"])
 
@@ -42,3 +44,14 @@ async def dashboard(user: dict = Depends(get_current_user)):
         "today": today,
         **extras,
     }
+
+
+@router.get("/dashboard/mvp")
+async def dashboard_mvp(
+    user: dict = Depends(get_current_user),
+    entity: Optional[str] = Query(None, description="pws | alpha | both — Super Admin only"),
+):
+    """Role-based dashboard MVP — lightweight tiles, no advanced financial analytics."""
+    if entity and not is_super_admin(user):
+        entity = None
+    return await build_mvp_dashboard(user, entity)
