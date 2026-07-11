@@ -12,7 +12,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from pymongo import ReturnDocument
 
-from core import db, get_current_user, is_admin, is_super_admin, get_perm, now_utc
+from core import db, get_current_user, is_admin, is_super_admin, get_perm, now_utc, format_date_display, format_datetime_display
 
 router = APIRouter(prefix="/invoices", tags=["invoices"])
 
@@ -225,7 +225,7 @@ def _render_invoice_pdf(inv: dict, person: dict) -> bytes:
     c.setFont("Helvetica-Bold", 11)
     c.drawRightString(W - 20 * mm, H - 18 * mm, inv.get("invoice_number") or "")
     c.setFont("Helvetica", 9)
-    c.drawRightString(W - 20 * mm, H - 25 * mm, f"Issue: {inv.get('issue_date') or '-'} · Due: {inv.get('due_date') or '-'}")
+    c.drawRightString(W - 20 * mm, H - 25 * mm, f"Issue: {format_date_display(inv.get('issue_date'))} · Due: {format_date_display(inv.get('due_date'))}")
 
     y = H - 50 * mm
     c.setFillColorRGB(0.06, 0.09, 0.16)
@@ -352,7 +352,7 @@ def _render_receipt_pdf(payment: dict, inv: dict, person: dict) -> bytes:
     for label, val in [
         ("Mode", payment.get("payment_mode")),
         ("Reference", payment.get("reference_id") or "-"),
-        ("Date", payment.get("transaction_date") or "-"),
+        ("Date", format_date_display(payment.get("transaction_date"))),
         ("Collected by", payment.get("collected_by_name") or "-"),
         ("Status", payment.get("status", "completed")),
     ]:

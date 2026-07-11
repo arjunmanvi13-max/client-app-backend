@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from typing import Optional, Literal, List
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from core import db, get_current_user, is_admin, is_super_admin, assert_perm, now_utc, get_perm, notify_role, resolve_user_institution, fee_entity_filter, derive_person_entities
+from core import db, get_current_user, is_admin, is_super_admin, assert_perm, now_utc, get_perm, notify_role, resolve_user_institution, fee_entity_filter, derive_person_entities, format_date_display, format_datetime_display, format_month_display
 
 router = APIRouter(prefix="/fees", tags=["fees"])
 
@@ -861,7 +861,7 @@ async def receipt_pdf(batch_id: str):
     c.setFont("Helvetica-Bold", 11)
     c.drawRightString(W - 20 * mm, H - 18 * mm, f"Receipt #{batch_id[:8].upper()}")
     c.setFont("Helvetica", 9)
-    c.drawRightString(W - 20 * mm, H - 25 * mm, f"Transaction date: {f0.get('transaction_date') or '-'}")
+    c.drawRightString(W - 20 * mm, H - 25 * mm, f"Transaction date: {format_date_display(f0.get('transaction_date'))}")
 
     y = H - 50 * mm
     # Player block
@@ -903,7 +903,7 @@ async def receipt_pdf(batch_id: str):
     for f in fees:
         c.setFillColorRGB(0.06, 0.09, 0.16)
         c.drawString(23 * mm, y, str(f.get("fee_type") or "-"))
-        c.drawString(90 * mm, y, str(f.get("period_month") or "-"))
+        c.drawString(90 * mm, y, format_month_display(f.get("period_month")))
         c.drawRightString(W - 23 * mm, y, rs(f.get("amount_due", 0)))
         y -= 6.5 * mm
         if y < 60 * mm:
@@ -932,7 +932,7 @@ async def receipt_pdf(batch_id: str):
         ("Payment mode", f0.get("payment_mode") or "-"),
         ("Reference / Txn ID", f0.get("reference_id") or "-"),
         ("Collected by", f0.get("collected_by_name") or "-"),
-        ("Timestamp", paid_at.replace("T", " ")[:19] if paid_at else "-"),
+        ("Timestamp", format_datetime_display(paid_at) if paid_at else "—"),
     ]
     for label, val in details:
         c.setFillColorRGB(0.39, 0.45, 0.55)

@@ -46,6 +46,43 @@ def validate_domain_email(email: str) -> str:
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
+def format_date_display(value: Optional[str] = None) -> str:
+    """User-facing date: dd/mm/yyyy."""
+    if not value:
+        return "—"
+    s = str(value).strip()
+    if not s:
+        return "—"
+    if "T" in s:
+        s = s[:10]
+    if len(s) >= 10 and s[4:5] == "-" and s[7:8] == "-":
+        y, m, d = s[:10].split("-")
+        return f"{d}/{m}/{y}"
+    return s
+
+def format_datetime_display(value: Optional[str] = None) -> str:
+    """User-facing datetime: dd/mm/yyyy, HH:MM."""
+    if not value:
+        return "—"
+    s = str(value).strip()
+    if not s:
+        return "—"
+    if "T" in s:
+        date_part, time_part = s.split("T", 1)
+        time_part = time_part[:5] if len(time_part) >= 5 else time_part
+        return f"{format_date_display(date_part)}, {time_part}"
+    return format_date_display(s)
+
+def format_month_display(value: Optional[str] = None) -> str:
+    """User-facing month period: mm/yyyy."""
+    if not value:
+        return "—"
+    s = str(value).strip()
+    if len(s) >= 7 and s[4:5] == "-":
+        y, m = s[:7].split("-")
+        return f"{m}/{y}"
+    return format_date_display(s)
+
 def hash_password(p: str) -> str:
     return bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode()
 

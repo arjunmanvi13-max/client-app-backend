@@ -19,6 +19,9 @@ from core import (
     fee_entity_filter,
     attendance_entity_filter,
     derive_person_entities,
+    format_date_display,
+    format_datetime_display,
+    format_month_display,
 )
 
 REPORT_IDS = (
@@ -111,8 +114,11 @@ def _subtitle(entity: str, filters: dict, user: dict) -> str:
     for k in ("date_from", "date_to", "grade", "section", "sport", "centre", "status"):
         v = filters.get(k)
         if v:
-            parts.append(f"{k}: {v}")
-    parts.append(f"Generated: {now_utc().strftime('%Y-%m-%d %H:%M')} by {user.get('name', '—')}")
+            if k in ("date_from", "date_to"):
+                parts.append(f"{k}: {format_date_display(v)}")
+            else:
+                parts.append(f"{k}: {v}")
+    parts.append(f"Generated: {format_datetime_display(now_utc().isoformat())} by {user.get('name', '—')}")
     return " · ".join(parts)
 
 
@@ -571,10 +577,25 @@ REPORT_CATALOG = [
 ]
 
 
+def _format_report_cell(key: str, value: Any) -> Any:
+    if value is None or value == "":
+        return value
+    k = str(key).lower()
+    if k.endswith("_at") or k in ("timestamp", "generated"):
+        return format_datetime_display(str(value))
+    if k.endswith("_date") or k == "date" or k.endswith("_month"):
+        if k.endswith("_month"):
+            return format_month_display(str(value))
+        return format_date_display(str(value))
+    if isinstance(value, str) and len(value) >= 10 and value[4:5] == "-" and value[7:8] == "-":
+        return format_date_display(value)
+    return value
+
+
 def dict_rows_to_matrix(meta: dict) -> tuple[List[str], List[List[Any]]]:
     columns = meta["columns"]
     if not meta["rows"]:
         return columns, []
     keys = meta.get("row_keys") or list(meta["rows"][0].keys())
-    matrix = [[r.get(k) for k in keys] for r in meta["rows"]]
+    matrix = [[_format_report_cell(k, r.get(k)) for k in keys] for r in meta["rows"]]
     return columns, matrix

@@ -6,7 +6,7 @@ from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from core import db, get_current_user, is_super_admin, is_sports_admin, now_utc, resolve_user_institution, fee_entity_filter
+from core import db, get_current_user, is_super_admin, is_sports_admin, now_utc, resolve_user_institution, fee_entity_filter, format_date_display, format_datetime_display
 from reports_engine import (
     _access_reports,
     resolve_entity,
@@ -358,7 +358,7 @@ async def export_financial(
             cell.fill = header_fill
             cell.alignment = Alignment(horizontal="left")
 
-    subtitle = f"Filters — Institution: {_resolve_institution(user, institution)} · Centre: {centre or 'All'} · Sport: {sport or 'All'} · Range: {date_from or '—'} → {date_to or '—'} · Generated: {now_utc().strftime('%Y-%m-%d %H:%M')} by {user.get('name')}"
+    subtitle = f"Filters — Institution: {_resolve_institution(user, institution)} · Centre: {centre or 'All'} · Sport: {sport or 'All'} · Range: {format_date_display(date_from) if date_from else '—'} → {format_date_display(date_to) if date_to else '—'} · Generated: {format_datetime_display(now_utc().isoformat())} by {user.get('name')}"
 
     if kind == "summary":
         ws.title = "Revenue Summary"
@@ -403,7 +403,7 @@ async def export_financial(
             ws.cell(row=i, column=4, value=r.get("category"))
             ws.cell(row=i, column=5, value=r.get("fee_type"))
             ws.cell(row=i, column=6, value=r.get("amount_due"))
-            ws.cell(row=i, column=7, value=r.get("due_date"))
+            ws.cell(row=i, column=7, value=format_date_display(r.get("due_date")))
             ws.cell(row=i, column=8, value=r.get("days_overdue"))
             ws.cell(row=i, column=9, value=r.get("bucket"))
     elif kind == "payment-modes":
@@ -427,7 +427,7 @@ async def export_financial(
             ws.cell(row=i, column=5, value=t.get("amount"))
             ws.cell(row=i, column=6, value=t.get("payment_mode"))
             ws.cell(row=i, column=7, value=t.get("reference_id"))
-            ws.cell(row=i, column=8, value=t.get("paid_at"))
+            ws.cell(row=i, column=8, value=format_datetime_display(t.get("paid_at")))
             ws.cell(row=i, column=9, value=t.get("collected_by_name"))
     else:
         raise HTTPException(400, f"Unknown export kind: {kind}. Use one of: summary, defaulters, payment-modes")
