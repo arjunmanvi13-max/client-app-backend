@@ -172,6 +172,10 @@ async def list_people(
         if q:
             filt.update(_search_filter(q))
         return await db.people.find(filt, {"_id": 0}).sort("name", 1).to_list(100)
+    if user.get("role") == "teacher" and not kind:
+        raise HTTPException(400, "kind is required (e.g. kind=student)")
+    if user.get("role") == "coach" and not kind:
+        raise HTTPException(400, "kind is required (e.g. kind=player)")
     if kind:
         _assert_can_list_kind(user, kind)
     if section_id and kind == "student":
@@ -211,6 +215,9 @@ async def list_people(
     if user.get("role") == "coach" and kind == "player":
         coach_q = _coach_visibility_filter(user, include_deactivated=include_deactivated)
         query = {"$and": [query, coach_q]} if query else coach_q
+    elif user.get("role") == "coach":
+        # Coach may only list players
+        return []
     inst = resolve_user_institution(user, institution)
     query.update(person_entity_filter(inst))
     if is_sports_admin(user):

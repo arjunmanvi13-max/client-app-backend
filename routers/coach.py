@@ -14,6 +14,14 @@ class CoachAttendanceIn(BaseModel):
     sport: Optional[Literal["Cricket", "Football"]] = None
     absent_player_ids: List[str] = []
 
+def _coach_assignment_lists(user: dict) -> tuple[list, list]:
+    centres = list(user.get("assigned_centres") or [])
+    sports = list(user.get("assigned_sports") or [])
+    if not sports and user.get("assigned_sport"):
+        sports = [user["assigned_sport"]]
+    return centres, sports
+
+
 def _coach_visibility_filter(user: dict, include_deactivated: bool = False) -> dict:
     """Coach sees only players in their assigned centres + sports. Admin sees all."""
     q: dict = {"kind": "player"}
@@ -21,13 +29,29 @@ def _coach_visibility_filter(user: dict, include_deactivated: bool = False) -> d
         q["status"] = {"$ne": "deactivated"}
     if is_admin(user):
         return q
-    centres = user.get("assigned_centres") or []
-    sports = user.get("assigned_sports") or []
+    centres, sports = _coach_assignment_lists(user)
+    if not centres and not sports:
+        # Deny-by-default: no assignments means no roster visibility
+        q["id"] = {"$in": []}
+        return q
     if centres:
         q["centre"] = {"$in": centres}
     if sports:
         q["sport"] = {"$in": sports}
     return q
+
+
+async def assert_player_in_coach_roster(user: dict, player_id: str) -> None:
+    """Raise 403/404 if player is outside the coach's assigned centre/sport scope."""
+    if is_admin(user):
+        person = await db.people.find_one({"id": player_id, "kind": "player"}, {"_id": 0, "id": 1})
+        if not person:
+            raise HTTPException(404, "Player not found")
+        return
+    filt = {**_coach_visibility_filter(user), "id": player_id}
+    person = await db.people.find_one(filt, {"_id": 0, "id": 1})
+    if not person:
+        raise HTTPException(403, "Player is not in your assigned roster")
 
 @router.get("/dashboard")
 async def coach_dashboard(user: dict = Depends(get_current_user)):

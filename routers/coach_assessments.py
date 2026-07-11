@@ -298,6 +298,8 @@ async def get_published(player_id: str, user: dict = Depends(get_current_user)):
     elif user.get("role") == "coach":
         if not _can_enter(user):
             raise HTTPException(403, "Not allowed")
+        from routers.coach import assert_player_in_coach_roster
+        await assert_player_in_coach_roster(user, player_id)
     elif not is_admin(user) and not get_perm(user, "view_coach_assessments"):
         raise HTTPException(403, "Not allowed")
     return {"player_id": player_id, "assessments": await published_for_player(player_id)}

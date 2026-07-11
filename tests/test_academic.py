@@ -116,6 +116,42 @@ class TestAcademicStructureAPI:
         )
         assert r.status_code == 403, r.text
 
+    def test_teacher_batch_rejects_student_from_wrong_section(self):
+        assigned = requests.get(f"{API}/academic/sections/for-attendance", headers=_hdr("teacher"), timeout=15)
+        if assigned.status_code != 200 or not assigned.json().get("sections"):
+            pytest.skip("No teacher-assigned section")
+        my_section = assigned.json()["sections"][0]
+        pr = requests.get(f"{API}/academic/sections", headers=_hdr("principal"), timeout=15)
+        if pr.status_code != 200:
+            pytest.skip("Cannot list sections")
+        other = next((s for s in pr.json() if s["id"] != my_section["id"]), None)
+        if not other:
+            pytest.skip("No alternate section")
+        wrong_students = requests.get(
+            f"{API}/people",
+            headers=_hdr("principal"),
+            params={"kind": "student", "section_id": other["id"]},
+            timeout=15,
+        )
+        if wrong_students.status_code != 200 or not wrong_students.json():
+            pytest.skip("No students in other section")
+        wrong_id = wrong_students.json()[0]["id"]
+        r = requests.post(
+            f"{API}/attendance/batch",
+            headers=_hdr("teacher"),
+            json={
+                "date": "2026-07-11",
+                "kind": "student",
+                "group": my_section.get("label", "9-A"),
+                "section_id": my_section["id"],
+                "session": None,
+                "sport": None,
+                "marks": [{"person_id": wrong_id, "status": "present"}],
+            },
+            timeout=15,
+        )
+        assert r.status_code == 403, r.text
+
     def test_academic_years_list(self):
         r = requests.get(f"{API}/academic/years", headers=_hdr("principal"), timeout=15)
         assert r.status_code == 200, r.text

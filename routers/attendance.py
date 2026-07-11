@@ -374,6 +374,58 @@ async def list_coach_attendance(
     return await db.attendance.find(q, {"_id": 0}).sort("date", -1).to_list(2000)
 
 
+async def _validate_batch_marks(
+    user: dict,
+    *,
+    kind: str,
+    marks: list,
+    section_id: Optional[str] = None,
+    group: Optional[str] = None,
+) -> None:
+    """Ensure each person_id in a batch belongs to the declared section/roster scope."""
+    if not marks:
+        return
+    person_ids = [m.person_id for m in marks]
+
+    if kind == "student":
+        allowed_ids: Optional[set] = None
+        if section_id:
+            allowed_ids = set(await db.people.distinct(
+                "id",
+                {"kind": "student", "section_id": section_id, "status": {"$ne": "deactivated"}},
+            ))
+        elif group:
+            allowed_ids = set(await db.people.distinct(
+                "id",
+                {"kind": "student", "group": group, "status": {"$ne": "deactivated"}},
+            ))
+        elif user.get("role") == "teacher" and not is_admin(user):
+            from routers.academic import assigned_section_ids_for_teacher
+            assigned = await assigned_section_ids_for_teacher(user["id"])
+            if not assigned:
+                raise HTTPException(403, "No class assignments")
+            allowed_ids = set(await db.people.distinct(
+                "id",
+                {"kind": "student", "section_id": {"$in": assigned}, "status": {"$ne": "deactivated"}},
+            ))
+        for pid in person_ids:
+            person = await db.people.find_one(
+                {"id": pid, "kind": "student"},
+                {"_id": 0, "id": 1, "section_id": 1},
+            )
+            if not person:
+                raise HTTPException(404, f"Student not found: {pid}")
+            if allowed_ids is not None and pid not in allowed_ids:
+                raise HTTPException(403, "Student is not in the selected section or group")
+
+    elif kind == "player" and not is_admin(user):
+        from routers.coach import _coach_visibility_filter
+        roster_ids = set(await db.people.distinct("id", _coach_visibility_filter(user)))
+        for pid in person_ids:
+            if pid not in roster_ids:
+                raise HTTPException(403, "Player is not in your assigned roster")
+
+
 @router.post("/batch")
 async def mark_attendance_batch(payload: AttendanceBatch, user: dict = Depends(get_current_user)):
     perm = _MARK_PERM_BY_KIND.get(payload.kind)
@@ -389,6 +441,13 @@ async def mark_attendance_batch(payload: AttendanceBatch, user: dict = Depends(g
         _, group = await resolve_section_group(section_id)
     if payload.kind == "student" and not group:
         raise HTTPException(400, "Section or group is required for student attendance")
+    await _validate_batch_marks(
+        user,
+        kind=payload.kind,
+        marks=payload.marks,
+        section_id=section_id,
+        group=group,
+    )
     from routers.parents import push_parent_notification
     records = []
     today_str = now_utc().strftime("%Y-%m-%d")
