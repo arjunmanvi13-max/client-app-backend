@@ -46,9 +46,9 @@ class TestAuthMeCanManage:
         d = r.json()
         assert d["can_manage"] == ["player"]
 
-    def test_teacher_default_student_only(self):
+    def test_teacher_default_no_manage(self):
         r = requests.get(f"{API}/auth/me", headers=_hdr("teacher"))
-        assert r.json()["can_manage"] == ["student"]
+        assert r.json()["can_manage"] == []
 
     def test_warden_no_default(self):
         r = requests.get(f"{API}/auth/me", headers=_hdr("warden"))
@@ -109,7 +109,7 @@ class TestUserCRUD:
         # use the coach-created earlier
         assert TestUserCRUD.created_ids
         target = TestUserCRUD.created_ids[0]
-        # teacher CAN edit a coach? teacher.can_manage=['student']; target.role='coach' => non-admin, kind=coach not allowed
+        # teacher cannot edit coaches (no can_manage rights)
         r = requests.patch(f"{API}/users/{target}", headers=_hdr("teacher"),
                             json={"name": "Hacked", "role": "admin"})
         assert r.status_code == 403
@@ -163,11 +163,10 @@ class TestPeopleCRUD:
         r = requests.post(f"{API}/people", headers=_hdr("coach"), json=payload)
         assert r.status_code == 403
 
-    def test_teacher_create_student_ok(self):
+    def test_teacher_create_student_forbidden(self):
         payload = {"name": "TEST Stu C", "kind": "student", "group": "10-X", "organization": "PWS"}
         r = requests.post(f"{API}/people", headers=_hdr("teacher"), json=payload)
-        assert r.status_code == 200, r.text
-        TestPeopleCRUD.created_ids.append(r.json()["id"])
+        assert r.status_code == 403
 
     def test_admin_patch_player(self):
         pid = TestPeopleCRUD.created_ids[0]

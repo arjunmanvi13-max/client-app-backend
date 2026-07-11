@@ -1,7 +1,7 @@
 import uuid
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
-from core import db, TaskCreate, TaskUpdate, CommentIn, get_current_user, now_utc
+from core import db, TaskCreate, TaskUpdate, CommentIn, get_current_user, now_utc, notify_user
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -27,16 +27,13 @@ async def create_task(payload: TaskCreate, user: dict = Depends(get_current_user
     }
     await db.tasks.insert_one(doc)
     for aid in payload.assignee_ids:
-        await db.notifications.insert_one({
-            "id": str(uuid.uuid4()),
-            "user_id": aid,
-            "type": "task_assigned",
-            "title": "New task assigned",
-            "message": payload.title,
-            "ref_id": doc["id"],
-            "read": False,
-            "created_at": now_utc().isoformat(),
-        })
+        await notify_user(
+            aid,
+            ntype="task_assigned",
+            title="New task assigned",
+            message=payload.title,
+            ref_id=doc["id"],
+        )
     doc.pop("_id", None)
     return doc
 

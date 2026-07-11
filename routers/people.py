@@ -1,14 +1,62 @@
 import uuid
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
-from core import db, PersonCreate, PersonUpdate, get_current_user, assert_can_manage, assert_player_action, is_admin, is_sports_admin, is_super_admin, now_utc
+from core import db, PersonCreate, PersonUpdate, get_current_user, assert_can_manage, assert_player_action, assert_perm, get_perm, is_admin, is_sports_admin, is_super_admin, now_utc
+from routers.academic import (
+    resolve_section_group,
+    assert_teacher_section_access,
+    assigned_section_ids_for_teacher,
+)
 
 router = APIRouter(prefix="/people", tags=["people"])
+
+_VIEW_PERM_BY_KIND = {"student": "view_students", "player": "view_players", "staff": "view_staff"}
+_MARK_PERM_BY_KIND = {"student": "mark_student_attendance", "player": "mark_player_attendance", "staff": "mark_staff_attendance"}
+
+
+def _can_list_kind(user: dict, kind: str) -> bool:
+    if is_admin(user):
+        return True
+    if get_perm(user, _VIEW_PERM_BY_KIND.get(kind, "")):
+        return True
+    if get_perm(user, _MARK_PERM_BY_KIND.get(kind, "")):
+        return True
+    return kind in (user.get("can_manage") or [])
+
+
+def _assert_can_list_kind(user: dict, kind: str) -> None:
+    if not _can_list_kind(user, kind):
+        raise HTTPException(403, f"You don't have permission to view {kind} records")
+
+
+def _assert_can_add_kind(user: dict, kind: str) -> None:
+    if is_admin(user):
+        return
+    if kind == "student":
+        assert_perm(user, "add_students")
+        return
+    if kind == "player":
+        assert_player_action(user, "add")
+        return
+    assert_can_manage(user, kind)
+
+
+def _assert_can_edit_kind(user: dict, kind: str) -> None:
+    if is_admin(user):
+        return
+    if kind == "student":
+        assert_perm(user, "edit_students")
+        return
+    if kind == "player":
+        assert_player_action(user, "edit")
+        return
+    assert_can_manage(user, kind)
 
 @router.get("")
 async def list_people(
     kind: Optional[str] = None,
     group: Optional[str] = None,
+    section_id: Optional[str] = None,
     sport: Optional[str] = None,
     resident: Optional[bool] = None,
     slot: Optional[str] = None,
@@ -20,9 +68,19 @@ async def list_people(
     include_deactivated: bool = False,
     user: dict = Depends(get_current_user),
 ):
+    if kind:
+        _assert_can_list_kind(user, kind)
+    if section_id and kind == "student":
+        await assert_teacher_section_access(user, section_id)
     q = {}
     if kind: q["kind"] = kind
-    if group: q["group"] = group
+    if section_id:
+        q["section_id"] = section_id
+    elif group:
+        q["group"] = group
+    elif kind == "student" and user.get("role") == "teacher":
+        assigned = await assigned_section_ids_for_teacher(user["id"])
+        q["section_id"] = {"$in": assigned} if assigned else {"$in": []}
     if sport: q["sport"] = sport
     if resident is not None: q["is_resident"] = resident
     if slot: q["slot"] = slot
@@ -43,7 +101,8 @@ async def list_people(
     return await db.people.find(q, {"_id": 0}).sort("name", 1).to_list(1000)
 
 @router.get("/groups")
-async def list_groups(kind: str, _user: dict = Depends(get_current_user)):
+async def list_groups(kind: str, user: dict = Depends(get_current_user)):
+    _assert_can_list_kind(user, kind)
     groups = await db.people.distinct("group", {"kind": kind})
     return {"kind": kind, "groups": sorted([g for g in groups if g])}
 
@@ -126,8 +185,12 @@ async def create_person(payload: PersonCreate, user: dict = Depends(get_current_
         if not payload.date_of_admission:
             raise HTTPException(400, "Date of admission is required for players")
     else:
-        assert_can_manage(user, payload.kind)
+        _assert_can_add_kind(user, payload.kind)
     doc = {"id": str(uuid.uuid4()), **payload.dict(), "created_at": now_utc().isoformat()}
+    if payload.kind == "student" and payload.section_id:
+        sid, label = await resolve_section_group(payload.section_id)
+        doc["section_id"] = sid
+        doc["group"] = label
     # Auto-compute age from DOB if provided
     if doc.get("dob"):
         derived = _age_from_dob(doc["dob"])
@@ -174,8 +237,12 @@ async def update_person(person_id: str, payload: PersonUpdate, user: dict = Depe
     if target["kind"] == "player":
         assert_player_action(user, "edit")
     else:
-        assert_can_manage(user, target["kind"])
+        _assert_can_edit_kind(user, target["kind"])
     upd = payload.dict(exclude_none=True)
+    if target["kind"] == "student" and upd.get("section_id"):
+        sid, label = await resolve_section_group(upd["section_id"])
+        upd["section_id"] = sid
+        upd["group"] = label
     # Only Super Admin can update fee overrides post-admission
     if not is_super_admin(user):
         upd.pop("monthly_fee_override", None)
@@ -239,7 +306,7 @@ async def delete_person(person_id: str, user: dict = Depends(get_current_user)):
         if not is_admin(user):
             assert_player_action(user, "edit")
     else:
-        assert_can_manage(user, target["kind"])
+        _assert_can_edit_kind(user, target["kind"])
     await db.people.delete_one({"id": person_id})
     return {"ok": True}
 

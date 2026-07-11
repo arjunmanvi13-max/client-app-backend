@@ -6,7 +6,7 @@ import uuid
 from typing import Optional, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from core import db, get_current_user, is_admin, is_super_admin, get_perm, now_utc
+from core import db, get_current_user, is_admin, is_super_admin, get_perm, now_utc, notify_role, notify_user
 
 router = APIRouter(prefix="/deactivation-requests", tags=["deactivation"])
 
@@ -49,16 +49,13 @@ async def create_request(payload: CreateReq, user: dict = Depends(get_current_us
     }
     await db.deactivation_requests.insert_one(doc)
     # Notify super admin
-    await db.notifications.insert_one({
-        "id": str(uuid.uuid4()),
-        "audience_role": "super_admin",
-        "kind": "deactivation_request",
-        "title": "Deactivation request",
-        "body": f"{user['name']} requested deactivation of {player['name']}",
-        "at": now_utc().isoformat(),
-        "read": False,
-        "ref_id": doc["id"],
-    })
+    await notify_role(
+        "super_admin",
+        ntype="deactivation_request",
+        title="Deactivation request",
+        message=f"{user['name']} requested deactivation of {player['name']}",
+        ref_id=doc["id"],
+    )
     doc.pop("_id", None)
     return doc
 
@@ -99,16 +96,13 @@ async def approve(req_id: str, payload: DecisionIn, user: dict = Depends(get_cur
     # Apply player deactivation
     await db.people.update_one({"id": req["player_id"]}, {"$set": {"status": "deactivated"}})
     # Notify requester
-    await db.notifications.insert_one({
-        "id": str(uuid.uuid4()),
-        "audience_user": req["requested_by_id"],
-        "kind": "deactivation_approved",
-        "title": "Deactivation approved",
-        "body": f"{req['player_name']} has been deactivated by {user['name']}",
-        "at": now_utc().isoformat(),
-        "read": False,
-        "ref_id": req_id,
-    })
+    await notify_user(
+        req["requested_by_id"],
+        ntype="deactivation_approved",
+        title="Deactivation approved",
+        message=f"{req['player_name']} has been deactivated by {user['name']}",
+        ref_id=req_id,
+    )
     return await db.deactivation_requests.find_one({"id": req_id}, {"_id": 0})
 
 
@@ -127,14 +121,11 @@ async def reject(req_id: str, payload: DecisionIn, user: dict = Depends(get_curr
         "decided_at": now_utc().isoformat(),
         "decision_note": payload.note,
     }})
-    await db.notifications.insert_one({
-        "id": str(uuid.uuid4()),
-        "audience_user": req["requested_by_id"],
-        "kind": "deactivation_rejected",
-        "title": "Deactivation rejected",
-        "body": f"{req['player_name']} remains active",
-        "at": now_utc().isoformat(),
-        "read": False,
-        "ref_id": req_id,
-    })
+    await notify_user(
+        req["requested_by_id"],
+        ntype="deactivation_rejected",
+        title="Deactivation rejected",
+        message=f"{req['player_name']} remains active",
+        ref_id=req_id,
+    )
     return await db.deactivation_requests.find_one({"id": req_id}, {"_id": 0})

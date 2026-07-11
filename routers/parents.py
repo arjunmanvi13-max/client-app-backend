@@ -3,11 +3,10 @@
 A parent user has `linked_person_ids: [<student/player ids>]` on their User doc.
 All endpoints scope strictly to the wards (children) linked to the calling parent.
 """
-import uuid
 from datetime import timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
-from core import db, get_current_user, now_utc
+from core import db, get_current_user, now_utc, normalize_notification, notification_filter_for_user, notify_user
 
 router = APIRouter(prefix="/parent", tags=["parent"])
 
@@ -165,7 +164,12 @@ async def _compute_alerts_for_parent(user: dict) -> list[dict]:
 async def parent_alerts(user: dict = Depends(get_current_user)):
     _ensure_parent(user)
     # Merge stored notifications (e.g., pushed when absent) + computed alerts.
-    stored = await db.notifications.find({"user_id": user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    stored_raw = await db.notifications.find(
+        notification_filter_for_user(user),
+        {"_id": 0},
+    ).to_list(100)
+    stored = [normalize_notification(n) for n in stored_raw]
+    stored.sort(key=lambda n: n.get("created_at") or "", reverse=True)
     computed = await _compute_alerts_for_parent(user)
     return {"stored": stored, "computed": computed, "count": len(stored) + len(computed)}
 
@@ -181,18 +185,12 @@ async def push_parent_notification(person_id: str, title: str, body: str, ntype:
     parent_ids = person.get("parent_user_ids") or []
     if not parent_ids:
         return 0
-    docs = []
     for pid in parent_ids:
-        docs.append({
-            "id": str(uuid.uuid4()),
-            "user_id": pid,
-            "type": ntype,
-            "title": title,
-            "body": body,
-            "person_id": person_id,
-            "read": False,
-            "created_at": now_utc().isoformat(),
-        })
-    if docs:
-        await db.notifications.insert_many(docs)
-    return len(docs)
+        await notify_user(
+            pid,
+            ntype=ntype,
+            title=title,
+            message=body,
+            ref_id=person_id,
+        )
+    return len(parent_ids)

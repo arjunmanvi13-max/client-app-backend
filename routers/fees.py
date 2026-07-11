@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from typing import Optional, Literal, List
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from core import db, get_current_user, is_admin, is_super_admin, assert_perm, now_utc, get_perm
+from core import db, get_current_user, is_admin, is_super_admin, assert_perm, now_utc, get_perm, notify_role
 
 router = APIRouter(prefix="/fees", tags=["fees"])
 
@@ -152,15 +152,12 @@ async def auto_create_fees_for_player(player: dict) -> List[dict]:
             created.append(tfee)
     # Notify super admin
     if created:
-        await db.notifications.insert_one({
-            "id": str(uuid.uuid4()),
-            "audience_role": "super_admin",
-            "kind": "fees_created",
-            "title": "New player fees created",
-            "body": f"{player['name']} ({player.get('centre')}/{sport}/{category}) — {len(created)} fee(s) auto-generated",
-            "at": now_utc().isoformat(),
-            "read": False,
-        })
+        await notify_role(
+            "super_admin",
+            ntype="fees_created",
+            title="New player fees created",
+            message=f"{player['name']} ({player.get('centre')}/{sport}/{category}) — {len(created)} fee(s) auto-generated",
+        )
     return created
 
 
@@ -614,15 +611,12 @@ async def create_adhoc_fee(payload: AdHocFeeIn, user: dict = Depends(get_current
     }
     await db.fees.insert_one(rec)
     # Notify super admin audit feed
-    await db.notifications.insert_one({
-        "id": str(uuid.uuid4()),
-        "audience_role": "super_admin",
-        "kind": "fee_adhoc_created",
-        "title": f"Ad-hoc fee: {payload.fee_type}",
-        "body": f"{player['name']} · ₹{payload.amount:,} · due {payload.due_date} · by {user['name']}",
-        "at": now_utc().isoformat(),
-        "read": False,
-    })
+    await notify_role(
+        "super_admin",
+        ntype="fee_adhoc_created",
+        title=f"Ad-hoc fee: {payload.fee_type}",
+        message=f"{player['name']} · ₹{payload.amount:,} · due {payload.due_date} · by {user['name']}",
+    )
     return await db.fees.find_one({"id": rec["id"]}, {"_id": 0})
 
 

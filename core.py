@@ -116,7 +116,7 @@ PERMISSION_KEYS = [
     "add_players", "edit_players", "toggle_player_status",
     "add_students", "edit_students",
     # Admin
-    "access_reports", "dashboard_access", "lifecycle_dashboard", "manage_users",
+    "access_reports", "dashboard_access", "lifecycle_dashboard", "manage_users", "manage_academic_structure",
     # Fees & Bulk
     "view_fees", "collect_fees", "edit_fees", "bulk_upload", "approve_deactivation",
 ]
@@ -125,7 +125,7 @@ PERMISSION_GROUPS = {
     "Data Access": ["view_students", "view_players", "view_staff"],
     "Attendance": ["mark_student_attendance", "mark_player_attendance", "mark_staff_attendance", "mark_coach_attendance"],
     "Management": ["add_players", "edit_players", "toggle_player_status", "add_students", "edit_students"],
-    "Admin": ["access_reports", "dashboard_access", "lifecycle_dashboard", "manage_users"],
+    "Admin": ["access_reports", "dashboard_access", "lifecycle_dashboard", "manage_users", "manage_academic_structure"],
     "Fees & Bulk": ["view_fees", "collect_fees", "edit_fees", "bulk_upload", "approve_deactivation"],
 }
 
@@ -146,6 +146,7 @@ def default_permissions(role: str, coach_type: Optional[str] = None) -> dict:
             "view_students": True, "view_staff": True,
             "mark_student_attendance": True, "mark_staff_attendance": True,
             "add_students": True, "edit_students": True,
+            "manage_academic_structure": True,
             "access_reports": True, "dashboard_access": True, "lifecycle_dashboard": True,
         })
     elif role == "coach":
@@ -166,7 +167,6 @@ def default_permissions(role: str, coach_type: Optional[str] = None) -> dict:
             })
     elif role == "teacher":
         p.update({
-            "view_students": True,
             "mark_student_attendance": True,
             "dashboard_access": True,
         })
@@ -285,6 +285,74 @@ def assert_player_action(user: dict, action: str) -> None:
     if not coach_can(user, action):
         raise HTTPException(403, f"You don't have permission to {action} players")
 
+
+# ------------------ Notifications ------------------
+def normalize_notification(doc: dict) -> dict:
+    """Return a consistent API shape; supports legacy body/at/kind fields."""
+    out = {k: v for k, v in doc.items() if k != "_id"}
+    if not out.get("message") and out.get("body"):
+        out["message"] = out["body"]
+    if not out.get("created_at") and out.get("at"):
+        out["created_at"] = out["at"]
+    if not out.get("type") and out.get("kind"):
+        out["type"] = out["kind"]
+    return out
+
+
+def notification_filter_for_user(user: dict) -> dict:
+    """Mongo filter matching notifications visible to this user (incl. legacy role fan-out)."""
+    uid = user["id"]
+    role = user.get("role")
+    clauses: list[dict] = [{"user_id": uid}]
+    if role:
+        clauses.append({"audience_role": role, "user_id": {"$exists": False}})
+    clauses.append({"audience_user": uid})
+    return {"$or": clauses}
+
+
+async def notify_user(
+    user_id: str,
+    *,
+    ntype: str,
+    title: str,
+    message: str,
+    ref_id: Optional[str] = None,
+) -> str:
+    doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "type": ntype,
+        "title": title,
+        "message": message,
+        "read": False,
+        "created_at": now_utc().isoformat(),
+    }
+    if ref_id:
+        doc["ref_id"] = ref_id
+    await db.notifications.insert_one(doc)
+    return doc["id"]
+
+
+async def notify_role(
+    role: str,
+    *,
+    ntype: str,
+    title: str,
+    message: str,
+    ref_id: Optional[str] = None,
+) -> int:
+    """Fan out one notification per active user with the given role."""
+    users = await db.users.find(
+        {"role": role, "status": {"$ne": "deactivated"}},
+        {"id": 1},
+    ).to_list(500)
+    count = 0
+    for u in users:
+        await notify_user(u["id"], ntype=ntype, title=title, message=message, ref_id=ref_id)
+        count += 1
+    return count
+
+
 def public_user(u: dict) -> dict:
     perms = u.get("permissions") or default_permissions(u.get("role", ""), u.get("coach_type"))
     return {
@@ -367,6 +435,7 @@ class PersonCreate(BaseModel):
     name: str
     kind: Literal["student", "player", "teacher", "coach", "staff"]
     group: Optional[str] = None
+    section_id: Optional[str] = None
     sport: Optional[str] = None
     organization: Literal["PWS", "ALPHA", "BOTH"] = "PWS"
     is_resident: bool = False
@@ -392,6 +461,7 @@ class PersonCreate(BaseModel):
 class PersonUpdate(BaseModel):
     name: Optional[str] = None
     group: Optional[str] = None
+    section_id: Optional[str] = None
     sport: Optional[str] = None
     organization: Optional[Literal["PWS", "ALPHA", "BOTH"]] = None
     is_resident: Optional[bool] = None
@@ -440,6 +510,7 @@ class AttendanceBatch(BaseModel):
     date: str
     kind: Literal["student", "player", "teacher", "coach", "staff"]
     group: Optional[str] = None
+    section_id: Optional[str] = None
     sport: Optional[str] = None
     session: Optional[str] = None
     marks: List[AttendanceMark]

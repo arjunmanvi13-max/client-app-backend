@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends
-from core import db, get_current_user, now_utc
+from core import db, get_current_user, now_utc, notification_filter_for_user
 
 router = APIRouter(tags=["dashboard"])
 
@@ -15,7 +15,9 @@ async def dashboard(user: dict = Depends(get_current_user)):
         "status": {"$nin": ["completed", "reviewed"]},
         "deadline": {"$lt": now_utc().isoformat()},
     })
-    unread = await db.notifications.count_documents({"user_id": user["id"], "read": False})
+    unread = await db.notifications.count_documents({
+        "$and": [notification_filter_for_user(user), {"read": False}],
+    })
     today = now_utc().strftime("%Y-%m-%d")
 
     extras = {}

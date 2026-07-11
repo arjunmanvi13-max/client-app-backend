@@ -2,9 +2,15 @@ import uuid
 from typing import Optional, List, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from core import db, AttendanceBatch, get_current_user, now_utc, is_admin
+from core import db, AttendanceBatch, get_current_user, now_utc, is_admin, assert_perm
 
 router = APIRouter(prefix="/attendance", tags=["attendance"])
+
+_MARK_PERM_BY_KIND = {
+    "student": "mark_student_attendance",
+    "player": "mark_player_attendance",
+    "staff": "mark_staff_attendance",
+}
 
 
 # -------- Staff Attendance (default-present workflow) --------
@@ -244,6 +250,18 @@ async def list_coach_attendance(date: Optional[str] = None, user: dict = Depends
 
 @router.post("/batch")
 async def mark_attendance_batch(payload: AttendanceBatch, user: dict = Depends(get_current_user)):
+    perm = _MARK_PERM_BY_KIND.get(payload.kind)
+    if not perm:
+        raise HTTPException(400, "Invalid attendance kind")
+    if not is_admin(user):
+        assert_perm(user, perm)
+    group = payload.group
+    if payload.kind == "student" and payload.section_id:
+        from routers.academic import resolve_section_group, assert_teacher_section_access
+        await assert_teacher_section_access(user, payload.section_id)
+        _, group = await resolve_section_group(payload.section_id)
+    if payload.kind == "student" and not group:
+        raise HTTPException(400, "Section or group is required for student attendance")
     from routers.parents import push_parent_notification
     records = []
     today_str = now_utc().strftime("%Y-%m-%d")
@@ -252,7 +270,7 @@ async def mark_attendance_batch(payload: AttendanceBatch, user: dict = Depends(g
             "id": str(uuid.uuid4()),
             "date": payload.date,
             "kind": payload.kind,
-            "group": payload.group,
+            "group": group,
             "sport": payload.sport,
             "session": payload.session,
             "person_id": m.person_id,
@@ -265,7 +283,7 @@ async def mark_attendance_batch(payload: AttendanceBatch, user: dict = Depends(g
             {
                 "date": payload.date,
                 "kind": payload.kind,
-                "group": payload.group,
+                "group": group,
                 "session": payload.session,
                 "person_id": m.person_id,
             },
@@ -292,8 +310,12 @@ async def list_attendance(
     kind: Optional[str] = None,
     group: Optional[str] = None,
     person_id: Optional[str] = None,
-    _user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user),
 ):
+    if kind and not is_admin(user):
+        perm = _MARK_PERM_BY_KIND.get(kind)
+        if perm:
+            assert_perm(user, perm)
     q = {}
     if date: q["date"] = date
     if kind: q["kind"] = kind

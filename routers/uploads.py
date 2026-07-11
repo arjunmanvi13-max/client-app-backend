@@ -10,7 +10,7 @@ import uuid
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import PlainTextResponse
-from core import db, get_current_user, get_perm, now_utc
+from core import db, get_current_user, get_perm, now_utc, notify_role
 from routers.fees import auto_create_fees_for_player
 
 router = APIRouter(prefix="/bulk-upload", tags=["bulk-upload"])
@@ -179,14 +179,11 @@ async def upload_players(file: UploadFile = File(...), user: dict = Depends(get_
             created = await auto_create_fees_for_player(d)
             fees_created += len(created)
         # Notify super admin (single bulk)
-        await db.notifications.insert_one({
-            "id": str(uuid.uuid4()),
-            "audience_role": "super_admin",
-            "kind": "bulk_upload_completed",
-            "title": "Bulk upload completed",
-            "body": f"{user['name']} uploaded {len(docs)} players · {fees_created} fees auto-generated",
-            "at": now_utc().isoformat(),
-            "read": False,
-        })
+        await notify_role(
+            "super_admin",
+            ntype="bulk_upload_completed",
+            title="Bulk upload completed",
+            message=f"{user['name']} uploaded {len(docs)} players · {fees_created} fees auto-generated",
+        )
         return {"status": "ok", "players_created": len(docs), "fees_created": fees_created, "errors": []}
     return {"status": "ok", "players_created": 0, "fees_created": 0, "errors": []}

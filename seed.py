@@ -30,7 +30,7 @@ ROLE_DEFAULT_CAN_MANAGE = {
     "principal": ["student", "teacher", "staff"],
     "vice_principal": ["student", "teacher", "staff"],
     "coach": ["player"],
-    "teacher": ["student"],
+    "teacher": [],
 }
 
 ROLE_DEFAULT_COACH_PERMS = {
@@ -125,6 +125,8 @@ async def seed_data():
                     patch["organization"] = "ALPHA"
                 if existing.get("department") != "ALPHA Operations":
                     patch["department"] = "ALPHA Operations"
+            if u["role"] == "teacher" and existing.get("can_manage") != []:
+                patch["can_manage"] = []
             if patch:
                 await db.users.update_one({"email": u["email"]}, {"$set": patch})
 
@@ -179,6 +181,8 @@ async def seed_data():
                 "organization": "PWS",
                 "is_resident": cls == "9-A",
             })
+
+    await _seed_academic_structure()
 
     sample_players = [
         # (name, batch/group, sport, centre, player_type, skill, slot)
@@ -304,4 +308,80 @@ async def seed_data():
                 "completion_remark": None,
                 "proof_url": None,
                 "comments": [],
+            })
+
+
+async def _seed_academic_structure():
+    """Academic year, grades, sections, teacher assignment, student section_id backfill."""
+    year = await db.academic_years.find_one({"name": "2025-26", "entity_id": "pws"})
+    if not year:
+        year = {
+            "id": str(uuid.uuid4()),
+            "name": "2025-26",
+            "entity_id": "pws",
+            "status": "open",
+            "start_date": "2025-04-01",
+            "end_date": "2026-03-31",
+            "created_at": now_utc().isoformat(),
+        }
+        await db.academic_years.insert_one(year)
+    year_id = year["id"]
+
+    grade_ids: dict[str, str] = {}
+    for gname, sort in [("9", 9), ("10", 10)]:
+        existing = await db.grades.find_one({"academic_year_id": year_id, "name": gname})
+        if existing:
+            grade_ids[gname] = existing["id"]
+        else:
+            gdoc = {
+                "id": str(uuid.uuid4()),
+                "academic_year_id": year_id,
+                "name": gname,
+                "entity_id": "pws",
+                "sort_order": sort,
+                "created_at": now_utc().isoformat(),
+            }
+            await db.grades.insert_one(gdoc)
+            grade_ids[gname] = gdoc["id"]
+
+    section_ids: dict[str, str] = {}
+    for gname, sname, label in [("9", "A", "9-A"), ("10", "B", "10-B")]:
+        existing = await db.sections.find_one({"academic_year_id": year_id, "label": label})
+        if existing:
+            section_ids[label] = existing["id"]
+        else:
+            sdoc = {
+                "id": str(uuid.uuid4()),
+                "academic_year_id": year_id,
+                "grade_id": grade_ids[gname],
+                "grade_name": gname,
+                "name": sname,
+                "label": label,
+                "entity_id": "pws",
+                "created_at": now_utc().isoformat(),
+            }
+            await db.sections.insert_one(sdoc)
+            section_ids[label] = sdoc["id"]
+
+    for label, sid in section_ids.items():
+        await db.people.update_many(
+            {"kind": "student", "group": label},
+            {"$set": {"section_id": sid}},
+        )
+
+    teacher = await db.users.find_one({"email": "teacher@prarambhika.com", "role": "teacher"})
+    nine_a = section_ids.get("9-A")
+    if teacher and nine_a:
+        if not await db.teacher_section_assignments.find_one({
+            "teacher_user_id": teacher["id"],
+            "section_id": nine_a,
+            "academic_year_id": year_id,
+        }):
+            await db.teacher_section_assignments.insert_one({
+                "id": str(uuid.uuid4()),
+                "teacher_user_id": teacher["id"],
+                "section_id": nine_a,
+                "academic_year_id": year_id,
+                "created_at": now_utc().isoformat(),
+                "created_by": "seed",
             })
