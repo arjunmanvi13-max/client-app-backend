@@ -1,4 +1,4 @@
-"""Coach assessment MVP — role access and published parent view."""
+"""Player assessment — sport-specific technical sub-scores, player-type setup."""
 import os
 import datetime
 import pytest
@@ -18,6 +18,11 @@ LEGACY_CREDS = {
     "admin": ("admin@pws-alpha.com", "Admin@123"),
 }
 TOKENS = {}
+
+CRICKET_TECH = {
+    "batting": 7, "bowling": 6, "fielding": 8,
+    "wicket_keeping": 6, "running_between_wickets": 7, "cricket_iq": 8,
+}
 
 
 def _login(role):
@@ -39,100 +44,109 @@ def _hdr(role):
 
 
 @pytest.mark.integration
-class TestCoachAssessmentMVP:
-    def test_coach_lists_definitions(self):
-        r = requests.get(
-            f"{API}/coach-assessments/definitions",
-            headers=_hdr("coach"),
-            params={"sport": "Cricket", "centre": "Balua"},
-            timeout=15,
-        )
+class TestPlayerAssessment:
+    def test_metadata_includes_player_types_and_technical(self):
+        r = requests.get(f"{API}/coach-assessments/metadata", headers=_hdr("coach"), timeout=15)
         assert r.status_code == 200, r.text
-        assert isinstance(r.json(), list)
+        data = r.json()
+        assert "Daily" in data.get("player_types", [])
+        assert len(data.get("cricket_technical", [])) == 6
+        assert data.get("score_scale", [])[0]["label"] == "Beginner"
 
-    def test_coach_cannot_access_academic_marks(self):
-        r = requests.get(f"{API}/marks/sections", headers=_hdr("coach"), timeout=15)
-        assert r.status_code == 403, r.text
-
-    def test_coach_grid_scoped_players(self):
-        defs = requests.get(f"{API}/coach-assessments/definitions", headers=_hdr("coach"), timeout=15)
-        if defs.status_code != 200 or not defs.json():
-            pytest.skip("No assessment definitions")
-        def_id = defs.json()[0]["id"]
+    def test_grid_requires_player_type(self):
         today = datetime.date.today().isoformat()
         r = requests.get(
             f"{API}/coach-assessments/grid",
             headers=_hdr("coach"),
-            params={"definition_id": def_id, "date": today, "centre": "Balua", "sport": "Cricket", "slot": "Morning"},
+            params={
+                "centre": "Balua",
+                "sport": "Cricket",
+                "player_type": "Daily",
+                "session": "Morning",
+                "assessment_stage": "week_1_baseline",
+                "date": today,
+            },
             timeout=15,
         )
         assert r.status_code == 200, r.text
-        assert "players" in r.json()
+        assert r.json().get("schema_version") == 3
 
-    def test_coach_save_with_required_fields(self):
-        defs = requests.get(f"{API}/coach-assessments/definitions", headers=_hdr("coach"), timeout=15)
+    def test_daily_requires_session(self):
+        today = datetime.date.today().isoformat()
+        r = requests.get(
+            f"{API}/coach-assessments/grid",
+            headers=_hdr("coach"),
+            params={
+                "centre": "Balua",
+                "sport": "Cricket",
+                "player_type": "Daily",
+                "assessment_stage": "week_1_baseline",
+                "date": today,
+            },
+            timeout=15,
+        )
+        assert r.status_code == 400, r.text
+
+    def test_save_draft_with_technical_sub_scores(self):
         players = requests.get(
             f"{API}/coach/players",
             headers=_hdr("coach"),
             params={"centre": "Balua", "sport": "Cricket", "slot": "Morning"},
             timeout=15,
         )
-        if defs.status_code != 200 or not defs.json() or players.status_code != 200 or not players.json().get("players"):
-            pytest.skip("No definitions or players")
-        defn = next((d for d in defs.json() if d.get("assessment_type") == "score"), defs.json()[0])
+        if players.status_code != 200 or not players.json().get("players"):
+            pytest.skip("No players")
         player = players.json()["players"][0]
         today = datetime.date.today().isoformat()
         r = requests.post(
             f"{API}/coach-assessments/batch",
             headers=_hdr("coach"),
             json={
-                "definition_id": defn["id"],
-                "date": today,
                 "centre": "Balua",
                 "sport": "Cricket",
-                "slot": "Morning",
+                "player_type": "Daily",
+                "session": "Morning",
+                "assessment_stage": "week_4_progress",
+                "date": today,
                 "status": "draft",
-                "entries": [{"player_id": player["id"], "score": 65, "coach_remark": "Good effort"}],
+                "entries": [{
+                    "player_id": player["id"],
+                    "technical_sub": CRICKET_TECH,
+                    "strength_conditioning": 7,
+                    "game_awareness": 8,
+                    "mental_attributes": 7,
+                    "training_attitude": 9,
+                    "coach_remark": "Solid session",
+                }],
             },
             timeout=15,
         )
         assert r.status_code == 200, r.text
-        grid = requests.get(
-            f"{API}/coach-assessments/grid",
-            headers=_hdr("coach"),
-            params={"definition_id": defn["id"], "date": today, "centre": "Balua", "sport": "Cricket", "slot": "Morning"},
-            timeout=15,
-        )
-        row = next((p for p in grid.json().get("players", []) if p["player_id"] == player["id"]), None)
-        assert row and row.get("score") == 65
-        assert row.get("coach_remark") == "Good effort"
 
-    def test_score_exceeds_max_rejected(self):
-        defs = requests.get(f"{API}/coach-assessments/definitions", headers=_hdr("coach"), timeout=15)
+    def test_finalize_requires_all_scores(self):
         players = requests.get(f"{API}/coach/players", headers=_hdr("coach"), params={"centre": "Balua", "sport": "Cricket", "slot": "Morning"}, timeout=15)
-        if not defs.json() or not players.json().get("players"):
-            pytest.skip("No data")
-        defn = next((d for d in defs.json() if d.get("max_score")), None)
-        if not defn:
-            pytest.skip("No scored definition")
+        if not players.json().get("players"):
+            pytest.skip("No players")
         player = players.json()["players"][0]
+        today = datetime.date.today().isoformat()
         r = requests.post(
             f"{API}/coach-assessments/batch",
             headers=_hdr("coach"),
             json={
-                "definition_id": defn["id"],
-                "date": datetime.date.today().isoformat(),
                 "centre": "Balua",
                 "sport": "Cricket",
-                "slot": "Morning",
-                "status": "draft",
-                "entries": [{"player_id": player["id"], "score": defn["max_score"] + 50}],
+                "player_type": "Daily",
+                "session": "Morning",
+                "assessment_stage": "week_8_12_final",
+                "date": today,
+                "status": "final",
+                "entries": [{"player_id": player["id"], "technical_sub": {"batting": 5}, "coach_remark": "Incomplete"}],
             },
             timeout=15,
         )
-        assert r.status_code == 400
+        assert r.status_code == 400, r.text
 
-    def test_parent_published_coach_assessments(self):
+    def test_parent_published_assessments(self):
         wards = requests.get(f"{API}/parent/wards", headers=_hdr("parent_alpha"), timeout=15)
         if wards.status_code != 200 or not wards.json():
             pytest.skip("No ALPHA parent wards")
@@ -142,19 +156,19 @@ class TestCoachAssessmentMVP:
         wid = player_wards[0]["id"]
         r = requests.get(f"{API}/parent/coach-assessments/{wid}", headers=_hdr("parent_alpha"), timeout=15)
         assert r.status_code == 200, r.text
-        for a in r.json().get("assessments", []):
-            assert a.get("status") == "published"
 
-    def test_admin_create_definition(self):
+    def test_admin_publish_batch(self):
+        today = datetime.date.today().isoformat()
         r = requests.post(
-            f"{API}/coach-assessments/definitions",
+            f"{API}/coach-assessments/publish",
             headers=_hdr("admin"),
             json={
-                "name": f"Test Def {datetime.date.today().isoformat()}",
-                "assessment_type": "rating",
-                "sport": "Cricket",
                 "centre": "Balua",
-                "slot": "Morning",
+                "sport": "Cricket",
+                "player_type": "Daily",
+                "session": "Morning",
+                "assessment_stage": "week_1_baseline",
+                "date": today,
             },
             timeout=15,
         )

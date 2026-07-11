@@ -222,15 +222,15 @@ async def coach_dashboard_mvp(user: dict) -> dict:
 
     pending_assessments = 0
     if player_ids:
-        defs = await db.coach_assessment_definitions.find({"entity_id": "alpha"}, {"_id": 0, "id": 1}).to_list(20)
-        for d in defs:
-            filled = await db.player_assessments.count_documents({
-                "definition_id": d["id"],
-                "date": today,
-                "player_id": {"$in": player_ids},
-            })
-            if filled < len(player_ids):
-                pending_assessments += 1
+        complete_today = await db.player_assessments.count_documents({
+            "schema_version": {"$gte": 2},
+            "date": today,
+            "player_id": {"$in": player_ids},
+            "status": {"$in": ["draft", "final", "published"]},
+            "scores.overall_score": {"$ne": None},
+        })
+        if complete_today < len(player_ids):
+            pending_assessments = 1
 
     return {
         "role": "coach",

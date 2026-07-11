@@ -736,79 +736,58 @@ async def _seed_academic_marks():
 
 
 async def _seed_coach_assessments():
-    """Coach assessment definitions and sample published results for ALPHA players."""
-    defs = [
-        ("Batting Technique", "rating", "Cricket", "Balua", "Morning", None),
-        ("Fitness Test", "score", "Cricket", "Balua", "Morning", 100),
-        ("Match Simulation", "test", "Cricket", "Balua", "Evening", 50),
-        ("Dribbling Skills", "rating", "Football", "Balua", "Evening", None),
-    ]
-    def_ids: dict[str, str] = {}
-    for name, atype, sport, centre, slot, max_score in defs:
-        existing = await db.coach_assessment_definitions.find_one({"name": name, "sport": sport})
-        if existing:
-            def_ids[name] = existing["id"]
-        else:
-            doc = {
-                "id": str(uuid.uuid4()),
-                "name": name,
-                "assessment_type": atype,
-                "sport": sport,
-                "centre": centre,
-                "slot": slot,
-                "max_score": max_score,
-                "rating_labels": ["Needs work", "Developing", "Good", "Very good", "Excellent"],
-                "entity_id": "alpha",
-                "created_at": now_utc().isoformat(),
-                "created_by": "seed",
-            }
-            await db.coach_assessment_definitions.insert_one(doc)
-            def_ids[name] = doc["id"]
-
+    """Player assessment samples — five-parameter 1–10 scoring for ALPHA players."""
     karan = await db.people.find_one({"name": "Karan Raj", "kind": "player"})
     aditya = await db.people.find_one({"name": "Aditya Verma", "kind": "player"})
-    fitness_id = def_ids.get("Fitness Test")
-    batting_id = def_ids.get("Batting Technique")
     ts = now_utc().isoformat()
     today = ts[:10]
     for player in [karan, aditya]:
         if not player:
             continue
-        samples = [
-            (fitness_id, "score", 78.0, 100, None, "Strong endurance; work on sprint drills."),
-            (batting_id, "rating", None, None, "Very good", "Improved footwork in nets."),
-        ]
-        for def_id, atype, score, max_s, rating, remark in samples:
-            if not def_id:
-                continue
-            defn = await db.coach_assessment_definitions.find_one({"id": def_id})
-            if not defn:
-                continue
-            if await db.player_assessments.find_one({"player_id": player["id"], "definition_id": def_id, "date": today}):
-                continue
-            await db.player_assessments.insert_one({
-                "id": str(uuid.uuid4()),
-                "player_id": player["id"],
-                "definition_id": def_id,
-                "definition_name": defn["name"],
-                "date": today,
-                "sport": player.get("sport", "Cricket"),
-                "centre": player.get("centre", "Balua"),
-                "slot": player.get("slot", "Morning"),
-                "assessment_type": atype,
-                "score": score,
-                "max_score": max_s or defn.get("max_score"),
-                "rating": rating,
-                "coach_remark": remark,
-                "status": "published",
-                "entity_id": "alpha",
-                "entered_by": "seed",
-                "entered_by_name": "Seed Coach",
-                "entered_at": ts,
-                "published_at": ts,
-                "created_at": ts,
-                "updated_at": ts,
-            })
+        if await db.player_assessments.find_one({
+            "schema_version": 3,
+            "player_id": player["id"],
+            "assessment_stage": "week_1_baseline",
+            "date": today,
+        }):
+            continue
+        await db.player_assessments.insert_one({
+            "id": str(uuid.uuid4()),
+            "player_id": player["id"],
+            "player_name": player["name"],
+            "centre": player.get("centre", "Balua"),
+            "sport": player.get("sport", "Cricket"),
+            "player_type": player.get("player_type", "Daily"),
+            "session": player.get("slot", "Morning"),
+            "slot": player.get("slot", "Morning"),
+            "assessment_stage": "week_1_baseline",
+            "date": today,
+            "scores": {
+                "technical_sub": {
+                    "batting": 7, "bowling": 6, "fielding": 8,
+                    "wicket_keeping": 6, "running_between_wickets": 7, "cricket_iq": 8,
+                },
+                "technical_skill_avg": 7.0,
+                "strength_conditioning": 6,
+                "game_awareness": 8,
+                "mental_attributes": 7,
+                "training_attitude": 9,
+                "overall_score": 7.4,
+            },
+            "coach_remark": "Strong progress in training; keep focusing on match awareness.",
+            "status": "published",
+            "schema_version": 3,
+            "entity_id": "alpha",
+            "saved_by": "seed",
+            "saved_by_name": "Seed Coach",
+            "entered_by": "seed",
+            "entered_by_name": "Seed Coach",
+            "entered_at": ts,
+            "published_at": ts,
+            "published_by": "seed",
+            "created_at": ts,
+            "updated_at": ts,
+        })
 
 
 async def _migrate_entity_foundation():

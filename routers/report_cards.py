@@ -76,7 +76,11 @@ async def _coach_remark_for_student(person: dict, start_date: Optional[str], end
     )
     if not player:
         return None
-    q: dict = {"player_id": player["id"], "status": "published"}
+    q: dict = {
+        "player_id": player["id"],
+        "status": "published",
+        "$or": [{"schema_version": 2}, {"schema_version": {"$exists": False}}],
+    }
     if start_date or end_date:
         dr: dict = {}
         if start_date:
