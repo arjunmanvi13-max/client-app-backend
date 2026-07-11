@@ -1,17 +1,86 @@
+import re
 import uuid
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
-from core import db, PersonCreate, PersonUpdate, get_current_user, assert_can_manage, assert_player_action, assert_perm, get_perm, is_admin, is_sports_admin, is_super_admin, now_utc
+from pymongo.errors import DuplicateKeyError
+from core import db, PersonCreate, PersonUpdate, get_current_user, assert_can_manage, assert_player_action, assert_perm, get_perm, is_admin, is_sports_admin, is_super_admin, now_utc, resolve_user_institution, person_entity_filter, derive_person_entities, assert_person_entity_access, coach_can, logger
 from routers.academic import (
     resolve_section_group,
     assert_teacher_section_access,
     assigned_section_ids_for_teacher,
 )
+from routers.coach import _coach_visibility_filter
 
 router = APIRouter(prefix="/people", tags=["people"])
 
 _VIEW_PERM_BY_KIND = {"student": "view_students", "player": "view_players", "staff": "view_staff"}
 _MARK_PERM_BY_KIND = {"student": "mark_student_attendance", "player": "mark_player_attendance", "staff": "mark_staff_attendance"}
+_EDIT_PERM_BY_KIND = {"student": "edit_students", "player": "edit_players", "staff": "edit_students"}
+_UNIQUE_ID_FIELDS = ("admission_number", "employee_id", "player_id")
+
+
+def _strip_sparse_user_fields(doc: dict) -> dict:
+    """Omit empty mobile/phone so sparse unique indexes are not tripped."""
+    out = dict(doc)
+    for key in ("mobile", "phone"):
+        if key in out and not out[key]:
+            out.pop(key)
+    return out
+
+
+def _assert_teacher_no_student_crud(user: dict, action: str) -> None:
+    if user.get("role") == "teacher":
+        raise HTTPException(403, f"Teachers cannot {action} students")
+
+
+def _can_manage_person_status(user: dict, kind: str) -> bool:
+    if is_admin(user):
+        return True
+    if kind == "student":
+        return get_perm(user, "edit_students")
+    if kind == "player":
+        return get_perm(user, "edit_players") or coach_can(user, "edit")
+    return kind in (user.get("can_manage") or [])
+
+
+def _normalize_guardian_fields(doc: dict) -> dict:
+    """Keep guardian_name and legacy father_name in sync."""
+    if doc.get("guardian_name") and not doc.get("father_name"):
+        doc["father_name"] = doc["guardian_name"]
+    elif doc.get("father_name") and not doc.get("guardian_name"):
+        doc["guardian_name"] = doc["father_name"]
+    return doc
+
+
+async def _assert_unique_ids(doc: dict, exclude_id: Optional[str] = None) -> None:
+    for field in _UNIQUE_ID_FIELDS:
+        val = (doc.get(field) or "").strip()
+        if not val:
+            continue
+        q: dict = {field: val}
+        if exclude_id:
+            q["id"] = {"$ne": exclude_id}
+        if await db.people.find_one(q, {"_id": 1}):
+            label = field.replace("_", " ").title()
+            raise HTTPException(409, f"{label} already exists")
+
+
+def _search_filter(qtext: str) -> dict:
+    rx = re.escape(qtext.strip())
+    if not rx:
+        return {}
+    return {
+        "$or": [
+            {"name": {"$regex": rx, "$options": "i"}},
+            {"admission_number": {"$regex": rx, "$options": "i"}},
+            {"roll_number": {"$regex": rx, "$options": "i"}},
+            {"employee_id": {"$regex": rx, "$options": "i"}},
+            {"player_id": {"$regex": rx, "$options": "i"}},
+            {"mobile": {"$regex": rx, "$options": "i"}},
+            {"guardian_name": {"$regex": rx, "$options": "i"}},
+            {"father_name": {"$regex": rx, "$options": "i"}},
+        ]
+    }
 
 
 def _can_list_kind(user: dict, kind: str) -> bool:
@@ -30,6 +99,8 @@ def _assert_can_list_kind(user: dict, kind: str) -> None:
 
 
 def _assert_can_add_kind(user: dict, kind: str) -> None:
+    if kind == "student":
+        _assert_teacher_no_student_crud(user, "add")
     if is_admin(user):
         return
     if kind == "student":
@@ -42,6 +113,8 @@ def _assert_can_add_kind(user: dict, kind: str) -> None:
 
 
 def _assert_can_edit_kind(user: dict, kind: str) -> None:
+    if kind == "student":
+        _assert_teacher_no_student_crud(user, "edit or delete")
     if is_admin(user):
         return
     if kind == "student":
@@ -51,6 +124,24 @@ def _assert_can_edit_kind(user: dict, kind: str) -> None:
         assert_player_action(user, "edit")
         return
     assert_can_manage(user, kind)
+
+
+def _assert_can_view_person(user: dict, person: dict) -> None:
+    kind = person.get("kind", "")
+    if user.get("role") == "parent":
+        if person["id"] not in (user.get("linked_person_ids") or []):
+            raise HTTPException(404, "Person not found")
+        return
+    if kind:
+        _assert_can_list_kind(user, kind)
+    if user.get("role") == "coach" and kind == "player":
+        centres = user.get("assigned_centres") or []
+        sports = user.get("assigned_sports") or []
+        if centres and person.get("centre") not in centres:
+            raise HTTPException(404, "Person not found")
+        if sports and person.get("sport") not in sports:
+            raise HTTPException(404, "Person not found")
+
 
 @router.get("")
 async def list_people(
@@ -65,46 +156,88 @@ async def list_people(
     centre: Optional[str] = None,
     player_type: Optional[str] = None,
     status: Optional[str] = None,
+    gender: Optional[str] = None,
+    q: Optional[str] = None,
     include_deactivated: bool = False,
+    institution: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
+    if user.get("role") == "parent":
+        ids = user.get("linked_person_ids") or []
+        if not ids:
+            return []
+        filt: dict = {"id": {"$in": ids}}
+        if kind:
+            filt["kind"] = kind
+        if q:
+            filt.update(_search_filter(q))
+        return await db.people.find(filt, {"_id": 0}).sort("name", 1).to_list(100)
     if kind:
         _assert_can_list_kind(user, kind)
     if section_id and kind == "student":
         await assert_teacher_section_access(user, section_id)
-    q = {}
-    if kind: q["kind"] = kind
+    query: dict = {}
+    if kind:
+        query["kind"] = kind
     if section_id:
-        q["section_id"] = section_id
+        query["section_id"] = section_id
     elif group:
-        q["group"] = group
+        query["group"] = group
     elif kind == "student" and user.get("role") == "teacher":
         assigned = await assigned_section_ids_for_teacher(user["id"])
-        q["section_id"] = {"$in": assigned} if assigned else {"$in": []}
-    if sport: q["sport"] = sport
-    if resident is not None: q["is_resident"] = resident
-    if slot: q["slot"] = slot
-    if skill_level: q["skill_level"] = skill_level
-    if assigned_coach_id: q["assigned_coach_id"] = assigned_coach_id
-    if centre: q["centre"] = centre
-    if player_type: q["player_type"] = player_type
+        query["section_id"] = {"$in": assigned} if assigned else {"$in": []}
+    if sport:
+        query["sport"] = sport
+    if resident is not None:
+        query["is_resident"] = resident
+    if slot:
+        query["slot"] = slot
+    if skill_level:
+        query["skill_level"] = skill_level
+    if assigned_coach_id:
+        query["assigned_coach_id"] = assigned_coach_id
+    if centre:
+        query["centre"] = centre
+    if player_type:
+        query["player_type"] = player_type
+    if gender:
+        query["gender"] = gender
     if status:
-        q["status"] = status
+        query["status"] = status
     elif kind == "player" and not include_deactivated:
-        q["status"] = {"$ne": "deactivated"}
-    # Sports Admin scope: ALPHA-only, hide PWS people entirely
+        query["status"] = {"$ne": "deactivated"}
+    if q:
+        query.update(_search_filter(q))
+    if user.get("role") == "coach" and kind == "player":
+        coach_q = _coach_visibility_filter(user, include_deactivated=include_deactivated)
+        query = {"$and": [query, coach_q]} if query else coach_q
+    inst = resolve_user_institution(user, institution)
+    query.update(person_entity_filter(inst))
     if is_sports_admin(user):
-        q["organization"] = "ALPHA"
-        # Block PWS-only kinds
         if kind in ("student", "teacher"):
             return []
-    return await db.people.find(q, {"_id": 0}).sort("name", 1).to_list(1000)
+    return await db.people.find(query, {"_id": 0}).sort("name", 1).to_list(1000)
+
 
 @router.get("/groups")
-async def list_groups(kind: str, user: dict = Depends(get_current_user)):
+async def list_groups(kind: str, institution: Optional[str] = None, user: dict = Depends(get_current_user)):
     _assert_can_list_kind(user, kind)
-    groups = await db.people.distinct("group", {"kind": kind})
+    inst = resolve_user_institution(user, institution)
+    filt = {"kind": kind, **person_entity_filter(inst)}
+    groups = await db.people.distinct("group", filt)
     return {"kind": kind, "groups": sorted([g for g in groups if g])}
+
+
+@router.get("/{person_id}")
+async def get_person(person_id: str, user: dict = Depends(get_current_user)):
+    person = await db.people.find_one({"id": person_id}, {"_id": 0})
+    if not person:
+        raise HTTPException(404, "Person not found")
+    assert_person_entity_access(user, person)
+    _assert_can_view_person(user, person)
+    if person.get("kind") == "student" and user.get("role") == "teacher":
+        await assert_teacher_section_access(user, person.get("section_id") or "")
+    return person
 
 def _validate_player_centre_type(centre: Optional[str], ptype: Optional[str]):
     if centre == "Harding Park" and ptype and ptype != "Daily":
@@ -125,7 +258,7 @@ async def ensure_staff_user_account(person: dict) -> Optional[dict]:
         await db.users.update_one({"id": existing["id"]}, {"$set": {
             "name": person.get("name") or existing.get("name"),
             "organization": person.get("organization") or existing.get("organization", "PWS"),
-            "department": person.get("group") or existing.get("department"),
+            "department": person.get("department") or person.get("group") or existing.get("department"),
             "status": "deactivated" if person.get("status") == "deactivated" else "active",
         }})
         return await db.users.find_one({"id": existing["id"]}, {"_id": 0})
@@ -148,7 +281,6 @@ async def ensure_staff_user_account(person: dict) -> Optional[dict]:
         "role": "staff",
         "organization": person.get("organization") or "PWS",
         "department": person.get("group") or None,
-        "phone": person.get("mobile") or None,
         "can_manage": [],
         "coach_permissions": [],
         "coach_type": None,
@@ -159,10 +291,18 @@ async def ensure_staff_user_account(person: dict) -> Optional[dict]:
         "status": "deactivated" if person.get("status") == "deactivated" else "active",
         "created_at": now_utc().isoformat(),
     }
-    if person.get("mobile"):
-        doc["mobile"] = person["mobile"]
-    await db.users.insert_one(doc)
-    return {k: v for k, v in doc.items() if k != "password_hash"}
+    try:
+        result = await db.users.update_one(
+            {"email": email},
+            {"$setOnInsert": _strip_sparse_user_fields(doc)},
+            upsert=True,
+        )
+        if result.upserted_id is not None:
+            return {k: v for k, v in doc.items() if k != "password_hash"}
+        return await db.users.find_one({"email": email}, {"_id": 0, "password_hash": 0})
+    except DuplicateKeyError:
+        logger.warning("Staff user insert skipped — duplicate key for %s", email)
+        return await db.users.find_one({"email": email}, {"_id": 0, "password_hash": 0})
 
 
 def _age_from_dob(dob: Optional[str]) -> Optional[int]:
@@ -187,10 +327,23 @@ async def create_person(payload: PersonCreate, user: dict = Depends(get_current_
     else:
         _assert_can_add_kind(user, payload.kind)
     doc = {"id": str(uuid.uuid4()), **payload.dict(), "created_at": now_utc().isoformat()}
+    doc = _normalize_guardian_fields(doc)
+    doc["entities"] = derive_person_entities(doc)
+    await _assert_unique_ids(doc)
+    if payload.kind == "student":
+        doc.setdefault("organization", "PWS")
+        doc.setdefault("date_of_admission", now_utc().strftime("%Y-%m-%d"))
     if payload.kind == "student" and payload.section_id:
         sid, label = await resolve_section_group(payload.section_id)
         doc["section_id"] = sid
         doc["group"] = label
+    if payload.kind == "staff":
+        if payload.department:
+            doc["department"] = payload.department
+            if not doc.get("group"):
+                doc["group"] = payload.department
+        if payload.email:
+            doc.setdefault("mobile", doc.get("mobile"))
     # Auto-compute age from DOB if provided
     if doc.get("dob"):
         derived = _age_from_dob(doc["dob"])
@@ -201,21 +354,28 @@ async def create_person(payload: PersonCreate, user: dict = Depends(get_current_
         doc.pop("monthly_fee_override", None)
         doc.pop("registration_fee_override", None)
     if payload.kind == "player":
-        # players are no longer coach-assigned; players ALWAYS belong to ALPHA
-        # (fee auto-generation depends on this — see bug: player saved as BOTH got no fees)
-        doc["organization"] = "ALPHA"
+        # Players default to ALPHA; super admin may set entities for dual participation
+        if not payload.entities and payload.organization != "BOTH":
+            doc["organization"] = "ALPHA"
+        doc["entities"] = derive_person_entities(doc)
         doc["assigned_coach_id"] = None
         doc.setdefault("status", "active")
     await db.people.insert_one(doc)
-    # Auto-create fees for ALPHA player
+    # Auto-create fees for ALPHA player or PWS student
     if payload.kind == "player":
         try:
             from routers.fees import auto_create_fees_for_player
             await auto_create_fees_for_player(doc)
         except Exception as e:
-            # Do not block player creation on fees errors — but LOG loudly
             import logging
             logging.getLogger("fees").exception("Auto fee creation failed for player %s: %s", doc.get("id"), e)
+    elif payload.kind == "student":
+        try:
+            from routers.fees import auto_create_fees_for_student
+            await auto_create_fees_for_student(doc)
+        except Exception as e:
+            import logging
+            logging.getLogger("fees").exception("Auto fee creation failed for student %s: %s", doc.get("id"), e)
     # STAFF ⇄ PERMISSIONS SYNC: staff members automatically get a user account
     if payload.kind == "staff":
         try:
@@ -231,14 +391,13 @@ async def update_person(person_id: str, payload: PersonUpdate, user: dict = Depe
     target = await db.people.find_one({"id": person_id})
     if not target:
         raise HTTPException(404, "Person not found")
-    # Sports Admin: PWS records or non-ALPHA records appear as 404 (hide existence)
-    if is_sports_admin(user) and (target.get("organization") != "ALPHA" or target.get("kind") in ("student", "teacher")):
-        raise HTTPException(404, "Person not found")
+    assert_person_entity_access(user, target)
     if target["kind"] == "player":
         assert_player_action(user, "edit")
     else:
         _assert_can_edit_kind(user, target["kind"])
     upd = payload.dict(exclude_none=True)
+    upd = _normalize_guardian_fields(upd)
     if target["kind"] == "student" and upd.get("section_id"):
         sid, label = await resolve_section_group(upd["section_id"])
         upd["section_id"] = sid
@@ -257,6 +416,9 @@ async def update_person(person_id: str, payload: PersonUpdate, user: dict = Depe
     if not upd:
         raise HTTPException(400, "No fields to update")
     merged = {**target, **upd}
+    await _assert_unique_ids(merged, exclude_id=person_id)
+    upd["entities"] = derive_person_entities(merged)
+    merged = {**target, **upd}
     if merged.get("kind") == "player":
         _validate_player_centre_type(merged.get("centre"), merged.get("player_type"))
         # ignore assigned_coach_id changes — players are centre-based now
@@ -273,11 +435,12 @@ async def update_person(person_id: str, payload: PersonUpdate, user: dict = Depe
 
 @router.post("/{person_id}/activate")
 async def activate_person(person_id: str, user: dict = Depends(get_current_user)):
-    if not is_admin(user):
-        raise HTTPException(403, "Admin / Super Admin only")
     target = await db.people.find_one({"id": person_id})
     if not target:
         raise HTTPException(404, "Person not found")
+    assert_person_entity_access(user, target)
+    if not _can_manage_person_status(user, target.get("kind", "")):
+        raise HTTPException(403, "Not allowed to reactivate this person")
     await db.people.update_one({"id": person_id}, {"$set": {"status": "active"}})
     fresh = await db.people.find_one({"id": person_id}, {"_id": 0})
     if fresh.get("kind") == "staff":
@@ -286,11 +449,59 @@ async def activate_person(person_id: str, user: dict = Depends(get_current_user)
 
 @router.post("/{person_id}/deactivate")
 async def deactivate_person(person_id: str, user: dict = Depends(get_current_user)):
-    if not is_admin(user):
-        raise HTTPException(403, "Admin / Super Admin only")
     target = await db.people.find_one({"id": person_id})
     if not target:
         raise HTTPException(404, "Person not found")
+    assert_person_entity_access(user, target)
+    if not _can_manage_person_status(user, target.get("kind", "")):
+        raise HTTPException(403, "Not allowed to deactivate this person")
+
+    kind = target.get("kind", "")
+    from routers.approvals import _can_approve, _history_entry, _approval_out
+    if kind in ("student", "player") and not _can_approve(user):
+        approval_type = "student_deactivation" if kind == "student" else "player_deactivation"
+        existing = await db.approval_requests.find_one({
+            "type": approval_type,
+            "subject_id": person_id,
+            "status": "pending",
+        })
+        if existing:
+            raise HTTPException(400, "A pending deactivation approval already exists")
+        doc = {
+            "id": str(uuid.uuid4()),
+            "type": approval_type,
+            "status": "pending",
+            "entity_id": "pws" if kind == "student" else "alpha",
+            "subject_id": person_id,
+            "subject_label": target.get("name"),
+            "reason": "Deactivation requested",
+            "payload": {
+                "person_id": person_id,
+                "centre": target.get("centre"),
+                "sport": target.get("sport"),
+                "category": target.get("player_type"),
+            },
+            "requested_by_id": user["id"],
+            "requested_by_name": user["name"],
+            "requested_at": now_utc().isoformat(),
+            "decided_by_id": None,
+            "decided_by_name": None,
+            "decided_at": None,
+            "decision_note": None,
+            "history": [_history_entry("submitted", user, "Deactivation requested")],
+            "comments": [],
+        }
+        await db.approval_requests.insert_one(doc)
+        from core import notify_role
+        await notify_role(
+            "super_admin",
+            ntype="approval_request",
+            title=f"{kind.title()} deactivation request",
+            message=f"{user['name']} requested deactivation of {target.get('name')}",
+            ref_id=doc["id"],
+        )
+        return {"approval_required": True, "approval": _approval_out(doc)}
+
     await db.people.update_one({"id": person_id}, {"$set": {"status": "deactivated"}})
     fresh = await db.people.find_one({"id": person_id}, {"_id": 0})
     if fresh.get("kind") == "staff":
@@ -302,6 +513,7 @@ async def delete_person(person_id: str, user: dict = Depends(get_current_user)):
     target = await db.people.find_one({"id": person_id})
     if not target:
         raise HTTPException(404, "Person not found")
+    assert_person_entity_access(user, target)
     if target["kind"] == "player":
         if not is_admin(user):
             assert_player_action(user, "edit")
@@ -326,6 +538,7 @@ async def link_parent(person_id: str, payload: ParentLinkIn, user: dict = Depend
     target = await db.people.find_one({"id": person_id})
     if not target:
         raise HTTPException(404, "Person not found")
+    assert_person_entity_access(user, target)
     if target.get("kind") not in ("student", "player"):
         raise HTTPException(400, "Parents can only be linked to students or players")
     parent_user = await db.users.find_one({"id": payload.user_id, "role": "parent"})

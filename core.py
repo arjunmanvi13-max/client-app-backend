@@ -112,21 +112,26 @@ PERMISSION_KEYS = [
     "view_students", "view_players", "view_staff",
     # Attendance
     "mark_student_attendance", "mark_player_attendance", "mark_staff_attendance", "mark_coach_attendance",
+    "mark_hostel_attendance", "view_attendance", "correct_attendance",
     # Management
     "add_players", "edit_players", "toggle_player_status",
     "add_students", "edit_students",
     # Admin
     "access_reports", "dashboard_access", "lifecycle_dashboard", "manage_users", "manage_academic_structure",
+    "enter_academic_marks", "view_academic_marks",
+    "enter_coach_assessments", "manage_coach_assessments", "view_coach_assessments",
+    "enter_coach_assessments", "manage_coach_assessments", "view_coach_assessments",
     # Fees & Bulk
-    "view_fees", "collect_fees", "edit_fees", "bulk_upload", "approve_deactivation",
+    "view_fees", "collect_fees", "edit_fees", "manage_fee_catalog", "bulk_upload", "approve_deactivation",
+    "approve_requests", "supervise_tasks",
 ]
 
 PERMISSION_GROUPS = {
     "Data Access": ["view_students", "view_players", "view_staff"],
-    "Attendance": ["mark_student_attendance", "mark_player_attendance", "mark_staff_attendance", "mark_coach_attendance"],
+    "Attendance": ["mark_student_attendance", "mark_player_attendance", "mark_staff_attendance", "mark_coach_attendance", "mark_hostel_attendance", "view_attendance", "correct_attendance"],
     "Management": ["add_players", "edit_players", "toggle_player_status", "add_students", "edit_students"],
-    "Admin": ["access_reports", "dashboard_access", "lifecycle_dashboard", "manage_users", "manage_academic_structure"],
-    "Fees & Bulk": ["view_fees", "collect_fees", "edit_fees", "bulk_upload", "approve_deactivation"],
+    "Admin": ["access_reports", "dashboard_access", "lifecycle_dashboard", "manage_users", "manage_academic_structure", "enter_academic_marks", "view_academic_marks", "manage_coach_assessments", "enter_coach_assessments", "view_coach_assessments", "supervise_tasks", "approve_requests"],
+    "Fees & Bulk": ["view_fees", "collect_fees", "edit_fees", "manage_fee_catalog", "bulk_upload", "approve_deactivation", "approve_requests"],
 }
 
 
@@ -137,9 +142,10 @@ def default_permissions(role: str, coach_type: Optional[str] = None) -> dict:
         for k in PERMISSION_KEYS:
             p[k] = True
         if role == "admin":
-            # Admins by default cannot edit fees or approve deactivation — those are super-admin levers
+            # Admins by default cannot edit fees or approve sensitive requests — super-admin levers
             p["edit_fees"] = False
             p["approve_deactivation"] = False
+            p["approve_requests"] = False
         return p
     if role in ("principal", "vice_principal"):
         p.update({
@@ -147,13 +153,18 @@ def default_permissions(role: str, coach_type: Optional[str] = None) -> dict:
             "mark_student_attendance": True, "mark_staff_attendance": True,
             "add_students": True, "edit_students": True,
             "manage_academic_structure": True,
+            "enter_academic_marks": True, "view_academic_marks": True,
+            "view_fees": True, "collect_fees": True, "manage_fee_catalog": True,
             "access_reports": True, "dashboard_access": True, "lifecycle_dashboard": True,
+            "view_attendance": True, "correct_attendance": True,
+            "supervise_tasks": True,
         })
     elif role == "coach":
         # Head coach gets staff-attendance + edits; assistant coach is restricted. Coaches NEVER see fees.
         p.update({
             "view_players": True,
             "mark_player_attendance": True,
+            "enter_coach_assessments": True,
             "dashboard_access": True,
         })
         if coach_type == "head":
@@ -164,19 +175,24 @@ def default_permissions(role: str, coach_type: Optional[str] = None) -> dict:
                 "add_players": True, "edit_players": True,
                 "toggle_player_status": False,
                 "access_reports": True,
+                "view_attendance": True,
             })
     elif role == "teacher":
         p.update({
             "mark_student_attendance": True,
+            "enter_academic_marks": True,
             "dashboard_access": True,
         })
     elif role == "warden":
-        p.update({"view_students": True, "view_players": True, "dashboard_access": True})
+        p.update({
+            "view_students": True, "view_players": True, "dashboard_access": True,
+            "mark_hostel_attendance": True, "view_attendance": True,
+        })
     elif role in ("student", "player"):
         p.update({"dashboard_access": True})
     elif role == "parent":
         # Parents are view-only on their own children — dashboard_access allows /api/parent/* endpoints.
-        p.update({"dashboard_access": True})
+        p.update({"dashboard_access": True, "view_coach_assessments": True})
     return p
 
 
@@ -286,28 +302,139 @@ def assert_player_action(user: dict, action: str) -> None:
         raise HTTPException(403, f"You don't have permission to {action} players")
 
 
-# ------------------ Notifications ------------------
-def normalize_notification(doc: dict) -> dict:
-    """Return a consistent API shape; supports legacy body/at/kind fields."""
-    out = {k: v for k, v in doc.items() if k != "_id"}
-    if not out.get("message") and out.get("body"):
-        out["message"] = out["body"]
-    if not out.get("created_at") and out.get("at"):
-        out["created_at"] = out["at"]
-    if not out.get("type") and out.get("kind"):
-        out["type"] = out["kind"]
-    return out
+# ------------------ Entity foundation (PWS / ALPHA / Both) ------------------
+INSTITUTIONS = ("PWS", "ALPHA", "BOTH")
+FEE_ENTITIES = ("pws", "alpha")
 
 
-def notification_filter_for_user(user: dict) -> dict:
-    """Mongo filter matching notifications visible to this user (incl. legacy role fan-out)."""
-    uid = user["id"]
-    role = user.get("role")
-    clauses: list[dict] = [{"user_id": uid}]
-    if role:
-        clauses.append({"audience_role": role, "user_id": {"$exists": False}})
-    clauses.append({"audience_user": uid})
-    return {"$or": clauses}
+def resolve_user_institution(user: dict, requested: Optional[str] = None) -> str:
+    """Effective institution scope for list/query endpoints."""
+    if is_super_admin(user):
+        v = (requested or "BOTH").upper()
+        return v if v in INSTITUTIONS else "BOTH"
+    if is_sports_admin(user) or user.get("role") == "coach":
+        return "ALPHA"
+    if user.get("role") in ("principal", "vice_principal", "teacher"):
+        return "PWS"
+    if user.get("role") == "warden":
+        return "BOTH"
+    org = (user.get("organization") or "PWS").upper()
+    if org == "BOTH":
+        v = (requested or "BOTH").upper()
+        return v if v in INSTITUTIONS else "BOTH"
+    return org if org in ("PWS", "ALPHA") else "PWS"
+
+
+def institution_to_fee_entity(inst: str) -> Optional[str]:
+    if inst == "PWS":
+        return "pws"
+    if inst == "ALPHA":
+        return "alpha"
+    return None
+
+
+def fee_entity_filter(inst: str) -> dict:
+    """Mongo filter for fees collection (lowercase entity_id)."""
+    if inst == "PWS":
+        return {"entity_id": "pws"}
+    if inst == "ALPHA":
+        return {"$or": [{"entity_id": "alpha"}, {"entity_id": {"$exists": False}}]}
+    return {}
+
+
+def derive_person_entities(person: dict) -> List[str]:
+    """Compute entity participation for a person record."""
+    raw = person.get("entities") or []
+    cleaned = sorted({str(e).upper() for e in raw if str(e).upper() in ("PWS", "ALPHA")})
+    if cleaned:
+        return cleaned
+    org = (person.get("organization") or "").upper()
+    if org == "BOTH":
+        return ["PWS", "ALPHA"]
+    kind = person.get("kind")
+    if kind in ("student", "teacher"):
+        return ["PWS"] if org in ("", "PWS", "BOTH") else [org]
+    if kind in ("player", "coach"):
+        return ["ALPHA"] if org in ("", "ALPHA", "BOTH") else [org]
+    if org in ("PWS", "ALPHA"):
+        return [org]
+    return ["PWS"]
+
+
+def person_entity_filter(inst: str) -> dict:
+    """Mongo filter: persons participating in the given institution."""
+    if inst == "BOTH":
+        return {}
+    pws_legacy = {
+        "entities": {"$exists": False},
+        "$or": [
+            {"organization": {"$in": ["PWS", "BOTH"]}},
+            {"kind": {"$in": ["student", "teacher"]}},
+        ],
+    }
+    alpha_legacy = {
+        "entities": {"$exists": False},
+        "$or": [
+            {"organization": "ALPHA"},
+            {"kind": {"$in": ["player", "coach"]}},
+        ],
+    }
+    if inst == "PWS":
+        return {"$or": [{"entities": "PWS"}, {"entities": {"$in": ["PWS"]}}, pws_legacy]}
+    return {"$or": [{"entities": "ALPHA"}, {"entities": {"$in": ["ALPHA"]}}, alpha_legacy]}
+
+
+def person_participates_in(person: dict, inst: str) -> bool:
+    if inst == "BOTH":
+        return True
+    return inst in derive_person_entities(person)
+
+
+def assert_person_entity_access(user: dict, person: dict) -> None:
+    """Raise 404 if user cannot see this person (entity isolation)."""
+    inst = resolve_user_institution(user)
+    if inst == "BOTH":
+        return
+    if not person_participates_in(person, inst):
+        raise HTTPException(404, "Person not found")
+    if is_sports_admin(user) and person.get("kind") in ("student", "teacher"):
+        raise HTTPException(404, "Person not found")
+
+
+def attendance_entity_for_kind(kind: Optional[str]) -> Optional[str]:
+    if kind == "student":
+        return "pws"
+    if kind in ("player", "coach"):
+        return "alpha"
+    if kind == "hostel":
+        return "both"
+    return None
+
+
+def attendance_entity_filter(inst: str) -> dict:
+    """Mongo filter for attendance records."""
+    if inst == "BOTH":
+        return {}
+    ent = institution_to_fee_entity(inst)
+    if not ent:
+        return {}
+    legacy_pws = {"entity_id": {"$exists": False}, "kind": "student"}
+    legacy_alpha = {"entity_id": {"$exists": False}, "kind": {"$in": ["player", "coach"]}}
+    if inst == "PWS":
+        return {"$or": [{"entity_id": "pws"}, legacy_pws]}
+    return {"$or": [{"entity_id": "alpha"}, legacy_alpha]}
+
+
+
+# ------------------ Notifications (delegates to notifications_service) ------------------
+from notifications_service import (
+    NOTIFICATION_TYPES,
+    normalize_notification,
+    notification_filter_for_user,
+    send_notification,
+    send_to_role,
+    unread_count_for_user,
+)
 
 
 async def notify_user(
@@ -317,20 +444,16 @@ async def notify_user(
     title: str,
     message: str,
     ref_id: Optional[str] = None,
+    entity_id: Optional[str] = None,
 ) -> str:
-    doc = {
-        "id": str(uuid.uuid4()),
-        "user_id": user_id,
-        "type": ntype,
-        "title": title,
-        "message": message,
-        "read": False,
-        "created_at": now_utc().isoformat(),
-    }
-    if ref_id:
-        doc["ref_id"] = ref_id
-    await db.notifications.insert_one(doc)
-    return doc["id"]
+    return await send_notification(
+        user_id,
+        ntype=ntype,
+        title=title,
+        message=message,
+        ref_id=ref_id,
+        entity_id=entity_id,
+    )
 
 
 async def notify_role(
@@ -340,17 +463,16 @@ async def notify_role(
     title: str,
     message: str,
     ref_id: Optional[str] = None,
+    entity_id: Optional[str] = None,
 ) -> int:
-    """Fan out one notification per active user with the given role."""
-    users = await db.users.find(
-        {"role": role, "status": {"$ne": "deactivated"}},
-        {"id": 1},
-    ).to_list(500)
-    count = 0
-    for u in users:
-        await notify_user(u["id"], ntype=ntype, title=title, message=message, ref_id=ref_id)
-        count += 1
-    return count
+    return await send_to_role(
+        role,
+        ntype=ntype,
+        title=title,
+        message=message,
+        ref_id=ref_id,
+        entity_id=entity_id,
+    )
 
 
 def public_user(u: dict) -> dict:
@@ -438,7 +560,16 @@ class PersonCreate(BaseModel):
     section_id: Optional[str] = None
     sport: Optional[str] = None
     organization: Literal["PWS", "ALPHA", "BOTH"] = "PWS"
+    entities: List[Literal["PWS", "ALPHA"]] = []
     is_resident: bool = False
+    # Student enrollment
+    admission_number: Optional[str] = None
+    roll_number: Optional[str] = None
+    gender: Optional[Literal["Male", "Female", "Other"]] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+    guardian_name: Optional[str] = None
+    guardian_phone: Optional[str] = None
     father_name: Optional[str] = None
     age: Optional[int] = None
     dob: Optional[str] = None  # ISO date YYYY-MM-DD (auto-computes age)
@@ -447,6 +578,7 @@ class PersonCreate(BaseModel):
     locality: Optional[str] = None
     city: Optional[str] = None
     slot: Optional[Literal["Morning", "Evening", "Both"]] = None
+    player_id: Optional[str] = None
     assigned_coach_id: Optional[str] = None  # deprecated — players are centre-based
     centre: Optional[Literal["Balua", "Harding Park"]] = None
     player_type: Optional[Literal["Daily", "Day Boarding", "Hostel", "Hostel Only", "Boarding"]] = None
@@ -457,6 +589,9 @@ class PersonCreate(BaseModel):
     hostel_fee_override: Optional[int] = None  # ALPHA hostel player optional manual override
     monthly_fee_override: Optional[int] = None  # Super Admin only — override rate-card monthly at admission
     registration_fee_override: Optional[int] = None  # Super Admin only — override rate-card registration
+    # Staff
+    employee_id: Optional[str] = None
+    department: Optional[str] = None
 
 class PersonUpdate(BaseModel):
     name: Optional[str] = None
@@ -464,7 +599,15 @@ class PersonUpdate(BaseModel):
     section_id: Optional[str] = None
     sport: Optional[str] = None
     organization: Optional[Literal["PWS", "ALPHA", "BOTH"]] = None
+    entities: Optional[List[Literal["PWS", "ALPHA"]]] = None
     is_resident: Optional[bool] = None
+    admission_number: Optional[str] = None
+    roll_number: Optional[str] = None
+    gender: Optional[Literal["Male", "Female", "Other"]] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+    guardian_name: Optional[str] = None
+    guardian_phone: Optional[str] = None
     father_name: Optional[str] = None
     age: Optional[int] = None
     dob: Optional[str] = None
@@ -473,6 +616,7 @@ class PersonUpdate(BaseModel):
     locality: Optional[str] = None
     city: Optional[str] = None
     slot: Optional[Literal["Morning", "Evening", "Both"]] = None
+    player_id: Optional[str] = None
     assigned_coach_id: Optional[str] = None  # deprecated
     centre: Optional[Literal["Balua", "Harding Park"]] = None
     player_type: Optional[Literal["Daily", "Day Boarding", "Hostel", "Hostel Only", "Boarding"]] = None
@@ -483,18 +627,38 @@ class PersonUpdate(BaseModel):
     hostel_fee_override: Optional[int] = None
     monthly_fee_override: Optional[int] = None
     registration_fee_override: Optional[int] = None
+    employee_id: Optional[str] = None
+    department: Optional[str] = None
+
+TASK_STATUSES = ("open", "in_progress", "blocked", "completed", "cancelled")
+TASK_STATUS_ALIASES = {
+    "assigned": "open",
+    "delayed": "blocked",
+    "reviewed": "completed",
+}
 
 class TaskCreate(BaseModel):
     title: str
     description: str = ""
+    entity_id: Optional[Literal["pws", "alpha", "both"]] = None
     priority: Literal["low", "medium", "high"] = "medium"
-    deadline: Optional[datetime] = None
+    due_date: Optional[datetime] = None
+    deadline: Optional[datetime] = None  # legacy alias for due_date
+    assignee_id: Optional[str] = None
     assignee_ids: List[str] = []
     department: Optional[str] = None
     follow_up_required: bool = False
 
 class TaskUpdate(BaseModel):
-    status: Optional[Literal["assigned", "in_progress", "completed", "delayed", "reviewed"]] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    entity_id: Optional[Literal["pws", "alpha", "both"]] = None
+    priority: Optional[Literal["low", "medium", "high"]] = None
+    due_date: Optional[datetime] = None
+    deadline: Optional[datetime] = None
+    assignee_id: Optional[str] = None
+    assignee_ids: Optional[List[str]] = None
+    status: Optional[Literal["open", "in_progress", "blocked", "completed", "cancelled", "assigned", "delayed", "reviewed"]] = None
     completion_remark: Optional[str] = None
     proof_url: Optional[str] = None
     follow_up_required: Optional[bool] = None
@@ -512,8 +676,13 @@ class AttendanceBatch(BaseModel):
     group: Optional[str] = None
     section_id: Optional[str] = None
     sport: Optional[str] = None
-    session: Optional[str] = None
+    session: Optional[str] = "morning"
     marks: List[AttendanceMark]
+
+class AttendanceCorrectionIn(BaseModel):
+    record_id: str
+    status: Literal["present", "absent", "late", "leave"]
+    reason: str
 
 class GatePassCreate(BaseModel):
     resident_id: str
@@ -533,5 +702,5 @@ class RollCallEntry(BaseModel):
 
 class RollCallIn(BaseModel):
     date: str
-    session: Literal["morning", "night"]
+    session: Literal["morning", "night", "evening"]
     entries: List[RollCallEntry]

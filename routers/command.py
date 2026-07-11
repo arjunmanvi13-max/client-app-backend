@@ -44,16 +44,21 @@ async def _hostel_today() -> dict:
     }
 
 async def _task_snapshot() -> dict:
-    statuses = ["assigned", "in_progress", "completed", "delayed", "reviewed"]
-    by_status = {}
-    for s in statuses:
-        by_status[s] = await db.tasks.count_documents({"status": s})
+    statuses = ["open", "in_progress", "blocked", "completed", "cancelled"]
+    legacy_map = {"assigned": "open", "delayed": "blocked", "reviewed": "completed"}
+    by_status = {s: 0 for s in statuses}
+    async for doc in db.tasks.find({}, {"status": 1}):
+        raw = doc.get("status") or "open"
+        norm = legacy_map.get(raw, raw)
+        if norm not in by_status:
+            norm = "open"
+        by_status[norm] += 1
     total = sum(by_status.values())
     # Department breakdown — derive from `department` field; fallback to "Other"
     pipeline = [{"$group": {"_id": "$department", "count": {"$sum": 1}}}]
     rows = await db.tasks.aggregate(pipeline).to_list(50)
     by_dept = {(r["_id"] or "Other"): r["count"] for r in rows}
-    completed = by_status.get("completed", 0) + by_status.get("reviewed", 0)
+    completed = by_status.get("completed", 0)
     completion_pct = round((completed / total) * 100) if total else 0
     return {"total": total, "by_status": by_status, "by_department": by_dept, "completion_pct": completion_pct}
 
@@ -62,8 +67,11 @@ async def _alerts() -> list:
     today = now_utc().strftime("%Y-%m-%d")
     # Overdue tasks
     overdue = await db.tasks.count_documents({
-        "status": {"$nin": ["completed", "reviewed"]},
-        "deadline": {"$lt": now_utc().isoformat()},
+        "status": {"$nin": ["completed", "reviewed", "cancelled"]},
+        "$or": [
+            {"due_date": {"$lt": now_utc().isoformat()}},
+            {"deadline": {"$lt": now_utc().isoformat()}},
+        ],
     })
     if overdue:
         alerts.append({"type": "overdue_tasks", "severity": "high", "message": f"{overdue} task(s) overdue", "count": overdue})

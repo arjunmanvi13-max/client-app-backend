@@ -1,6 +1,6 @@
 import uuid
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, HTTPException
 from core import db, GatePassCreate, GatePassDecision, RollCallIn, get_current_user, require_roles, now_utc
 
 router = APIRouter(prefix="/hostel", tags=["hostel"])
@@ -50,13 +50,18 @@ async def decide_gate_pass(
     return await db.gate_passes.find_one({"id": gp_id}, {"_id": 0})
 
 @router.post("/roll-call")
-async def submit_roll_call(payload: RollCallIn, user: dict = Depends(require_roles("warden", "admin", "super_admin"))):
+async def submit_roll_call(payload: RollCallIn, user: dict = Depends(get_current_user)):
+    from core import get_perm
+    if not (user.get("role") in ("warden", "admin", "super_admin") or get_perm(user, "mark_hostel_attendance")):
+        raise HTTPException(403, "Hostel attendance permission required")
+    from routers.attendance import upsert_attendance, normalize_session
     saved = []
+    sess = normalize_session(payload.session, kind="hostel")
     for e in payload.entries:
-        rec = {
+        rec_roll = {
             "id": str(uuid.uuid4()),
             "date": payload.date,
-            "session": payload.session,
+            "session": sess,
             "resident_id": e.resident_id,
             "present": e.present,
             "note": e.note,
@@ -64,11 +69,22 @@ async def submit_roll_call(payload: RollCallIn, user: dict = Depends(require_rol
             "created_at": now_utc().isoformat(),
         }
         await db.roll_calls.update_one(
-            {"date": payload.date, "session": payload.session, "resident_id": e.resident_id},
-            {"$set": rec},
+            {"date": payload.date, "session": sess, "resident_id": e.resident_id},
+            {"$set": rec_roll},
             upsert=True,
         )
-        saved.append(rec)
+        att = await upsert_attendance(
+            user,
+            kind="hostel",
+            person_id=e.resident_id,
+            date=payload.date,
+            status="present" if e.present else "absent",
+            session=sess,
+            entity_id="both",
+            source="hostel_roll_call",
+            extra={"note": e.note},
+        )
+        saved.append({**rec_roll, "attendance_id": att["id"]})
     return {"count": len(saved)}
 
 @router.get("/roll-call")
@@ -84,11 +100,12 @@ async def warden_dashboard(_user: dict = Depends(require_roles("warden", "admin"
     residents_count = await db.users.count_documents({"role": {"$in": ["student", "player"]}})
     pending_passes = await db.gate_passes.count_documents({"status": "pending"})
     morning = await db.roll_calls.count_documents({"date": today, "session": "morning", "present": True})
-    night = await db.roll_calls.count_documents({"date": today, "session": "night", "present": True})
+    evening = await db.roll_calls.count_documents({"date": today, "session": {"$in": ["evening", "night"]}, "present": True})
     return {
         "residents_count": residents_count,
         "pending_passes": pending_passes,
         "morning_present": morning,
-        "night_present": night,
+        "night_present": evening,
+        "evening_present": evening,
         "date": today,
     }

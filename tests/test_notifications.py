@@ -4,7 +4,7 @@ import uuid
 import pytest
 import requests
 
-from core import normalize_notification, notification_filter_for_user
+from notifications_service import normalize_notification, notification_filter_for_user, canonical_type
 
 BASE = (os.environ.get("EXPO_PUBLIC_BACKEND_URL") or os.environ.get("EXPO_BACKEND_URL") or "https://unified-track.preview.emergentagent.com").rstrip("/")
 API = f"{BASE}/api"
@@ -74,7 +74,8 @@ class TestNotificationAPI:
     def test_list_returns_message_field(self):
         r = requests.get(f"{API}/notifications", headers=_hdr("super_admin"), timeout=15)
         assert r.status_code == 200
-        for n in r.json():
+        items = r.json().get("items", r.json())
+        for n in items:
             if n.get("title"):
                 assert n.get("message") or n.get("body") is None or isinstance(n.get("message"), str)
 
@@ -99,7 +100,8 @@ class TestNotificationAPI:
         task_id = r.json()["id"]
         nr = requests.get(f"{API}/notifications", headers=_hdr("teacher"), timeout=15)
         assert nr.status_code == 200
-        match = [n for n in nr.json() if n.get("ref_id") == task_id or n.get("message") == title]
+        items = nr.json().get("items", nr.json())
+        match = [n for n in items if n.get("ref_id") == task_id or n.get("message") == title]
         assert match, "Teacher should receive task notification"
         assert match[0].get("message") == title
 

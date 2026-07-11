@@ -108,6 +108,7 @@ async def coach_players(
 @router.post("/attendance")
 async def coach_mark_attendance(payload: CoachAttendanceIn, user: dict = Depends(get_current_user)):
     from routers.parents import push_parent_notification
+    from routers.attendance import upsert_attendance, normalize_session
     if user["role"] != "coach" and not is_admin(user):
         raise HTTPException(403, "Coach role required")
     q = _coach_visibility_filter(user)
@@ -119,27 +120,23 @@ async def coach_mark_attendance(payload: CoachAttendanceIn, user: dict = Depends
         raise HTTPException(400, "No players found for that filter scope")
     absent_set = set(payload.absent_player_ids or [])
     today_str = now_utc().strftime("%Y-%m-%d")
+    sess = normalize_session(None, slot=payload.slot, kind="player")
     for p in players:
         status = "absent" if p["id"] in absent_set else "present"
-        rec = {
-            "date": payload.date,
-            "kind": "player",
-            "slot": payload.slot,
-            "centre": p.get("centre"),
-            "sport": p.get("sport"),
-            "player_type": p.get("player_type"),
-            "session": payload.slot,
-            "group": p.get("group"),
-            "person_id": p["id"],
-            "status": status,
-            "marked_by": user["id"],
-            "marked_by_name": user["name"],
-            "created_at": now_utc().isoformat(),
-        }
-        await db.attendance.update_one(
-            {"date": payload.date, "kind": "player", "slot": payload.slot, "person_id": p["id"]},
-            {"$set": rec},
-            upsert=True,
+        await upsert_attendance(
+            user,
+            kind="player",
+            person_id=p["id"],
+            date=payload.date,
+            status=status,
+            session=sess,
+            slot=payload.slot,
+            entity_id="alpha",
+            group=p.get("group"),
+            sport=p.get("sport"),
+            centre=p.get("centre"),
+            source="coach_ui",
+            extra={"player_type": p.get("player_type")},
         )
         if status == "absent" and payload.date == today_str:
             try:

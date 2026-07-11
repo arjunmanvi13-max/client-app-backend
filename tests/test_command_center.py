@@ -49,7 +49,7 @@ class TestCommandCenter:
         # tasks
         for k in ["total", "by_status", "by_department", "completion_pct"]:
             assert k in d["tasks"], f"tasks missing {k}"
-        for st in ["assigned", "in_progress", "completed", "delayed", "reviewed"]:
+        for st in ["open", "in_progress", "blocked", "completed", "cancelled"]:
             assert st in d["tasks"]["by_status"]
         # kpis
         assert "attendance_pct_today" in d["kpis"]

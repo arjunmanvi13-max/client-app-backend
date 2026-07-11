@@ -1,6 +1,6 @@
-"""Fees module — ALPHA Sports Academy only.
+"""Fees module — ALPHA Sports Academy + PWS school fees.
 
-Auto-create Registration + first Monthly fee on player creation.
+Auto-create Registration + first Monthly fee on player/student creation.
 Rate cards:
 - Daily players (Balua / Harding Park):
     Cricket Reg ₹3000 (one-time), Monthly ₹2500
@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from typing import Optional, Literal, List
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from core import db, get_current_user, is_admin, is_super_admin, assert_perm, now_utc, get_perm, notify_role
+from core import db, get_current_user, is_admin, is_super_admin, assert_perm, now_utc, get_perm, notify_role, resolve_user_institution, fee_entity_filter, derive_person_entities
 
 router = APIRouter(prefix="/fees", tags=["fees"])
 
@@ -51,6 +51,73 @@ RATE_CARDS = {
         "Football": {"registration": 20000, "monthly": 15000},
     },
 }
+
+# ------------------ Rate Cards (PWS — Prarambhika World School) ------------------
+PWS_RATE_CARDS = {
+    "Day Scholar": {
+        "registration": 5000,
+        "monthly": 8000,   # tuition
+        "exam": 2500,
+    },
+    "Hostel": {
+        "registration": 5000,
+        "monthly": 8000,   # tuition
+        "hostel_monthly": 12000,
+        "exam": 2500,
+    },
+}
+
+
+def _pws_category(student: dict) -> str:
+    return "Hostel" if student.get("is_resident") else "Day Scholar"
+
+
+def _fee_entity(person: dict) -> str:
+    ents = derive_person_entities(person)
+    if "PWS" in ents and person.get("kind") == "student":
+        return "pws"
+    if "PWS" in ents and "ALPHA" not in ents:
+        return "pws"
+    return "alpha"
+
+
+def get_pws_fee_rates(category: str) -> dict:
+    return PWS_RATE_CARDS.get(category, {})
+
+
+async def _rates_for_person(person: dict) -> dict:
+    """Resolve rates from fee catalogue/plan, falling back to hardcoded cards."""
+    try:
+        from routers.fee_catalog import resolve_rates_for_person
+        catalog = await resolve_rates_for_person(person)
+        if catalog:
+            return catalog
+    except Exception:
+        pass
+    if person.get("kind") == "student" and "PWS" in derive_person_entities(person):
+        return get_pws_fee_rates(_pws_category(person))
+    category = _canonical_category(person.get("player_type") or "Daily")
+    sport = person.get("sport") or ""
+    return get_fee_rates(category, sport)
+
+
+async def _recurring_amounts_async(person: dict) -> dict:
+    """Recurring fee amounts from catalogue/plan with hardcoded fallback."""
+    rates = await _rates_for_person(person)
+    if person.get("kind") == "student" and "PWS" in derive_person_entities(person):
+        tuition = int(person.get("monthly_fee_override") or 0) or rates.get("monthly", 0)
+        transport = int(person.get("transport_fee_monthly") or 0)
+        hostel = 0
+        if _pws_category(person) == "Hostel":
+            hostel = int(person.get("hostel_fee_override") or 0) or rates.get("hostel_monthly", 0)
+        return {"monthly": tuition, "transport": transport, "hostel": hostel}
+    monthly = int(person.get("monthly_fee_override") or 0) or rates.get("monthly", 0)
+    if not monthly:
+        category = _canonical_category(person.get("player_type") or "Daily")
+        if category in ("Hostel", "Hostel Only"):
+            monthly = int(person.get("hostel_fee_override") or 0) or rates.get("monthly", 0)
+    transport = int(person.get("transport_fee_monthly") or 0)
+    return {"monthly": monthly, "transport": transport, "hostel": 0}
 
 
 def _canonical_category(category: str) -> str:
@@ -90,7 +157,7 @@ def _next_month(month_key: str) -> str:
     return f"{y + 1}-01" if m == 12 else f"{y}-{m + 1:02d}"
 
 
-def _monthly_amounts(player: dict) -> tuple:
+def _alpha_monthly_amounts(player: dict) -> tuple:
     """(monthly_amount, transport_amount) honouring per-player overrides."""
     sport = player.get("sport") or ""
     category = _canonical_category(player.get("player_type") or "Daily")
@@ -103,6 +170,26 @@ def _monthly_amounts(player: dict) -> tuple:
     return (override or rates["monthly"], int(player.get("transport_fee_monthly") or 0))
 
 
+def _recurring_amounts(person: dict) -> dict:
+    """Sync fallback — hardcoded rate cards only (used where async unavailable)."""
+    if person.get("kind") == "student" and person.get("organization") == "PWS":
+        cat = _pws_category(person)
+        rates = get_pws_fee_rates(cat)
+        tuition = int(person.get("monthly_fee_override") or 0) or rates.get("monthly", 0)
+        transport = int(person.get("transport_fee_monthly") or 0)
+        hostel = 0
+        if cat == "Hostel":
+            hostel = int(person.get("hostel_fee_override") or 0) or rates.get("hostel_monthly", 0)
+        return {"monthly": tuition, "transport": transport, "hostel": hostel}
+    monthly, transport = _alpha_monthly_amounts(person)
+    return {"monthly": monthly, "transport": transport, "hostel": 0}
+
+
+def _monthly_amounts(player: dict) -> tuple:
+    rec = _recurring_amounts(player)
+    return rec["monthly"], rec["transport"]
+
+
 async def auto_create_fees_for_player(player: dict) -> List[dict]:
     """Create Registration + first Monthly fee + (optional) first Transport fee.
     Idempotent on (player_id, fee_type, period_month).
@@ -113,7 +200,7 @@ async def auto_create_fees_for_player(player: dict) -> List[dict]:
         return []
     sport = player.get("sport") or ""
     category = _canonical_category(player.get("player_type") or "Daily")
-    rates = get_fee_rates(category, sport)
+    rates = await _rates_for_person(player)
     if not rates:
         return []
     admission = player.get("date_of_admission") or now_utc().strftime("%Y-%m-%d")
@@ -157,23 +244,91 @@ async def auto_create_fees_for_player(player: dict) -> List[dict]:
             ntype="fees_created",
             title="New player fees created",
             message=f"{player['name']} ({player.get('centre')}/{sport}/{category}) — {len(created)} fee(s) auto-generated",
+            entity_id="alpha",
+        )
+    return created
+
+
+async def auto_create_fees_for_student(student: dict) -> List[dict]:
+    """Create PWS school fees on student enrollment (tuition, exam, hostel, transport)."""
+    if student.get("kind") != "student" or "PWS" not in derive_person_entities(student):
+        return []
+    category = _pws_category(student)
+    rates = await _rates_for_person(student)
+    if not rates:
+        return []
+    admission = student.get("date_of_admission") or now_utc().strftime("%Y-%m-%d")
+    period = _month_key(admission)
+    created: List[dict] = []
+    reg_amt = int(student.get("registration_fee_override") or 0) or rates["registration"]
+    if not await db.fees.find_one({"player_id": student["id"], "fee_type": "Registration"}):
+        reg = _build_fee(student, "Registration", reg_amt, reg_amt, period, admission)
+        await db.fees.insert_one(reg)
+        created.append(reg)
+    exam_amt = rates.get("exam", 0)
+    if exam_amt and not await db.fees.find_one({"player_id": student["id"], "fee_type": "Exam"}):
+        exam = _build_fee(student, "Exam", exam_amt, exam_amt, period, admission)
+        await db.fees.insert_one(exam)
+        created.append(exam)
+    tuition = int(student.get("monthly_fee_override") or 0) or rates["monthly"]
+    first_tuition = first_month_amount(tuition, admission)
+    if tuition and not await db.fees.find_one({"player_id": student["id"], "fee_type": "Monthly", "period_month": period}):
+        tfee = _build_fee(student, "Monthly", tuition, first_tuition, period, admission, extra={
+            "is_first_month": True,
+            "first_month_discounted": first_tuition < tuition,
+        })
+        await db.fees.insert_one(tfee)
+        created.append(tfee)
+    if category == "Hostel":
+        hostel_amt = int(student.get("hostel_fee_override") or 0) or rates.get("hostel_monthly", 0)
+        if hostel_amt and not await db.fees.find_one({"player_id": student["id"], "fee_type": "Hostel", "period_month": period}):
+            hfee = _build_fee(student, "Hostel", hostel_amt, first_month_amount(hostel_amt, admission), period, admission, extra={
+                "is_first_month": True,
+            })
+            await db.fees.insert_one(hfee)
+            created.append(hfee)
+    tport = int(student.get("transport_fee_monthly") or 0)
+    if tport > 0 and not await db.fees.find_one({"player_id": student["id"], "fee_type": "Transport", "period_month": period}):
+        tr = _build_fee(student, "Transport", tport, first_month_amount(tport, admission), period, admission, extra={
+            "is_first_month": True,
+        })
+        await db.fees.insert_one(tr)
+        created.append(tr)
+    if created:
+        await notify_role(
+            "super_admin",
+            ntype="fees_created",
+            title="New student fees created",
+            message=f"{student['name']} ({category}/{student.get('group') or 'PWS'}) — {len(created)} fee(s) auto-generated",
+            entity_id="pws",
         )
     return created
 
 
 def _build_fee(player: dict, fee_type: str, amount: int, amount_due: int, period: str, admission: str, extra: dict | None = None) -> dict:
+    entity = _fee_entity(player)
+    if player.get("kind") == "student":
+        category = _pws_category(player)
+        centre = player.get("group")
+        sport = None
+    else:
+        category = player.get("player_type") or "Daily"
+        centre = player.get("centre")
+        sport = player.get("sport")
     rec = {
         "id": str(uuid.uuid4()),
         "player_id": player["id"],
+        "student_id": player["id"] if player.get("kind") == "student" else None,
+        "entity_id": entity,
         "player_name": player["name"],
-        "centre": player.get("centre"),
-        "sport": player.get("sport"),
-        "category": player.get("player_type") or "Daily",
+        "centre": centre,
+        "sport": sport,
+        "category": category,
         "fee_type": fee_type,
         "amount": amount,
         "amount_due": amount_due,
         "period_month": period,
-        "due_date": admission if fee_type == "Registration" else f"{period}-05",
+        "due_date": admission if fee_type in ("Registration", "Exam") else f"{period}-05",
         "status": "due",
         "payment_mode": None,
         "reference_id": None,
@@ -198,38 +353,34 @@ def _iter_months(start: str, end: str):
 
 
 async def ensure_monthly_fees_up_to_current(player_id: str) -> List[dict]:
-    """Lazily back-fill monthly recurring fees (Monthly + Transport) up to the current month.
-
-    The first month is created at admission; subsequent months are created here on-demand
-    when a fees-collection screen pulls dues, so no scheduler is required.
-    """
+    """Lazily back-fill monthly recurring fees up to the current month."""
     player = await db.people.find_one({"id": player_id})
-    if not player or player.get("organization") != "ALPHA":
+    if not player:
+        return []
+    if player.get("kind") == "student" and player.get("organization") == "PWS":
+        return await _ensure_pws_recurring_fees(player)
+    if player.get("organization") != "ALPHA":
         return []
     sport = player.get("sport") or ""
     category = _canonical_category(player.get("player_type") or "Daily")
-    rates = get_fee_rates(category, sport)
+    rates = await _rates_for_person(player)
     if not rates:
         return []
     admission = player.get("date_of_admission") or now_utc().strftime("%Y-%m-%d")
     start_month = _month_key(admission)
     current_month = now_utc().strftime("%Y-%m")
     created: List[dict] = []
-    override = int(player.get("monthly_fee_override") or 0) or 0
-    if not override and category in ("Hostel", "Hostel Only"):
-        override = int(player.get("hostel_fee_override") or 0) or 0
-    monthly_amt = override or rates["monthly"]
-    tport = int(player.get("transport_fee_monthly") or 0)
+    amounts = await _recurring_amounts_async(player)
+    monthly_amt = amounts["monthly"]
+    tport = amounts["transport"]
     for period in _iter_months(start_month, current_month):
         if period == start_month:
-            continue  # skip first month, created at admission
-        # Monthly recurring
+            continue
         existing = await db.fees.find_one({"player_id": player_id, "fee_type": "Monthly", "period_month": period})
-        if not existing:
+        if not existing and monthly_amt > 0:
             doc = _build_fee(player, "Monthly", monthly_amt, monthly_amt, period, f"{period}-05")
             await db.fees.insert_one(doc)
             created.append(doc)
-        # Transport recurring
         if tport > 0:
             existing_t = await db.fees.find_one({"player_id": player_id, "fee_type": "Transport", "period_month": period})
             if not existing_t:
@@ -239,12 +390,34 @@ async def ensure_monthly_fees_up_to_current(player_id: str) -> List[dict]:
     return created
 
 
+async def _ensure_pws_recurring_fees(student: dict) -> List[dict]:
+    admission = student.get("date_of_admission") or now_utc().strftime("%Y-%m-%d")
+    start_month = _month_key(admission)
+    current_month = now_utc().strftime("%Y-%m")
+    created: List[dict] = []
+    amounts = await _recurring_amounts_async(student)
+    for period in _iter_months(start_month, current_month):
+        if period == start_month:
+            continue
+        if amounts["monthly"] > 0 and not await db.fees.find_one({"player_id": student["id"], "fee_type": "Monthly", "period_month": period}):
+            doc = _build_fee(student, "Monthly", amounts["monthly"], amounts["monthly"], period, f"{period}-05")
+            await db.fees.insert_one(doc)
+            created.append(doc)
+        if amounts["hostel"] > 0 and not await db.fees.find_one({"player_id": student["id"], "fee_type": "Hostel", "period_month": period}):
+            hdoc = _build_fee(student, "Hostel", amounts["hostel"], amounts["hostel"], period, f"{period}-05")
+            await db.fees.insert_one(hdoc)
+            created.append(hdoc)
+        if amounts["transport"] > 0 and not await db.fees.find_one({"player_id": student["id"], "fee_type": "Transport", "period_month": period}):
+            tdoc = _build_fee(student, "Transport", amounts["transport"], amounts["transport"], period, f"{period}-05")
+            await db.fees.insert_one(tdoc)
+            created.append(tdoc)
+    return created
+
+
 _bulk_ensure_state = {"ts": 0.0}
 
 async def ensure_all_players_monthly_fees(force: bool = False) -> int:
-    """Materialize recurring monthly fees for ALL active ALPHA players up to the current
-    month so dashboards and financial reports include every owed period — not just the
-    players whose dues screens were opened. Throttled to once per 15 min per process."""
+    """Materialize recurring monthly fees for ALL active fee-bearing people up to current month."""
     import time
     now = time.time()
     if not force and now - _bulk_ensure_state["ts"] < 900:
@@ -253,6 +426,9 @@ async def ensure_all_players_monthly_fees(force: bool = False) -> int:
     count = 0
     async for p in db.people.find({"kind": "player", "organization": "ALPHA", "status": {"$ne": "deactivated"}}, {"_id": 0, "id": 1}):
         created = await ensure_monthly_fees_up_to_current(p["id"])
+        count += len(created)
+    async for s in db.people.find({"kind": "student", "organization": "PWS", "status": {"$ne": "deactivated"}}, {"_id": 0, "id": 1}):
+        created = await ensure_monthly_fees_up_to_current(s["id"])
         count += len(created)
     return count
 
@@ -264,25 +440,38 @@ def _require_view_fees(user: dict):
 
 
 @router.get("/rate-card")
-async def get_rate_card(user: dict = Depends(get_current_user)):
+async def get_rate_card(entity: Optional[Literal["alpha", "pws"]] = None, user: dict = Depends(get_current_user)):
     _require_view_fees(user)
-    return RATE_CARDS
+    plan_count = await db.fee_plans.count_documents({"active": True})
+    payload = {"catalogue_enabled": plan_count > 0}
+    if entity == "pws":
+        return {**payload, "rates": PWS_RATE_CARDS}
+    if entity == "alpha":
+        return {**payload, "rates": RATE_CARDS}
+    return {**payload, "alpha": RATE_CARDS, "pws": PWS_RATE_CARDS}
 
 
 @router.get("")
 async def list_fees(
     player_id: Optional[str] = None,
+    entity_id: Optional[Literal["alpha", "pws"]] = None,
     centre: Optional[str] = None,
     sport: Optional[str] = None,
     category: Optional[str] = None,
     status: Optional[str] = None,
     period_month: Optional[str] = None,
     fee_type: Optional[str] = None,
+    institution: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
     _require_view_fees(user)
     q: dict = {}
     if player_id: q["player_id"] = player_id
+    if entity_id:
+        q["entity_id"] = entity_id
+    else:
+        inst = resolve_user_institution(user, institution)
+        q.update(fee_entity_filter(inst))
     if centre: q["centre"] = centre
     if sport: q["sport"] = sport
     if category: q["category"] = category
@@ -293,49 +482,61 @@ async def list_fees(
 
 
 @router.get("/dashboard")
-async def fees_dashboard(centre: Optional[str] = None, user: dict = Depends(get_current_user)):
+async def fees_dashboard(
+    centre: Optional[str] = None,
+    entity_id: Optional[Literal["alpha", "pws"]] = None,
+    institution: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
     _require_view_fees(user)
-    # Make sure every player's recurring dues are materialized before aggregating
     await ensure_all_players_monthly_fees()
     today = now_utc().strftime("%Y-%m-%d")
     this_month = today[:7]
-    centres = [centre] if centre else ["Balua", "Harding Park"]
-    out = {"date": today, "by_centre": {}}
-    for c in centres:
-        base = {"centre": c}
-        # Today's collection
-        collected_today = await db.fees.aggregate([
-            {"$match": {**base, "status": "paid", "paid_at": {"$regex": f"^{today}"}}},
-            {"$group": {"_id": None, "total": {"$sum": "$amount_due"}, "count": {"$sum": 1}}},
-        ]).to_list(1)
-        # Due this month
-        due_current = await db.fees.aggregate([
-            {"$match": {**base, "status": "due", "period_month": this_month}},
-            {"$group": {"_id": None, "total": {"$sum": "$amount_due"}, "count": {"$sum": 1}}},
-        ]).to_list(1)
-        # Past dues (period_month < this_month)
-        due_past = await db.fees.aggregate([
-            {"$match": {**base, "status": "due", "period_month": {"$lt": this_month}}},
-            {"$group": {"_id": None, "total": {"$sum": "$amount_due"}, "count": {"$sum": 1}}},
-        ]).to_list(1)
-        # Players with dues
-        with_dues = await db.fees.distinct("player_id", {**base, "status": "due"})
-        # Total received (lifetime)
-        received_total = await db.fees.aggregate([
-            {"$match": {**base, "status": "paid"}},
-            {"$group": {"_id": None, "total": {"$sum": "$amount_due"}}},
-        ]).to_list(1)
-        out["by_centre"][c] = {
-            "collected_today": (collected_today[0]["total"] if collected_today else 0),
-            "collected_today_count": (collected_today[0]["count"] if collected_today else 0),
-            "due_current_month": (due_current[0]["total"] if due_current else 0),
-            "due_current_count": (due_current[0]["count"] if due_current else 0),
-            "due_past": (due_past[0]["total"] if due_past else 0),
-            "due_past_count": (due_past[0]["count"] if due_past else 0),
-            "players_with_dues": len(with_dues),
-            "received_total": (received_total[0]["total"] if received_total else 0),
-        }
+    out = {"date": today, "by_centre": {}, "by_entity": {}}
+    inst = resolve_user_institution(user, institution)
+    show_alpha = entity_id != "pws" and inst in ("ALPHA", "BOTH")
+    show_pws = entity_id != "alpha" and inst in ("PWS", "BOTH")
+    if show_alpha:
+        centres = [centre] if centre else ["Balua", "Harding Park"]
+        for c in centres:
+            base = {"centre": c, "$or": [{"entity_id": "alpha"}, {"entity_id": {"$exists": False}}]}
+            out["by_centre"][c] = await _aggregate_fee_bucket(base, today, this_month)
+    if show_pws:
+        pws_base = {"entity_id": "pws"}
+        if centre:
+            pws_base["centre"] = centre
+        out["by_entity"]["pws"] = await _aggregate_fee_bucket(pws_base, today, this_month)
     return out
+
+
+async def _aggregate_fee_bucket(base: dict, today: str, this_month: str) -> dict:
+    collected_today = await db.fees.aggregate([
+        {"$match": {**base, "status": "paid", "paid_at": {"$regex": f"^{today}"}}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount_due"}, "count": {"$sum": 1}}},
+    ]).to_list(1)
+    due_current = await db.fees.aggregate([
+        {"$match": {**base, "status": "due", "period_month": this_month}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount_due"}, "count": {"$sum": 1}}},
+    ]).to_list(1)
+    due_past = await db.fees.aggregate([
+        {"$match": {**base, "status": "due", "period_month": {"$lt": this_month}}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount_due"}, "count": {"$sum": 1}}},
+    ]).to_list(1)
+    with_dues = await db.fees.distinct("player_id", {**base, "status": "due"})
+    received_total = await db.fees.aggregate([
+        {"$match": {**base, "status": "paid"}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount_due"}}},
+    ]).to_list(1)
+    return {
+        "collected_today": (collected_today[0]["total"] if collected_today else 0),
+        "collected_today_count": (collected_today[0]["count"] if collected_today else 0),
+        "due_current_month": (due_current[0]["total"] if due_current else 0),
+        "due_current_count": (due_current[0]["count"] if due_current else 0),
+        "due_past": (due_past[0]["total"] if due_past else 0),
+        "due_past_count": (due_past[0]["count"] if due_past else 0),
+        "people_with_dues": len(with_dues),
+        "received_total": (received_total[0]["total"] if received_total else 0),
+    }
 
 
 class CollectIn(BaseModel):
@@ -374,12 +575,15 @@ class FeePatch(BaseModel):
 
 @router.get("/player-dues/{player_id}")
 async def get_player_dues(player_id: str, user: dict = Depends(get_current_user)):
-    """Returns a complete dues breakdown for a player. Lazily back-fills monthly fees
-    up to the current month so the UI can show 'multi-month' collection options."""
+    """Returns a complete dues breakdown for a player or PWS student."""
     _require_view_fees(user)
     player = await db.people.find_one({"id": player_id}, {"_id": 0})
     if not player:
-        raise HTTPException(404, "Player not found")
+        raise HTTPException(404, "Person not found")
+    if player.get("kind") == "player" and player.get("organization") != "ALPHA":
+        raise HTTPException(400, "Fee dues are only available for ALPHA players or PWS students")
+    if player.get("kind") == "student" and player.get("organization") != "PWS":
+        raise HTTPException(400, "Fee dues are only available for PWS students")
     # Back-fill any missing recurring fees
     await ensure_monthly_fees_up_to_current(player_id)
     fees = await db.fees.find({"player_id": player_id}, {"_id": 0}).sort("due_date", 1).to_list(500)
@@ -391,15 +595,19 @@ async def get_player_dues(player_id: str, user: dict = Depends(get_current_user)
 
     # Advance (future) months payable up to end of the same financial year
     fy_end = _fy_end(current_month)
-    monthly_amt, tport = _monthly_amounts(player)
+    amounts = await _recurring_amounts_async(player)
+    monthly_amt, tport = amounts["monthly"], amounts["transport"]
+    hostel_amt = amounts["hostel"]
     existing_periods = {(f.get("fee_type"), f.get("period_month")) for f in fees}
     advance: List[dict] = []
     m = _next_month(current_month)
-    while m <= fy_end and monthly_amt > 0:
-        if ("Monthly", m) not in existing_periods:
+    while m <= fy_end:
+        if monthly_amt > 0 and ("Monthly", m) not in existing_periods:
             advance.append({"period_month": m, "fee_type": "Monthly", "amount": monthly_amt})
         if tport > 0 and ("Transport", m) not in existing_periods:
             advance.append({"period_month": m, "fee_type": "Transport", "amount": tport})
+        if hostel_amt > 0 and ("Hostel", m) not in existing_periods:
+            advance.append({"period_month": m, "fee_type": "Hostel", "amount": hostel_amt})
         m = _next_month(m)
 
     current_due = sum(f.get("amount_due", 0) for f in unpaid if f.get("period_month") == current_month)
@@ -426,7 +634,7 @@ async def get_player_dues(player_id: str, user: dict = Depends(get_current_user)
 
 class AdvanceSel(BaseModel):
     period_month: str  # YYYY-MM (must be after the current month, within same FY)
-    fee_type: Literal["Monthly", "Transport"] = "Monthly"
+    fee_type: Literal["Monthly", "Transport", "Hostel"] = "Monthly"
 
 
 class MultiCollectIn(BaseModel):
@@ -471,7 +679,7 @@ async def collect_multi(payload: MultiCollectIn, user: dict = Depends(get_curren
 
     player = await db.people.find_one({"id": player_id}, {"_id": 0})
     if not player:
-        raise HTTPException(404, "Player not found")
+        raise HTTPException(404, "Person not found")
 
     # ---- Advance (future) months: validate & materialize fee rows ----
     advance_ids: List[str] = []
@@ -479,6 +687,7 @@ async def collect_multi(payload: MultiCollectIn, user: dict = Depends(get_curren
         current_month = now_utc().strftime("%Y-%m")
         fy_end = _fy_end(current_month)
         monthly_amt, tport = _monthly_amounts(player)
+        amounts = await _recurring_amounts_async(player)
         seen = set()
         for sel in payload.advance:
             pm = (sel.period_month or "").strip()
@@ -493,9 +702,9 @@ async def collect_multi(payload: MultiCollectIn, user: dict = Depends(get_curren
             seen.add((sel.fee_type, pm))
             if await db.fees.find_one({"player_id": player_id, "fee_type": sel.fee_type, "period_month": pm}):
                 raise HTTPException(400, f"{sel.fee_type} fee for {pm} already exists/paid")
-            amt = monthly_amt if sel.fee_type == "Monthly" else tport
+            amt = amounts.get("monthly", 0) if sel.fee_type == "Monthly" else amounts.get("transport", 0) if sel.fee_type == "Transport" else amounts.get("hostel", 0)
             if amt <= 0:
-                raise HTTPException(400, f"No {sel.fee_type} fee configured for this player")
+                raise HTTPException(400, f"No {sel.fee_type} fee configured for this person")
             doc = _build_fee(player, sel.fee_type, amt, amt, pm, f"{pm}-05", extra={"advance_payment": True})
             await db.fees.insert_one(doc)
             advance_ids.append(doc["id"])
@@ -528,9 +737,11 @@ async def collect_multi(payload: MultiCollectIn, user: dict = Depends(get_curren
         "player": {
             "id": player.get("id"),
             "name": player.get("name"),
-            "centre": player.get("centre"),
+            "centre": player.get("centre") or player.get("group"),
             "sport": player.get("sport"),
-            "category": player.get("player_type"),
+            "category": player.get("player_type") or _pws_category(player) if player.get("kind") == "student" else player.get("player_type"),
+            "kind": player.get("kind"),
+            "organization": player.get("organization"),
         },
         "fees": fees_after,
         "total_amount": total_amount,
@@ -579,36 +790,23 @@ async def create_adhoc_fee(payload: AdHocFeeIn, user: dict = Depends(get_current
         datetime.fromisoformat(payload.due_date)
     except Exception:
         raise HTTPException(400, "Invalid due_date format. Use YYYY-MM-DD")
-    player = await db.people.find_one({"id": payload.player_id})
-    if not player:
-        raise HTTPException(404, "Player not found")
-    if player.get("kind") != "player":
-        raise HTTPException(400, "Ad-hoc fees can only be created for players")
-    if player.get("organization") != "ALPHA":
-        raise HTTPException(400, "Ad-hoc fees can only be created for ALPHA players")
+    person = await db.people.find_one({"id": payload.player_id})
+    if not person:
+        raise HTTPException(404, "Person not found")
+    if person.get("kind") == "player" and person.get("organization") != "ALPHA":
+        raise HTTPException(400, "Ad-hoc fees can only be created for ALPHA players or PWS students")
+    if person.get("kind") == "student" and person.get("organization") != "PWS":
+        raise HTTPException(400, "Ad-hoc fees can only be created for PWS students")
+    if person.get("kind") not in ("player", "student"):
+        raise HTTPException(400, "Ad-hoc fees can only be created for players or students")
+    player = person
     period = payload.due_date[:7]
-    rec = {
-        "id": str(uuid.uuid4()),
-        "player_id": player["id"],
-        "player_name": player["name"],
-        "centre": player.get("centre"),
-        "sport": player.get("sport"),
-        "category": player.get("player_type") or "Daily",
-        "fee_type": payload.fee_type,
-        "amount": payload.amount,
-        "amount_due": payload.amount,
-        "period_month": period,
-        "due_date": payload.due_date,
-        "status": "due",
-        "payment_mode": None,
-        "reference_id": None,
-        "paid_at": None,
-        "notes": (payload.notes or None),
+    rec = _build_fee(player, payload.fee_type, payload.amount, payload.amount, period, payload.due_date, extra={
+        "notes": payload.notes or None,
         "is_adhoc": True,
         "created_by_id": user["id"],
         "created_by_name": user["name"],
-        "created_at": now_utc().isoformat(),
-    }
+    })
     await db.fees.insert_one(rec)
     # Notify super admin audit feed
     await notify_role(
@@ -616,6 +814,7 @@ async def create_adhoc_fee(payload: AdHocFeeIn, user: dict = Depends(get_current
         ntype="fee_adhoc_created",
         title=f"Ad-hoc fee: {payload.fee_type}",
         message=f"{player['name']} · ₹{payload.amount:,} · due {payload.due_date} · by {user['name']}",
+        entity_id=rec.get("entity_id"),
     )
     return await db.fees.find_one({"id": rec["id"]}, {"_id": 0})
 
@@ -634,6 +833,9 @@ async def receipt_pdf(batch_id: str):
     player = await db.people.find_one({"id": fees[0]["player_id"]}, {"_id": 0}) or {}
     total = sum(f.get("amount_due", 0) for f in fees)
     f0 = fees[0]
+    is_pws = fees[0].get("entity_id") == "pws" or player.get("kind") == "student"
+    org_title = "Prarambhika World School" if is_pws else "ALPHA Sports Academy"
+    person_label = "Student" if is_pws else "Player"
 
     from io import BytesIO
     from reportlab.lib.pagesizes import A4
@@ -653,7 +855,7 @@ async def receipt_pdf(batch_id: str):
     c.rect(0, H - 38 * mm, W, 38 * mm, fill=1, stroke=0)
     c.setFillColorRGB(1, 1, 1)
     c.setFont("Helvetica-Bold", 18)
-    c.drawString(20 * mm, H - 18 * mm, "ALPHA Sports Academy")
+    c.drawString(20 * mm, H - 18 * mm, org_title)
     c.setFont("Helvetica", 10)
     c.drawString(20 * mm, H - 25 * mm, "Payment Receipt")
     c.setFont("Helvetica-Bold", 11)
@@ -665,14 +867,21 @@ async def receipt_pdf(batch_id: str):
     # Player block
     c.setFillColorRGB(0.06, 0.09, 0.16)
     c.setFont("Helvetica-Bold", 11)
-    c.drawString(20 * mm, y, "Player Details")
+    c.drawString(20 * mm, y, f"{person_label} Details")
     y -= 7 * mm
     c.setFont("Helvetica", 10)
-    lines = [
-        ("Name", player.get("name") or f0.get("player_name") or "-"),
-        ("Centre / Sport", f"{player.get('centre') or '-'}  ·  {player.get('sport') or '-'}"),
-        ("Category", _canonical_category(player.get("player_type") or f0.get("category") or "-")),
-    ]
+    if is_pws:
+        lines = [
+            ("Name", player.get("name") or f0.get("player_name") or "-"),
+            ("Class / Section", player.get("group") or f0.get("centre") or "-"),
+            ("Category", _pws_category(player) if player.get("kind") == "student" else f0.get("category") or "-"),
+        ]
+    else:
+        lines = [
+            ("Name", player.get("name") or f0.get("player_name") or "-"),
+            ("Centre / Sport", f"{player.get('centre') or '-'}  ·  {player.get('sport') or '-'}"),
+            ("Category", _canonical_category(player.get("player_type") or f0.get("category") or "-")),
+        ]
     for label, val in lines:
         c.setFillColorRGB(0.39, 0.45, 0.55)
         c.drawString(20 * mm, y, label)
@@ -756,9 +965,8 @@ class DiscountIn(BaseModel):
 
 @router.patch("/{fee_id}/discount")
 async def apply_discount(fee_id: str, payload: DiscountIn, user: dict = Depends(get_current_user)):
-    """Apply a discount to an unpaid fee. SUPER ADMIN ONLY per spec."""
-    if user.get("role") != "super_admin":
-        raise HTTPException(403, "Super Admin only — discounts cannot be granted by Sports Admin.")
+    """Apply a discount to an unpaid fee. Super Admin / approvers only; others submit approval requests."""
+    from routers.approvals import _can_approve, _history_entry, _approval_out
     fee = await db.fees.find_one({"id": fee_id})
     if not fee:
         raise HTTPException(404, "Fee not found")
@@ -768,6 +976,52 @@ async def apply_discount(fee_id: str, payload: DiscountIn, user: dict = Depends(
         raise HTTPException(400, "Discount must be ≥ 0")
     if not payload.reason.strip():
         raise HTTPException(400, "Reason is required")
+
+    if not _can_approve(user):
+        if not (get_perm(user, "edit_fees") or get_perm(user, "collect_fees")):
+            raise HTTPException(403, "Permission required to request fee concession")
+        existing = await db.approval_requests.find_one({
+            "type": "fee_concession",
+            "subject_id": fee_id,
+            "status": "pending",
+        })
+        if existing:
+            raise HTTPException(400, "A pending concession request already exists for this fee")
+        entity_id = fee.get("entity_id") or ("pws" if fee.get("organization") == "PWS" else "alpha")
+        doc = {
+            "id": str(uuid.uuid4()),
+            "type": "fee_concession",
+            "status": "pending",
+            "entity_id": entity_id,
+            "subject_id": fee_id,
+            "subject_label": f"{fee.get('person_name', 'Fee')} · ₹{payload.discount_amount} off",
+            "reason": payload.reason.strip(),
+            "payload": {
+                "fee_id": fee_id,
+                "discount_amount": payload.discount_amount,
+                "new_amount_due": payload.new_amount_due,
+            },
+            "requested_by_id": user["id"],
+            "requested_by_name": user["name"],
+            "requested_at": now_utc().isoformat(),
+            "decided_by_id": None,
+            "decided_by_name": None,
+            "decided_at": None,
+            "decision_note": None,
+            "history": [_history_entry("submitted", user, payload.reason.strip())],
+            "comments": [],
+        }
+        await db.approval_requests.insert_one(doc)
+        from core import notify_role
+        await notify_role(
+            "super_admin",
+            ntype="approval_request",
+            title="Fee concession request",
+            message=f"{user['name']} requested ₹{payload.discount_amount} concession",
+            ref_id=doc["id"],
+        )
+        return {"approval_required": True, "approval": _approval_out(doc)}
+
     new_amt = payload.new_amount_due if payload.new_amount_due is not None else max(0, (fee.get("amount_due") or 0) - payload.discount_amount)
     upd = {
         "amount_due": new_amt,

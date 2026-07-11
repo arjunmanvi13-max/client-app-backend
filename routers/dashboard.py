@@ -1,23 +1,28 @@
 from fastapi import APIRouter, Depends
-from core import db, get_current_user, now_utc, notification_filter_for_user
+from core import db, get_current_user, now_utc
+from notifications_service import unread_count_for_user
 
 router = APIRouter(tags=["dashboard"])
 
 @router.get("/dashboard")
 async def dashboard(user: dict = Depends(get_current_user)):
-    my_tasks = await db.tasks.count_documents({"assignee_ids": user["id"]})
+    uid = user["id"]
+    my_tasks = await db.tasks.count_documents({"$or": [{"assignee_id": uid}, {"assignee_ids": uid}]})
     pending_tasks = await db.tasks.count_documents({
-        "assignee_ids": user["id"],
-        "status": {"$nin": ["completed", "reviewed"]},
+        "$or": [{"assignee_id": uid}, {"assignee_ids": uid}],
+        "status": {"$nin": ["completed", "reviewed", "cancelled"]},
     })
     overdue_tasks = await db.tasks.count_documents({
-        "assignee_ids": user["id"],
-        "status": {"$nin": ["completed", "reviewed"]},
-        "deadline": {"$lt": now_utc().isoformat()},
+        "$and": [
+            {"$or": [{"assignee_id": uid}, {"assignee_ids": uid}]},
+            {"status": {"$nin": ["completed", "reviewed", "cancelled"]}},
+            {"$or": [
+                {"due_date": {"$lt": now_utc().isoformat()}},
+                {"deadline": {"$lt": now_utc().isoformat()}},
+            ]},
+        ],
     })
-    unread = await db.notifications.count_documents({
-        "$and": [notification_filter_for_user(user), {"read": False}],
-    })
+    unread = await unread_count_for_user(user)
     today = now_utc().strftime("%Y-%m-%d")
 
     extras = {}

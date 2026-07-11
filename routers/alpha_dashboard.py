@@ -152,19 +152,26 @@ async def _tasks_band(centre: Optional[str], sport: Optional[str]) -> dict:
     when extended in a future iteration.
     """
     today_iso = now_utc().isoformat()
-    statuses = ["assigned", "in_progress", "completed", "delayed", "reviewed"]
-    counts = {}
-    for s in statuses:
-        counts[s] = await db.tasks.count_documents({"status": s})
-    pending = counts.get("assigned", 0)
+    legacy_map = {"assigned": "open", "delayed": "blocked", "reviewed": "completed"}
+    counts = {"open": 0, "in_progress": 0, "blocked": 0, "completed": 0, "cancelled": 0}
+    async for doc in db.tasks.find({}, {"status": 1, "due_date": 1, "deadline": 1}):
+        raw = doc.get("status") or "open"
+        norm = legacy_map.get(raw, raw)
+        if norm not in counts:
+            norm = "open"
+        counts[norm] += 1
+    pending = counts.get("open", 0)
     in_progress = counts.get("in_progress", 0)
-    completed = counts.get("completed", 0) + counts.get("reviewed", 0)
-    delayed = counts.get("delayed", 0) + await db.tasks.count_documents({
-        "status": {"$nin": ["completed", "reviewed"]},
-        "deadline": {"$lt": today_iso},
+    completed = counts.get("completed", 0)
+    delayed = counts.get("blocked", 0) + await db.tasks.count_documents({
+        "status": {"$nin": ["completed", "reviewed", "cancelled"]},
+        "$or": [
+            {"due_date": {"$lt": today_iso}},
+            {"deadline": {"$lt": today_iso}},
+        ],
     })
     followup = await db.tasks.count_documents({
-        "$or": [{"status": "delayed"}, {"comments": {"$exists": True, "$ne": []}}],
+        "$or": [{"status": {"$in": ["blocked", "delayed"]}}, {"comments": {"$exists": True, "$ne": []}}],
     })
     return {
         "pending": pending,

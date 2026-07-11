@@ -115,3 +115,71 @@ class TestAcademicStructureAPI:
             timeout=15,
         )
         assert r.status_code == 403, r.text
+
+    def test_academic_years_list(self):
+        r = requests.get(f"{API}/academic/years", headers=_hdr("principal"), timeout=15)
+        assert r.status_code == 200, r.text
+        years = r.json()
+        assert isinstance(years, list)
+        if years:
+            assert "status" in years[0]
+            assert years[0]["status"] in ("open", "closed", "archived")
+
+    def test_archived_year_blocks_grade_create(self):
+        years = requests.get(f"{API}/academic/years", headers=_hdr("principal"), timeout=15)
+        if years.status_code != 200 or not years.json():
+            pytest.skip("No academic years")
+        year_id = years.json()[0]["id"]
+        requests.patch(
+            f"{API}/academic/years/{year_id}/status",
+            headers=_hdr("principal"),
+            json={"status": "archived"},
+            timeout=15,
+        )
+        r = requests.post(
+            f"{API}/academic/grades",
+            headers=_hdr("principal"),
+            json={"academic_year_id": year_id, "name": "11", "entity_id": "pws"},
+            timeout=15,
+        )
+        assert r.status_code == 403, r.text
+        requests.patch(
+            f"{API}/academic/years/{year_id}/status",
+            headers=_hdr("principal"),
+            json={"status": "open"},
+            timeout=15,
+        )
+
+    def test_teacher_subjects_scoped_in_section(self):
+        sec_r = requests.get(f"{API}/academic/sections/for-attendance", headers=_hdr("teacher"), timeout=15)
+        if sec_r.status_code != 200 or not sec_r.json().get("sections"):
+            pytest.skip("No teacher sections")
+        sid = sec_r.json()["sections"][0]["id"]
+        year_id = sec_r.json().get("academic_year", {}).get("id")
+        sub_r = requests.get(
+            f"{API}/academic/subjects",
+            headers=_hdr("teacher"),
+            params={"section_id": sid, "academic_year_id": year_id},
+            timeout=15,
+        )
+        assert sub_r.status_code == 200, sub_r.text
+        pr_subs = requests.get(
+            f"{API}/academic/subjects",
+            headers=_hdr("principal"),
+            params={"academic_year_id": year_id},
+            timeout=15,
+        )
+        if pr_subs.status_code == 200 and sub_r.json() and pr_subs.json():
+            teacher_ids = {s["id"] for s in sub_r.json()}
+            principal_ids = {s["id"] for s in pr_subs.json()}
+            assert teacher_ids.issubset(principal_ids)
+
+    def test_teacher_my_assignments(self):
+        r = requests.get(f"{API}/academic/my-assignments", headers=_hdr("teacher"), timeout=15)
+        assert r.status_code == 200, r.text
+        assert isinstance(r.json(), list)
+
+    def test_class_assignments_list(self):
+        r = requests.get(f"{API}/academic/class-assignments", headers=_hdr("principal"), timeout=15)
+        assert r.status_code == 200, r.text
+        assert isinstance(r.json(), list)

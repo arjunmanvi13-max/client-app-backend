@@ -1,17 +1,4 @@
-"""Reports module — Phase 1 (Financial Reports + Global Filters + Excel export).
-
-Endpoints (all mounted under /api/reports):
-    GET  /financial/summary        Revenue & Fee Summary aggregations
-    GET  /financial/defaulters     Aging report with buckets
-    GET  /financial/payment-modes  Payment mode breakdown (Cash/Online/Bank)
-    GET  /financial/export         Excel (.xlsx) export of a specific report
-
-Role gating:
-    super_admin  -> full access, all institutions
-    admin        -> Sports Admin: force institution=ALPHA
-    principal, vice_principal -> deny for financial (PWS only, no fees here)
-    others -> 403
-"""
+"""Reports module — Financial reports + MVP catalog, filters, Excel/PDF export."""
 from datetime import datetime, timedelta
 from io import BytesIO
 from typing import Optional, List, Dict, Any
@@ -19,7 +6,17 @@ from typing import Optional, List, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from core import db, get_current_user, is_super_admin, is_sports_admin, now_utc
+from core import db, get_current_user, is_super_admin, is_sports_admin, now_utc, resolve_user_institution, fee_entity_filter
+from reports_engine import (
+    _access_reports,
+    resolve_entity,
+    REPORT_CATALOG,
+    RUNNERS,
+    export_excel,
+    export_pdf,
+    dict_rows_to_matrix,
+    _subtitle,
+)
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -28,23 +25,23 @@ router = APIRouter(prefix="/reports", tags=["reports"])
 FEE_HEADS = ["Registration", "Monthly", "Hostel", "Day Boarding", "Transport", "Uniform", "Kit", "Tournament", "Books", "Event", "Other"]
 
 def _access_check(user: dict, area: str = "financial"):
-    """Guard: only super_admin, admin (Sports Admin) can access financial reports."""
+    """Guard: super_admin, Sports Admin, or PWS principal/VP for financial reports."""
     role = user.get("role")
     if role == "super_admin":
         return
     if role == "admin":
         return
+    if role in ("principal", "vice_principal"):
+        return
     raise HTTPException(403, "You do not have access to Reports.")
 
 
 def _resolve_institution(user: dict, requested: Optional[str]) -> str:
-    """Sports Admin is forced to ALPHA regardless of the query param."""
-    if is_sports_admin(user):
-        return "ALPHA"
-    v = (requested or "BOTH").upper()
-    if v not in ("ALPHA", "PWS", "BOTH"):
-        return "BOTH"
-    return v
+    return resolve_user_institution(user, requested)
+
+
+def _entity_filter(inst: str) -> Dict[str, Any]:
+    return fee_entity_filter(inst)
 
 
 def _parse_iso(d: Optional[str]) -> Optional[datetime]:
@@ -69,16 +66,15 @@ def _build_fee_query(
     """Build MongoDB query for `fees` collection with the global filters applied."""
     q: Dict[str, Any] = {}
     inst = _resolve_institution(user, institution)
-    # Financial reports are ALPHA-only currently (PWS has no fees module).
-    # So even if BOTH is requested, we only match ALPHA player fees.
-    if inst == "PWS":
-        # PWS has no fees — return an impossible clause to short-circuit
-        q["_no_pws_fees"] = True
-        return q
-    if centre and centre != "All":
-        q["centre"] = centre
-    if sport and sport != "All":
-        q["sport"] = sport
+    q.update(_entity_filter(inst))
+    if inst == "ALPHA":
+        if centre and centre != "All":
+            q["centre"] = centre
+        if sport and sport != "All":
+            q["sport"] = sport
+    elif inst == "PWS":
+        if centre and centre != "All":
+            q["centre"] = centre
     if payment_status == "paid":
         q["status"] = "paid"
     elif payment_status == "pending":
@@ -132,20 +128,10 @@ async def revenue_summary(
     prev_month_dt = (now.replace(day=1) - timedelta(days=1))
     prev_month = prev_month_dt.strftime("%Y-%m")
 
-    # PWS has no fees currently; return zeros if strictly PWS requested.
-    if inst == "PWS":
-        return {
-            "totals": {"collected_all_time": 0, "current_month": 0, "previous_month": 0, "outstanding": 0},
-            "by_fee_head": [],
-            "by_centre": [],
-            "by_sport": [],
-            "by_institution": [{"institution": "PWS", "collected": 0, "outstanding": 0}],
-        }
-
-    base_filter = {}
+    base_filter = _entity_filter(inst)
     if centre and centre != "All":
         base_filter["centre"] = centre
-    if sport and sport != "All":
+    if sport and sport != "All" and inst != "PWS":
         base_filter["sport"] = sport
 
     df = _parse_iso(date_from)
@@ -204,7 +190,17 @@ async def revenue_summary(
     by_sport_docs = await db.fees.aggregate(pipeline_s).to_list(20)
     by_sport = [{"sport": d["_id"] or "Unknown", "collected": int(d["collected"]), "count": d["count"]} for d in by_sport_docs]
 
-    by_institution = [{"institution": "ALPHA", "collected": collected_all, "outstanding": outstanding}]
+    by_institution = []
+    if inst in ("ALPHA", "BOTH"):
+        alpha_filter = {**base_filter, **_entity_filter("ALPHA")}
+        alpha_collected = await _sum({**alpha_filter, "status": "paid"})
+        alpha_outstanding = await _sum({**alpha_filter, "status": "due"})
+        by_institution.append({"institution": "ALPHA", "collected": alpha_collected, "outstanding": alpha_outstanding})
+    if inst in ("PWS", "BOTH"):
+        pws_filter = {**base_filter, **_entity_filter("PWS")}
+        pws_collected = await _sum({**pws_filter, "status": "paid"})
+        pws_outstanding = await _sum({**pws_filter, "status": "due"})
+        by_institution.append({"institution": "PWS", "collected": pws_collected, "outstanding": pws_outstanding})
     return {
         "totals": {
             "collected_all_time": collected_all,
@@ -231,13 +227,12 @@ async def defaulters_aging(
     _access_check(user)
     await _ensure_recurring_fees()
     inst = _resolve_institution(user, institution)
-    if inst == "PWS":
-        return {"buckets": {"0_7": 0, "8_15": 0, "16_30": 0, "gt_30": 0}, "rows": []}
     today_str = now_utc().strftime("%Y-%m-%d")
     q: Dict[str, Any] = {"status": "due", "due_date": {"$lt": today_str}}
+    q.update(_entity_filter(inst))
     if centre and centre != "All":
         q["centre"] = centre
-    if sport and sport != "All":
+    if sport and sport != "All" and inst != "PWS":
         q["sport"] = sport
     cur = db.fees.find(q, {"_id": 0}).limit(limit)
     fees_docs = await cur.to_list(limit)
@@ -284,12 +279,11 @@ async def payment_modes(
 ):
     _access_check(user)
     inst = _resolve_institution(user, institution)
-    if inst == "PWS":
-        return {"summary": {}, "transactions": []}
     q: Dict[str, Any] = {"status": "paid"}
+    q.update(_entity_filter(inst))
     if centre and centre != "All":
         q["centre"] = centre
-    if sport and sport != "All":
+    if sport and sport != "All" and inst != "PWS":
         q["sport"] = sport
     df = _parse_iso(date_from)
     dt = _parse_iso(date_to)
@@ -455,3 +449,100 @@ async def export_financial(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={fname}"},
     )
+
+
+# ---------------- MVP Reports (catalog, JSON, Excel/PDF export) ----------------
+
+def _report_filters(
+    entity: Optional[str],
+    date_from: Optional[str],
+    date_to: Optional[str],
+    grade: Optional[str],
+    section_id: Optional[str],
+    sport: Optional[str],
+    centre: Optional[str],
+    status: Optional[str],
+) -> dict:
+    return {
+        k: v for k, v in {
+            "entity": entity,
+            "date_from": date_from,
+            "date_to": date_to,
+            "grade": grade,
+            "section_id": section_id,
+            "sport": sport,
+            "centre": centre,
+            "status": status,
+        }.items() if v
+    }
+
+
+@router.get("/catalog")
+async def report_catalog(user: dict = Depends(get_current_user)):
+    """List available MVP reports and supported filters."""
+    _access_reports(user)
+    inst = resolve_user_institution(user, None)
+    entity_options = ["PWS", "ALPHA"] if inst == "BOTH" else [inst]
+    if is_super_admin(user) or inst == "BOTH":
+        entity_options = ["PWS", "ALPHA", "Combined"]
+    return {
+        "reports": REPORT_CATALOG,
+        "entity_options": entity_options,
+        "export_formats": ["xlsx", "pdf"],
+    }
+
+
+@router.get("/{report_id}/export")
+async def export_mvp_report(
+    report_id: str,
+    user: dict = Depends(get_current_user),
+    format: str = Query("xlsx", description="xlsx or pdf"),
+    entity: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    grade: Optional[str] = None,
+    section_id: Optional[str] = None,
+    sport: Optional[str] = None,
+    centre: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    _access_reports(user)
+    runner = RUNNERS.get(report_id)
+    if not runner:
+        raise HTTPException(404, f"Unknown report: {report_id}")
+    inst = resolve_entity(user, entity)
+    filters = _report_filters(entity, date_from, date_to, grade, section_id, sport, centre, status)
+    meta = await runner(user, inst, filters)
+    columns, matrix = dict_rows_to_matrix(meta)
+    subtitle = _subtitle(inst, filters, user)
+    fmt = (format or "xlsx").lower()
+    stamp = now_utc().strftime("%Y%m%d-%H%M")
+    fname = f"{report_id}-{stamp}.{fmt}"
+    if fmt == "pdf":
+        return export_pdf(meta["title"], columns, matrix, subtitle, fname)
+    if fmt == "xlsx":
+        return export_excel(meta["title"], columns, matrix, subtitle, fname)
+    raise HTTPException(400, "format must be xlsx or pdf")
+
+
+@router.get("/{report_id}")
+async def run_mvp_report(
+    report_id: str,
+    user: dict = Depends(get_current_user),
+    entity: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    grade: Optional[str] = None,
+    section_id: Optional[str] = None,
+    sport: Optional[str] = None,
+    centre: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    """Run an MVP report and return JSON (table rows + summary)."""
+    _access_reports(user)
+    runner = RUNNERS.get(report_id)
+    if not runner:
+        raise HTTPException(404, f"Unknown report: {report_id}")
+    inst = resolve_entity(user, entity)
+    filters = _report_filters(entity, date_from, date_to, grade, section_id, sport, centre, status)
+    return await runner(user, inst, filters)

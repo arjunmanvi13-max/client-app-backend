@@ -1,29 +1,49 @@
 from fastapi import APIRouter, Depends, HTTPException
-from core import (
-    db,
-    get_current_user,
+from core import db, get_current_user, now_utc
+from notifications_service import (
     normalize_notification,
     notification_filter_for_user,
+    unread_count_for_user,
+    mark_read,
+    mark_all_read,
 )
 
 router = APIRouter(prefix="/notifications", tags=["notifications"])
 
 
 @router.get("")
-async def list_notifications(user: dict = Depends(get_current_user)):
-    rows = await db.notifications.find(
-        notification_filter_for_user(user),
-        {"_id": 0},
-    ).to_list(500)
+async def list_notifications(
+    unread_only: bool = False,
+    user: dict = Depends(get_current_user),
+):
+    filt = notification_filter_for_user(user)
+    if unread_only:
+        filt = {**filt, "read": False}
+    rows = await db.notifications.find(filt, {"_id": 0}).to_list(500)
     normalized = [normalize_notification(r) for r in rows]
     normalized.sort(key=lambda n: n.get("created_at") or "", reverse=True)
-    return normalized[:200]
+    unread = sum(1 for n in normalized if not n.get("read"))
+    return {
+        "items": normalized[:200],
+        "unread_count": unread,
+        "total": len(normalized),
+    }
+
+
+@router.get("/unread-count")
+async def get_unread_count(user: dict = Depends(get_current_user)):
+    count = await unread_count_for_user(user)
+    return {"unread_count": count}
 
 
 @router.post("/{nid}/read")
 async def read_notification(nid: str, user: dict = Depends(get_current_user)):
-    filt = {**notification_filter_for_user(user), "id": nid}
-    result = await db.notifications.update_one(filt, {"$set": {"read": True}})
-    if result.matched_count == 0:
+    if not await mark_read(user, nid):
         raise HTTPException(404, "Notification not found")
-    return {"ok": True}
+    return {"ok": True, "read_at": now_utc().isoformat()}
+
+
+@router.post("/read-all")
+async def read_all_notifications(user: dict = Depends(get_current_user)):
+    modified = await mark_all_read(user)
+    return {"ok": True, "marked_read": modified}

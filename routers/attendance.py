@@ -1,8 +1,16 @@
+"""Attendance MVP — unified records with entity, session, marker, timestamp, audit."""
+import csv
+import io
 import uuid
 from typing import Optional, List, Literal
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from core import db, AttendanceBatch, get_current_user, now_utc, is_admin, assert_perm
+from core import (
+    db, AttendanceBatch, AttendanceCorrectionIn, get_current_user, now_utc, is_admin,
+    assert_perm, get_perm, resolve_user_institution, attendance_entity_filter,
+    attendance_entity_for_kind,
+)
 
 router = APIRouter(prefix="/attendance", tags=["attendance"])
 
@@ -10,7 +18,124 @@ _MARK_PERM_BY_KIND = {
     "student": "mark_student_attendance",
     "player": "mark_player_attendance",
     "staff": "mark_staff_attendance",
+    "coach": "mark_coach_attendance",
+    "teacher": "mark_student_attendance",
+    "hostel": "mark_hostel_attendance",
 }
+
+_DEFAULT_SESSION = {
+    "student": "morning",
+    "teacher": "morning",
+    "staff": "morning",
+    "coach": "morning",
+    "player": "morning",
+    "hostel": "evening",
+}
+
+
+def normalize_session(session: Optional[str], slot: Optional[str] = None, kind: Optional[str] = None) -> str:
+    if session:
+        s = session.strip().lower()
+        if s == "night":
+            return "evening"
+        return s
+    if slot:
+        return slot.strip().lower()
+    return _DEFAULT_SESSION.get(kind or "", "morning")
+
+
+def _dedup_query(kind: str, person_id: str, date: str, session: str) -> dict:
+    return {"kind": kind, "person_id": person_id, "date": date, "session": session}
+
+
+async def log_attendance_audit(
+    before: Optional[dict],
+    after: dict,
+    user: dict,
+    *,
+    reason: Optional[str] = None,
+    action: str = "update",
+) -> None:
+    await db.attendance_audit.insert_one({
+        "id": str(uuid.uuid4()),
+        "attendance_id": after.get("id") or (before or {}).get("id"),
+        "person_id": after.get("person_id"),
+        "date": after.get("date"),
+        "session": after.get("session"),
+        "kind": after.get("kind"),
+        "before_status": (before or {}).get("status"),
+        "after_status": after.get("status"),
+        "reason": reason,
+        "action": action,
+        "changed_by": user["id"],
+        "changed_by_name": user.get("name"),
+        "changed_at": now_utc().isoformat(),
+    })
+
+
+async def upsert_attendance(
+    user: dict,
+    *,
+    kind: str,
+    person_id: str,
+    date: str,
+    status: str,
+    session: Optional[str] = None,
+    slot: Optional[str] = None,
+    entity_id: Optional[str] = None,
+    group: Optional[str] = None,
+    section_id: Optional[str] = None,
+    sport: Optional[str] = None,
+    centre: Optional[str] = None,
+    organization: Optional[str] = None,
+    source: str = "manual",
+    extra: Optional[dict] = None,
+) -> dict:
+    """Upsert one attendance row; dedup on person + date + session + kind."""
+    sess = normalize_session(session, slot=slot, kind=kind)
+    filt = _dedup_query(kind, person_id, date, sess)
+    existing = await db.attendance.find_one(filt, {"_id": 0})
+    marked_at = now_utc().isoformat()
+    ent = entity_id or attendance_entity_for_kind(kind)
+    rec = {
+        "id": (existing or {}).get("id") or str(uuid.uuid4()),
+        "entity_id": ent,
+        "person_id": person_id,
+        "date": date,
+        "session": sess,
+        "kind": kind,
+        "status": status,
+        "marked_by": user["id"],
+        "marked_by_name": user.get("name"),
+        "marked_at": marked_at,
+        "source": source,
+        "updated_at": marked_at,
+        "group": group,
+        "section_id": section_id,
+        "sport": sport,
+        "centre": centre,
+        "organization": organization,
+    }
+    if slot:
+        rec["slot"] = slot
+    if extra:
+        rec.update(extra)
+    if existing:
+        if existing.get("status") != status:
+            await log_attendance_audit(existing, rec, user, action="remark")
+        rec["created_at"] = existing.get("created_at") or marked_at
+    else:
+        rec["created_at"] = marked_at
+    await db.attendance.update_one(filt, {"$set": rec}, upsert=True)
+    return rec
+
+
+def _can_view_attendance(user: dict) -> bool:
+    return is_admin(user) or get_perm(user, "view_attendance") or get_perm(user, "access_reports")
+
+
+def _can_correct_attendance(user: dict) -> bool:
+    return is_admin(user) or get_perm(user, "correct_attendance")
 
 
 # -------- Staff Attendance (default-present workflow) --------
@@ -31,7 +156,6 @@ def _can_mark_alpha_staff(user: dict, centre: Optional[str]) -> bool:
 async def _staff_query_for_user(user: dict, centre: Optional[str] = None, organization: Optional[str] = None) -> dict:
     q: dict = {"kind": "staff"}
     if is_admin(user):
-        # Sports Admin (admin role) is ALPHA-only
         if user.get("role") == "admin":
             q["organization"] = "ALPHA"
         elif organization:
@@ -58,9 +182,10 @@ async def _staff_query_for_user(user: dict, centre: Optional[str] = None, organi
 
 class StaffAttendanceIn(BaseModel):
     date: str
-    organization: Optional[Literal["PWS", "ALPHA"]] = None  # required for admin; inferred otherwise
-    centre: Optional[Literal["Balua", "Harding Park"]] = None  # for ALPHA only
+    organization: Optional[Literal["PWS", "ALPHA"]] = None
+    centre: Optional[Literal["Balua", "Harding Park"]] = None
     absent_staff_ids: List[str] = []
+    session: Optional[str] = "morning"
 
 
 @router.get("/staff-list")
@@ -75,7 +200,6 @@ async def staff_list(
 
 @router.post("/staff")
 async def mark_staff_attendance(payload: StaffAttendanceIn, user: dict = Depends(get_current_user)):
-    # Determine organization scope
     org = payload.organization
     role = user.get("role")
     if not is_admin(user):
@@ -97,26 +221,24 @@ async def mark_staff_attendance(payload: StaffAttendanceIn, user: dict = Depends
     if not staff_list_docs:
         raise HTTPException(400, "No staff found in scope")
     absent_set = set(payload.absent_staff_ids or [])
+    records = []
     for s in staff_list_docs:
         status = "absent" if s["id"] in absent_set else "present"
-        rec = {
-            "date": payload.date,
-            "kind": "staff",
-            "organization": s.get("organization"),
-            "centre": s.get("centre"),
-            "person_id": s["id"],
-            "status": status,
-            "marked_by": user["id"],
-            "marked_by_name": user["name"],
-            "created_at": now_utc().isoformat(),
-        }
-        await db.attendance.update_one(
-            {"date": payload.date, "kind": "staff", "person_id": s["id"]},
-            {"$set": rec},
-            upsert=True,
+        rec = await upsert_attendance(
+            user,
+            kind="staff",
+            person_id=s["id"],
+            date=payload.date,
+            status=status,
+            session=payload.session,
+            entity_id="pws" if org == "PWS" else "alpha",
+            organization=s.get("organization"),
+            centre=s.get("centre"),
+            source="staff_default_present",
         )
+        records.append(rec)
     return {
-        "count": len(staff_list_docs),
+        "count": len(records),
         "present": len(staff_list_docs) - len(absent_set),
         "absent": len(absent_set),
         "organization": org,
@@ -129,14 +251,19 @@ async def list_staff_attendance(
     date: Optional[str] = None,
     organization: Optional[str] = None,
     centre: Optional[str] = None,
+    session: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
-    # enforce visibility
-    await _staff_query_for_user(user, centre=centre, organization=organization)  # raises on bad role
+    await _staff_query_for_user(user, centre=centre, organization=organization)
     q: dict = {"kind": "staff"}
-    if date: q["date"] = date
-    if organization: q["organization"] = organization
-    if centre: q["centre"] = centre
+    if date:
+        q["date"] = date
+    if organization:
+        q["organization"] = organization
+    if centre:
+        q["centre"] = centre
+    if session:
+        q["session"] = normalize_session(session, kind="staff")
     return await db.attendance.find(q, {"_id": 0}).sort("date", -1).to_list(2000)
 
 
@@ -150,20 +277,13 @@ def _can_mark_coach_attendance(user: dict) -> bool:
 
 
 async def _coach_scope_filter(user: dict) -> dict:
-    """Build mongo query scoping which coaches the marker may see/mark.
-    - Super Admin: every active coach.
-    - Sports Admin: every active coach (head + assistant) — ALPHA only by design.
-    - Head Coach: themselves + active assistant coaches in their assigned_centres.
-    """
     base: dict = {"role": "coach", "status": {"$ne": "deactivated"}}
     if user.get("role") == "super_admin":
         return base
     if user.get("role") == "admin":
-        # Sports Admin oversees all ALPHA coaches (head + assistant)
         return base
     if user.get("role") == "coach" and user.get("coach_type") == "head":
         centres = user.get("assigned_centres") or []
-        # self OR assistant coaches restricted to overlapping centres
         clauses: list = [{"id": user["id"]}]
         asst_clause: dict = {"coach_type": "assistant"}
         if centres:
@@ -172,10 +292,8 @@ async def _coach_scope_filter(user: dict) -> dict:
         base["$or"] = clauses
         return base
     if user.get("role") == "coach" and user.get("coach_type") == "assistant":
-        # Assistants can only view themselves on the list (read-only on UI)
         base["id"] = user["id"]
         return base
-    # Other roles: no scope (caller will 403)
     return {"_block": True}
 
 
@@ -200,6 +318,7 @@ async def coaches_list(user: dict = Depends(get_current_user)):
 class CoachAttendanceIn(BaseModel):
     date: str
     absent_coach_ids: List[str] = []
+    session: Optional[str] = "morning"
 
 
 @router.post("/coaches")
@@ -213,38 +332,45 @@ async def mark_coach_attendance(payload: CoachAttendanceIn, user: dict = Depends
     if not coaches:
         raise HTTPException(400, "No coaches found")
     absent_set = set(payload.absent_coach_ids or [])
+    records = []
     for c in coaches:
         status = "absent" if c["id"] in absent_set else "present"
-        rec = {
-            "date": payload.date,
-            "kind": "coach",
-            "person_id": c["id"],
-            "user_id": c["id"],
-            "name": c["name"],
-            "coach_type": c.get("coach_type"),
-            "status": status,
-            "marked_by": user["id"],
-            "marked_by_name": user["name"],
-            "created_at": now_utc().isoformat(),
-        }
-        await db.attendance.update_one(
-            {"date": payload.date, "kind": "coach", "person_id": c["id"]},
-            {"$set": rec},
-            upsert=True,
+        rec = await upsert_attendance(
+            user,
+            kind="coach",
+            person_id=c["id"],
+            date=payload.date,
+            status=status,
+            session=payload.session,
+            entity_id="alpha",
+            source="coach_default_present",
+            extra={
+                "user_id": c["id"],
+                "name": c["name"],
+                "coach_type": c.get("coach_type"),
+            },
         )
+        records.append(rec)
     return {
-        "count": len(coaches),
+        "count": len(records),
         "present": len(coaches) - len(absent_set),
         "absent": len(absent_set),
     }
 
 
 @router.get("/coaches")
-async def list_coach_attendance(date: Optional[str] = None, user: dict = Depends(get_current_user)):
+async def list_coach_attendance(
+    date: Optional[str] = None,
+    session: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
     if not (_can_mark_coach_attendance(user) or user.get("role") == "coach"):
         raise HTTPException(403, "Not allowed")
     q: dict = {"kind": "coach"}
-    if date: q["date"] = date
+    if date:
+        q["date"] = date
+    if session:
+        q["session"] = normalize_session(session, kind="coach")
     return await db.attendance.find(q, {"_id": 0}).sort("date", -1).to_list(2000)
 
 
@@ -256,85 +382,310 @@ async def mark_attendance_batch(payload: AttendanceBatch, user: dict = Depends(g
     if not is_admin(user):
         assert_perm(user, perm)
     group = payload.group
-    if payload.kind == "student" and payload.section_id:
+    section_id = payload.section_id
+    if payload.kind == "student" and section_id:
         from routers.academic import resolve_section_group, assert_teacher_section_access
-        await assert_teacher_section_access(user, payload.section_id)
-        _, group = await resolve_section_group(payload.section_id)
+        await assert_teacher_section_access(user, section_id)
+        _, group = await resolve_section_group(section_id)
     if payload.kind == "student" and not group:
         raise HTTPException(400, "Section or group is required for student attendance")
     from routers.parents import push_parent_notification
     records = []
     today_str = now_utc().strftime("%Y-%m-%d")
+    sess = normalize_session(payload.session, kind=payload.kind)
     for m in payload.marks:
-        rec = {
-            "id": str(uuid.uuid4()),
-            "date": payload.date,
-            "kind": payload.kind,
-            "group": group,
-            "sport": payload.sport,
-            "session": payload.session,
-            "person_id": m.person_id,
-            "status": m.status,
-            "marked_by": user["id"],
-            "marked_by_name": user["name"],
-            "created_at": now_utc().isoformat(),
-        }
-        await db.attendance.update_one(
-            {
-                "date": payload.date,
-                "kind": payload.kind,
-                "group": group,
-                "session": payload.session,
-                "person_id": m.person_id,
-            },
-            {"$set": rec},
-            upsert=True,
+        rec = await upsert_attendance(
+            user,
+            kind=payload.kind,
+            person_id=m.person_id,
+            date=payload.date,
+            status=m.status,
+            session=sess,
+            group=group,
+            section_id=section_id,
+            sport=payload.sport,
+            source="batch",
         )
         records.append(rec)
-        # Parent notification — only when today's mark is absent and target is a student/player
-        if m.status == "absent" and payload.date == today_str and payload.kind in ("student", "player"):
+        if payload.date == today_str and payload.kind in ("student", "player"):
+            person = await db.people.find_one({"id": m.person_id}, {"_id": 0, "name": 1})
+            pname = (person or {}).get("name", "Ward")
             try:
-                await push_parent_notification(
-                    m.person_id,
-                    title="Absent today",
-                    body=f"Your ward was marked absent on {today_str}.",
-                    ntype="absent_today",
-                )
+                if m.status == "absent":
+                    await push_parent_notification(
+                        m.person_id,
+                        title="Absence recorded",
+                        body=f"{pname} was marked absent on {today_str}.",
+                        ntype="absence",
+                        ref_id=m.person_id,
+                    )
+                elif m.status in ("present", "late"):
+                    await push_parent_notification(
+                        m.person_id,
+                        title="Attendance marked",
+                        body=f"{pname} was marked {m.status} on {today_str}.",
+                        ntype="attendance_marked",
+                        ref_id=m.person_id,
+                    )
             except Exception:
                 pass
     return {"count": len(records), "records": records}
 
+
 @router.get("")
 async def list_attendance(
     date: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     kind: Optional[str] = None,
     group: Optional[str] = None,
+    sport: Optional[str] = None,
+    session: Optional[str] = None,
+    section_id: Optional[str] = None,
     person_id: Optional[str] = None,
+    institution: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
     if kind and not is_admin(user):
         perm = _MARK_PERM_BY_KIND.get(kind)
         if perm:
             assert_perm(user, perm)
-    q = {}
-    if date: q["date"] = date
-    if kind: q["kind"] = kind
-    if group: q["group"] = group
-    if person_id: q["person_id"] = person_id
+    elif not _can_view_attendance(user) and user.get("role") not in ("teacher", "coach", "warden"):
+        if kind:
+            perm = _MARK_PERM_BY_KIND.get(kind)
+            if perm:
+                assert_perm(user, perm)
+
+    q: dict = {}
+    if date:
+        q["date"] = date
+    elif start_date or end_date:
+        dr: dict = {}
+        if start_date:
+            dr["$gte"] = start_date
+        if end_date:
+            dr["$lte"] = end_date
+        q["date"] = dr
+    if kind:
+        q["kind"] = kind
+    if group:
+        q["group"] = group
+    if sport:
+        q["sport"] = sport
+    if session:
+        q["session"] = normalize_session(session, kind=kind)
+    if section_id:
+        q["section_id"] = section_id
+    if person_id:
+        q["person_id"] = person_id
+
+    if user.get("role") == "teacher":
+        from routers.academic import assigned_section_ids_for_teacher
+        assigned = await assigned_section_ids_for_teacher(user["id"])
+        if not assigned:
+            return []
+        if kind == "student" or not kind:
+            sec_filter = {"$or": [{"section_id": {"$in": assigned}}, {"group": {"$in": []}}]}
+            sections = await db.sections.find({"id": {"$in": assigned}}, {"label": 1, "_id": 0}).to_list(50)
+            labels = [s["label"] for s in sections]
+            sec_filter = {"$or": [{"section_id": {"$in": assigned}}, {"group": {"$in": labels}}]}
+            q = {"$and": [q, sec_filter]} if q else sec_filter
+
+    inst = resolve_user_institution(user, institution)
+    ent_filt = attendance_entity_filter(inst)
+    if ent_filt:
+        q = {"$and": [q, ent_filt]} if q else ent_filt
     return await db.attendance.find(q, {"_id": 0}).sort("date", -1).to_list(2000)
 
+
+def _pct(counts: dict) -> float:
+    total = sum(counts.values())
+    if not total:
+        return 0.0
+    present = counts.get("present", 0) + counts.get("late", 0)
+    return round(100.0 * present / total, 1)
+
+
 @router.get("/summary")
-async def attendance_summary(_user: dict = Depends(get_current_user)):
+async def attendance_summary(
+    date: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    kind: Optional[str] = None,
+    group: Optional[str] = None,
+    sport: Optional[str] = None,
+    session: Optional[str] = None,
+    section_id: Optional[str] = None,
+    institution: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    if not _can_view_attendance(user) and not is_admin(user):
+        if kind:
+            perm = _MARK_PERM_BY_KIND.get(kind)
+            if perm:
+                assert_perm(user, perm)
+        else:
+            raise HTTPException(403, "view_attendance permission required")
+
     today = now_utc().strftime("%Y-%m-%d")
+    if date:
+        start_date = end_date = date
+    if not start_date and not end_date:
+        start_date = end_date = today
+
+    match: dict = {"date": {"$gte": start_date, "$lte": end_date}}
+    if kind:
+        match["kind"] = kind
+    if group:
+        match["group"] = group
+    if sport:
+        match["sport"] = sport
+    if session:
+        match["session"] = normalize_session(session, kind=kind)
+    if section_id:
+        match["section_id"] = section_id
+
+    inst = resolve_user_institution(user, institution)
+    ent_filt = attendance_entity_filter(inst)
+    if ent_filt:
+        match = {"$and": [match, ent_filt]}
+
     pipeline = [
-        {"$match": {"date": today}},
-        {"$group": {"_id": {"kind": "$kind", "status": "$status"}, "count": {"$sum": 1}}},
+        {"$match": match},
+        {"$group": {
+            "_id": {"kind": "$kind", "status": "$status", "group": "$group", "sport": "$sport"},
+            "count": {"$sum": 1},
+        }},
     ]
-    rows = await db.attendance.aggregate(pipeline).to_list(100)
-    summary = {}
+    rows = await db.attendance.aggregate(pipeline).to_list(500)
+
+    by_kind: dict = {}
+    by_group: dict = {}
+    by_sport: dict = {}
+    totals = {"present": 0, "absent": 0, "late": 0, "leave": 0}
+
     for r in rows:
-        kind = r["_id"]["kind"]
+        kid = r["_id"]["kind"]
         st = r["_id"]["status"]
-        summary.setdefault(kind, {"present": 0, "absent": 0, "late": 0, "leave": 0})
-        summary[kind][st] = r["count"]
-    return {"date": today, "summary": summary}
+        grp = r["_id"].get("group") or "—"
+        sp = r["_id"].get("sport") or "—"
+        cnt = r["count"]
+        by_kind.setdefault(kid, {"present": 0, "absent": 0, "late": 0, "leave": 0})
+        by_kind[kid][st] = by_kind[kid].get(st, 0) + cnt
+        if grp != "—":
+            by_group.setdefault(grp, {"present": 0, "absent": 0, "late": 0, "leave": 0})
+            by_group[grp][st] = by_group[grp].get(st, 0) + cnt
+        if sp != "—":
+            by_sport.setdefault(sp, {"present": 0, "absent": 0, "late": 0, "leave": 0})
+            by_sport[sp][st] = by_sport[sp].get(st, 0) + cnt
+        if st in totals:
+            totals[st] += cnt
+
+    total_n = sum(totals.values())
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "filters": {"kind": kind, "group": group, "sport": sport, "session": session, "section_id": section_id},
+        "totals": {**totals, "total": total_n, "percentage": _pct(totals)},
+        "by_kind": {k: {**v, "total": sum(v.values()), "percentage": _pct(v)} for k, v in by_kind.items()},
+        "by_group": {k: {**v, "total": sum(v.values()), "percentage": _pct(v)} for k, v in by_group.items()},
+        "by_sport": {k: {**v, "total": sum(v.values()), "percentage": _pct(v)} for k, v in by_sport.items()},
+        "summary": by_kind,
+    }
+
+
+@router.post("/correct")
+async def correct_attendance(payload: AttendanceCorrectionIn, user: dict = Depends(get_current_user)):
+    if not _can_correct_attendance(user):
+        raise HTTPException(403, "correct_attendance permission required")
+    if not payload.reason.strip():
+        raise HTTPException(400, "Audit reason is required")
+    row = await db.attendance.find_one({"id": payload.record_id}, {"_id": 0})
+    if not row:
+        raise HTTPException(404, "Attendance record not found")
+    marked_at = now_utc().isoformat()
+    updated = {**row, "status": payload.status, "marked_by": user["id"], "marked_by_name": user.get("name"),
+               "marked_at": marked_at, "updated_at": marked_at, "source": "correction"}
+    await db.attendance.update_one({"id": payload.record_id}, {"$set": updated})
+    await log_attendance_audit(row, updated, user, reason=payload.reason.strip(), action="correction")
+    return updated
+
+
+@router.get("/audit")
+async def attendance_audit_history(
+    record_id: Optional[str] = None,
+    person_id: Optional[str] = None,
+    date: Optional[str] = None,
+    limit: int = Query(100, le=500),
+    user: dict = Depends(get_current_user),
+):
+    if not _can_view_attendance(user) and not is_admin(user):
+        raise HTTPException(403, "view_attendance permission required")
+    q: dict = {}
+    if record_id:
+        q["attendance_id"] = record_id
+    if person_id:
+        q["person_id"] = person_id
+    if date:
+        q["date"] = date
+    return await db.attendance_audit.find(q, {"_id": 0}).sort("changed_at", -1).to_list(limit)
+
+
+@router.get("/export")
+async def export_attendance(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    kind: Optional[str] = None,
+    group: Optional[str] = None,
+    sport: Optional[str] = None,
+    session: Optional[str] = None,
+    institution: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    if not _can_view_attendance(user):
+        raise HTTPException(403, "view_attendance permission required")
+    today = now_utc().strftime("%Y-%m-%d")
+    if not start_date:
+        start_date = today
+    if not end_date:
+        end_date = today
+
+    q: dict = {"date": {"$gte": start_date, "$lte": end_date}}
+    if kind:
+        q["kind"] = kind
+    if group:
+        q["group"] = group
+    if sport:
+        q["sport"] = sport
+    if session:
+        q["session"] = normalize_session(session, kind=kind)
+    inst = resolve_user_institution(user, institution)
+    ent_filt = attendance_entity_filter(inst)
+    if ent_filt:
+        q = {"$and": [q, ent_filt]}
+
+    rows = await db.attendance.find(q, {"_id": 0}).sort([("date", -1), ("kind", 1)]).to_list(5000)
+    person_ids = list({r["person_id"] for r in rows})
+    people = await db.people.find({"id": {"$in": person_ids}}, {"_id": 0, "id": 1, "name": 1}).to_list(5000)
+    users = await db.users.find({"id": {"$in": person_ids}}, {"_id": 0, "id": 1, "name": 1}).to_list(5000)
+    names = {p["id"]: p["name"] for p in people}
+    names.update({u["id"]: u["name"] for u in users})
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["date", "kind", "session", "entity", "person_id", "person_name", "status", "group", "sport", "centre", "marked_by_name", "marked_at", "source"])
+    for r in rows:
+        writer.writerow([
+            r.get("date"), r.get("kind"), r.get("session"), r.get("entity_id"),
+            r.get("person_id"), names.get(r.get("person_id"), ""),
+            r.get("status"), r.get("group") or "", r.get("sport") or "", r.get("centre") or "",
+            r.get("marked_by_name") or "", r.get("marked_at") or r.get("created_at") or "",
+            r.get("source") or "",
+        ])
+    buf.seek(0)
+    filename = f"attendance_{start_date}_{end_date}.csv"
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
