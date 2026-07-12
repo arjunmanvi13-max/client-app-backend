@@ -115,6 +115,19 @@ def _player_role_label(player: dict) -> str:
     return " · ".join(parts) if parts else "—"
 
 
+def _program_label(
+    sport: str,
+    centre: str,
+    player_type: str,
+    session: Optional[str] = None,
+) -> str:
+    parts = [sport, player_type]
+    if player_type == "Daily" and session:
+        parts.append(session)
+    parts.append(centre)
+    return " · ".join(parts)
+
+
 def _player_type_query(player_type: str) -> Any:
     if player_type == "Hostel":
         return {"$in": ["Hostel", "Hostel Only"]}
@@ -199,7 +212,7 @@ async def _players_filtered(
         q["name"] = {"$regex": player_search.strip(), "$options": "i"}
     players = await db.people.find(
         q,
-        {"_id": 0, "id": 1, "name": 1, "age": 1, "skill_level": 1, "player_type": 1, "status": 1, "slot": 1},
+        {"_id": 0, "id": 1, "name": 1, "age": 1, "skill_level": 1, "player_type": 1, "status": 1, "slot": 1, "date_of_admission": 1},
     ).sort("name", 1).to_list(500)
     if age_group and age_group != "All":
         players = [p for p in players if age_group_for_age(p.get("age")) == age_group]
@@ -363,6 +376,8 @@ async def assessment_grid(
             "age_group": age_group_for_age(p.get("age")),
             "role": _player_role_label(p),
             "player_type": p.get("player_type"),
+            "date_of_admission": p.get("date_of_admission"),
+            "program": _program_label(sport, centre, player_type, session),
             "scores": scores,
             "technical_detail": scores.get("technical_detail"),
             "sub_parameter_averages": scores.get("sub_parameter_averages"),
@@ -868,6 +883,15 @@ def _render_assessment_pdf(record: dict, year_records: list[dict]) -> bytes:
             new_page()
 
     # ---- Page 1: Profile & summary ----
+    if record.get("status") == "draft":
+        c.saveState()
+        c.setFillColor(rl_colors.HexColor("#FEF3C7"))
+        c.setFont("Helvetica-Bold", 36)
+        c.translate(w / 2, h / 2)
+        c.rotate(35)
+        c.drawCentredString(0, 0, "DRAFT")
+        c.restoreState()
+
     c.setFillColor(navy)
     c.setFont("Helvetica-Bold", 20)
     c.drawString(margin, y, "ALPHA Sports Academy")
@@ -891,9 +915,15 @@ def _render_assessment_pdf(record: dict, year_records: list[dict]) -> bytes:
         + (f"  ·  {session_txt}" if session_txt else "")
         + f"  ·  {stage_label_for(record.get('assessment_stage', ''))}"
     )
-    c.drawString(margin, y, meta)
+    program = record.get("program") or meta
+    c.drawString(margin, y, f"Program: {program}")
     y -= 5 * mm
+    if record.get("date_of_admission"):
+        c.drawString(margin, y, f"Date of joining: {format_date_display(record.get('date_of_admission'))}")
+        y -= 5 * mm
     c.drawString(margin, y, f"Assessment date: {format_date_display(record.get('date'))}")
+    y -= 5 * mm
+    c.drawString(margin, y, f"Assessment term: {stage_label_for(record.get('assessment_stage', ''))}")
     y -= 5 * mm
     c.drawString(margin, y, f"Assessed by: {record.get('saved_by_name') or '—'} on {format_datetime_display(record.get('updated_at') or record.get('created_at'))}")
     y -= 10 * mm
@@ -1055,6 +1085,88 @@ def _render_assessment_pdf(record: dict, year_records: list[dict]) -> bytes:
     return buf.getvalue()
 
 
+class PlayerReportPdfIn(BaseModel):
+    centre: Centre
+    sport: Sport
+    player_type: PlayerType
+    session: Optional[Session] = None
+    assessment_stage: AssessmentStage
+    date: str
+    entry: AssessmentEntryIn
+
+    @model_validator(mode="after")
+    def _daily_session_required(self):
+        if self.player_type == "Daily" and not self.session:
+            raise ValueError("Session type is required when player type is Daily")
+        return self
+
+
+@router.post("/export/pdf/report")
+async def export_player_report_pdf(
+    payload: PlayerReportPdfIn,
+    user: dict = Depends(get_current_user),
+):
+    """Generate a player assessment summary PDF from current entry data (draft or saved)."""
+    _assert_enter(user)
+    _coach_scope_ok(user, payload.centre, payload.sport, payload.player_type)
+    from routers.coach import assert_player_in_coach_roster
+
+    person = await db.people.find_one(
+        {"id": payload.entry.player_id, "kind": "player"},
+        {"_id": 0, "id": 1, "name": 1, "date_of_admission": 1},
+    )
+    if not person:
+        raise HTTPException(404, "Player not found")
+    await assert_player_in_coach_roster(user, payload.entry.player_id)
+
+    scores = _entry_to_scores(payload.sport, payload.entry)
+    ts = now_utc().isoformat()
+    record = {
+        "player_id": payload.entry.player_id,
+        "player_name": person["name"],
+        "centre": payload.centre,
+        "sport": payload.sport,
+        "player_type": payload.player_type,
+        "session": payload.session,
+        "assessment_stage": normalize_assessment_stage(payload.assessment_stage),
+        "date": payload.date,
+        "scores": scores,
+        "coach_remark": (payload.entry.coach_remark or "").strip() or None,
+        "status": "draft",
+        "saved_by_name": user.get("name"),
+        "updated_at": ts,
+        "created_at": ts,
+        "date_of_admission": person.get("date_of_admission"),
+        "program": _program_label(payload.sport, payload.centre, payload.player_type, payload.session),
+    }
+    year = assessment_year_from_date(payload.date)
+    year_records = await _year_assessments_for_player(payload.entry.player_id, year, payload.sport)
+    pdf = _render_assessment_pdf(record, year_records)
+    name = (person.get("name") or "player").replace(" ", "_")
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="assessment-{name}-{payload.date}.pdf"'},
+    )
+
+
+async def _enrich_record_for_pdf(record: dict, sport: str) -> dict:
+    person = await db.people.find_one(
+        {"id": record.get("player_id"), "kind": "player"},
+        {"_id": 0, "date_of_admission": 1},
+    )
+    out = dict(record)
+    if person:
+        out["date_of_admission"] = person.get("date_of_admission")
+    out["program"] = _program_label(
+        out.get("sport") or sport,
+        out.get("centre") or "—",
+        out.get("player_type") or "—",
+        out.get("session") or out.get("slot"),
+    )
+    return out
+
+
 @router.get("/export/pdf")
 async def export_assessment_pdf(
     centre: Centre,
@@ -1093,7 +1205,7 @@ async def export_assessment_pdf(
     year = assessment_year_from_date(date)
 
     if len(rows) == 1:
-        row = rows[0]
+        row = await _enrich_record_for_pdf(rows[0], sport)
         year_records = await _year_assessments_for_player(row["player_id"], year, sport)
         pdf = _render_assessment_pdf(row, year_records)
         name = (row.get("player_name") or "player").replace(" ", "_")
@@ -1106,9 +1218,10 @@ async def export_assessment_pdf(
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for row in rows:
-            year_records = await _year_assessments_for_player(row["player_id"], year, sport)
-            pdf = _render_assessment_pdf(row, year_records)
-            name = (row.get("player_name") or row["player_id"]).replace(" ", "_")
+            enriched = await _enrich_record_for_pdf(row, sport)
+            year_records = await _year_assessments_for_player(enriched["player_id"], year, sport)
+            pdf = _render_assessment_pdf(enriched, year_records)
+            name = (enriched.get("player_name") or enriched["player_id"]).replace(" ", "_")
             zf.writestr(f"assessment-{name}-{date}.pdf", pdf)
     zip_buf.seek(0)
     return StreamingResponse(
