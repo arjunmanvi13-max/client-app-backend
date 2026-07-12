@@ -316,7 +316,9 @@ def build_scores(
     }
 
 
-def _area_complete(subs: Dict[str, Optional[int]]) -> bool:
+def _area_complete(subs: Optional[Dict[str, Optional[int]]]) -> bool:
+    if not subs:
+        return False
     return all(v is not None for v in subs.values())
 
 
@@ -325,7 +327,7 @@ def scores_complete(scores: Optional[dict], sport: str) -> bool:
         return False
     detail = scores.get("technical_detail") or {}
     for area in area_keys(sport):
-        if area not in detail or not _area_complete(detail[area]):
+        if not _area_complete(detail.get(area)):
             return False
     return all(scores.get(k) is not None for k in CORE_SCORE_KEYS)
 
@@ -335,7 +337,7 @@ def completion_status(scores: Optional[dict], sport: str) -> str:
         return "not_started"
     detail = scores.get("technical_detail") or {}
     any_score = any(
-        subs.get(sk) is not None
+        (detail.get(area) or {}).get(sk) is not None
         for area in area_keys(sport)
         for sk in (detail.get(area) or {})
     )
