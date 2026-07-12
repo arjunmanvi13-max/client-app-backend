@@ -1,4 +1,4 @@
-"""Player assessment — sport-specific technical sub-scores, player-type setup, PDF export."""
+"""Player assessment — deep technical sub-parameters, 4-term layout, PDF export."""
 import io
 import uuid
 import zipfile
@@ -8,145 +8,46 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
+from assessment_schema import (
+    SCHEMA_VERSION,
+    ASSESSMENT_STAGES,
+    STAGE_ORDER,
+    CORE_SCORE_KEYS,
+    PARAMETERS,
+    build_scores,
+    normalize_scores,
+    scores_complete,
+    completion_status,
+    score_label,
+    deep_meta,
+    area_keys,
+    metadata_export,
+    assessment_year_from_date,
+    avg_non_na,
+)
 from core import db, get_current_user, get_perm, is_admin, is_super_admin, now_utc, format_date_display, format_datetime_display
 from routers.coach import _coach_visibility_filter
 
 router = APIRouter(prefix="/coach-assessments", tags=["coach-assessments"])
 
 ENTITY_ALPHA = "alpha"
-SCHEMA_VERSION = 3
 
-AssessmentStage = Literal["week_1_baseline", "week_4_progress", "week_8_12_final"]
+AssessmentStage = Literal["assessment_1", "assessment_2", "assessment_3", "assessment_4"]
 Centre = Literal["Balua", "Harding Park"]
 Sport = Literal["Cricket", "Football"]
 Session = Literal["Morning", "Evening"]
 PlayerType = Literal["Daily", "Day Boarding", "Hostel", "Boarding"]
 
-ASSESSMENT_STAGES: Dict[str, str] = {
-    "week_1_baseline": "Week 1 - Baseline",
-    "week_4_progress": "Week 4 - Progress",
-    "week_8_12_final": "Week 8-12 - Final",
-}
-STAGE_ORDER = ["week_1_baseline", "week_4_progress", "week_8_12_final"]
 SETUP_PLAYER_TYPES = ["Daily", "Day Boarding", "Hostel", "Boarding"]
 AGE_GROUPS = ["U-10", "U-12", "U-14", "U-16", "U-18", "Open"]
 
-CORE_SCORE_KEYS = (
-    "strength_conditioning",
-    "game_awareness",
-    "mental_attributes",
-    "training_attitude",
-)
 
-CRICKET_TECH_KEYS = (
-    "batting", "bowling", "fielding", "wicket_keeping",
-    "running_between_wickets", "cricket_iq",
-)
-FOOTBALL_TECH_KEYS = (
-    "dribbling", "passing", "shooting", "defending", "heading", "football_iq",
-)
-
-CRICKET_TECH: Dict[str, Dict[str, str]] = {
-    "batting": {
-        "label": "Batting",
-        "coach": "Technique, footwork, shot selection, timing and scoring ability",
-        "parent": "How well your child bats, including their technique, footwork, timing and ability to score runs.",
-    },
-    "bowling": {
-        "label": "Bowling",
-        "coach": "Action, line and length, variation, pace/spin control",
-        "parent": "Your child's bowling skill, including their action, accuracy, pace or spin, and ability to take wickets.",
-    },
-    "fielding": {
-        "label": "Fielding",
-        "coach": "Catching, ground fielding, throwing accuracy and athleticism",
-        "parent": "How well your child fields, including catching, ground fielding and throwing accuracy.",
-    },
-    "wicket_keeping": {
-        "label": "Wicket-Keeping",
-        "coach": "Glove work, positioning, stumpings and communication (if applicable)",
-        "parent": "Your child's glove work, positioning and ability to take catches and effect stumpings (assessed where applicable).",
-    },
-    "running_between_wickets": {
-        "label": "Running Between Wickets",
-        "coach": "Decision-making, communication, backing up and conversion of singles",
-        "parent": "Your child's ability to convert singles, communicate with their batting partner and make smart running decisions.",
-    },
-    "cricket_iq": {
-        "label": "Cricket IQ",
-        "coach": "Reading the game, tactical awareness and match situation understanding",
-        "parent": "How well your child reads the game, understands match situations and makes tactical decisions.",
-    },
-}
-
-FOOTBALL_TECH: Dict[str, Dict[str, str]] = {
-    "dribbling": {
-        "label": "Dribbling",
-        "coach": "Ball control, close control, change of direction and beating opponents",
-        "parent": "Your child's ability to control the ball, move past opponents and maintain possession under pressure.",
-    },
-    "passing": {
-        "label": "Passing",
-        "coach": "Accuracy, weight of pass, range, timing and decision to pass",
-        "parent": "How accurately and intelligently your child passes the ball, including range and timing.",
-    },
-    "shooting": {
-        "label": "Shooting",
-        "coach": "Technique, accuracy, power, composure in front of goal",
-        "parent": "Your child's ability to shoot with technique, accuracy and power, and to stay composed in front of goal.",
-    },
-    "defending": {
-        "label": "Defending",
-        "coach": "Positioning, tackling, marking, interceptions and defensive awareness",
-        "parent": "Your child's positioning, tackling ability and effectiveness at winning the ball back for the team.",
-    },
-    "heading": {
-        "label": "Heading",
-        "coach": "Technique, timing, direction and aerial ability in attack and defence",
-        "parent": "Your child's aerial ability, including technique and timing when heading the ball in attack and defence.",
-    },
-    "football_iq": {
-        "label": "Football IQ",
-        "coach": "Positioning off the ball, reading play, pressing and tactical discipline",
-        "parent": "How well your child reads the game, positions themselves off the ball and understands team tactics.",
-    },
-}
-
-PARAMETERS: Dict[str, Dict[str, str]] = {
-    "technical_skill": {
-        "label": "Technical Skill",
-        "parent": "How well your child performs the core skills of their sport (batting, bowling, fielding for Cricket; passing, shooting, defending for Football).",
-        "coach": "Average of all sport-specific technical sub-parameter scores.",
-    },
-    "strength_conditioning": {
-        "label": "Strength & Conditioning",
-        "parent": "Your child's physical fitness level, including speed, strength, stamina, agility and flexibility.",
-        "coach": "Speed, strength, power, agility, endurance and mobility.",
-    },
-    "game_awareness": {
-        "label": "Game Awareness",
-        "parent": "How smartly your child reads the game, makes decisions and positions themselves during a match.",
-        "coach": "Decision-making, tactical understanding and match awareness.",
-    },
-    "mental_attributes": {
-        "label": "Mental Attributes",
-        "parent": "Your child's ability to stay focused, confident and composed under pressure during training and matches.",
-        "coach": "Confidence, focus, resilience and composure under pressure.",
-    },
-    "training_attitude": {
-        "label": "Training Attitude",
-        "parent": "How your child behaves during practice sessions — their discipline, effort, coachability and teamwork.",
-        "coach": "Discipline, effort, coachability, teamwork and attendance.",
-    },
-}
-
-
-def _tech_meta(sport: str) -> Dict[str, Dict[str, str]]:
-    return CRICKET_TECH if sport == "Cricket" else FOOTBALL_TECH
+def _tech_meta(sport: str) -> Dict[str, Dict[str, Any]]:
+    return deep_meta(sport)
 
 
 def _tech_keys(sport: str) -> Tuple[str, ...]:
-    return CRICKET_TECH_KEYS if sport == "Cricket" else FOOTBALL_TECH_KEYS
+    return area_keys(sport)
 
 
 def _can_enter(user: dict) -> bool:
@@ -182,18 +83,6 @@ def _coach_scope_ok(user: dict, centre: Optional[str], sport: Optional[str], pla
         raise HTTPException(403, "Player type not available for your centre allocation")
 
 
-def score_label(value: int) -> str:
-    if value <= 3:
-        return "Beginner"
-    if value <= 5:
-        return "Developing"
-    if value <= 7:
-        return "Good"
-    if value <= 9:
-        return "Very Good"
-    return "Elite"
-
-
 def age_group_for_age(age: Optional[int]) -> str:
     if age is None:
         return "—"
@@ -226,100 +115,30 @@ def _player_type_query(player_type: str) -> Any:
     return player_type
 
 
-def _calc_technical_avg(technical_sub: dict, sport: str) -> Optional[float]:
-    keys = _tech_keys(sport)
-    vals = [technical_sub.get(k) for k in keys]
-    if any(v is None for v in vals):
-        return None
-    return round(sum(int(v) for v in vals) / len(keys), 1)
-
-
-def _build_scores_payload(
-    sport: str,
-    technical_sub: Optional[dict],
-    strength_conditioning: Optional[int],
-    game_awareness: Optional[int],
-    mental_attributes: Optional[int],
-    training_attitude: Optional[int],
-) -> dict:
-    tech_sub = {k: None for k in _tech_keys(sport)}
-    if technical_sub:
-        for k in _tech_keys(sport):
-            if technical_sub.get(k) is not None:
-                tech_sub[k] = int(technical_sub[k])
-    tech_avg = _calc_technical_avg(tech_sub, sport)
-    core = {
-        "strength_conditioning": strength_conditioning,
-        "game_awareness": game_awareness,
-        "mental_attributes": mental_attributes,
-        "training_attitude": training_attitude,
-    }
-    overall = None
-    if tech_avg is not None and all(core[k] is not None for k in CORE_SCORE_KEYS):
-        overall = round(
-            (tech_avg + core["strength_conditioning"] + core["game_awareness"]
-             + core["mental_attributes"] + core["training_attitude"]) / 5,
-            1,
-        )
-    return {
-        "technical_sub": tech_sub,
-        "technical_skill_avg": tech_avg,
-        **core,
-        "overall_score": overall,
-    }
-
-
-def _scores_complete(scores: Optional[dict], sport: str) -> bool:
-    if not scores:
-        return False
-    tech_sub = scores.get("technical_sub") or {}
-    if not all(tech_sub.get(k) is not None for k in _tech_keys(sport)):
-        return False
-    return all(scores.get(k) is not None for k in CORE_SCORE_KEYS)
-
-
-def _completion_status(scores: Optional[dict], sport: str) -> str:
-    if not scores:
-        return "not_started"
-    tech_sub = scores.get("technical_sub") or {}
-    any_score = any(tech_sub.get(k) is not None for k in _tech_keys(sport))
-    any_score = any_score or any(scores.get(k) is not None for k in CORE_SCORE_KEYS)
-    if not any_score:
-        return "not_started"
-    if _scores_complete(scores, sport):
-        return "completed"
-    return "in_progress"
-
-
-def _normalize_scores(raw: Optional[dict], sport: str) -> dict:
-    if not raw:
-        return _build_scores_payload(sport, None, None, None, None, None)
-    if raw.get("technical_sub") is not None or raw.get("technical_skill_avg") is not None:
-        return _build_scores_payload(
-            sport,
-            raw.get("technical_sub"),
-            raw.get("strength_conditioning"),
-            raw.get("game_awareness"),
-            raw.get("mental_attributes"),
-            raw.get("training_attitude"),
-        )
-    # Legacy v2 single technical_skill integer
-    legacy_tech = raw.get("technical_skill")
-    tech_sub = {k: legacy_tech for k in _tech_keys(sport)} if legacy_tech is not None else {k: None for k in _tech_keys(sport)}
-    return _build_scores_payload(
+def _entry_to_scores(sport: str, entry: "AssessmentEntryIn") -> dict:
+    detail = entry.technical_detail
+    if detail is None and entry.technical_sub is not None:
+        from assessment_schema import empty_technical_detail
+        detail = empty_technical_detail(sport)
+        for area in _tech_keys(sport):
+            flat = entry.technical_sub.get(area)
+            if flat is not None:
+                for k in detail[area]:
+                    detail[area][k] = int(flat) if int(flat) > 0 else 0
+    return build_scores(
         sport,
-        tech_sub,
-        raw.get("strength_conditioning"),
-        raw.get("game_awareness"),
-        raw.get("mental_attributes"),
-        raw.get("training_attitude"),
+        detail,
+        entry.strength_conditioning,
+        entry.game_awareness,
+        entry.mental_attributes,
+        entry.training_attitude,
     )
 
 
 def _serialize_record(row: dict, sport: Optional[str] = None) -> dict:
     sport = sport or row.get("sport") or "Cricket"
-    scores = _normalize_scores(row.get("scores"), sport)
-    complete = _scores_complete(scores, sport)
+    scores = normalize_scores(row.get("scores"), sport)
+    complete = scores_complete(scores, sport)
     return {
         "id": row.get("id"),
         "player_id": row.get("player_id"),
@@ -330,14 +149,14 @@ def _serialize_record(row: dict, sport: Optional[str] = None) -> dict:
         "session": row.get("session") or row.get("slot"),
         "assessment_stage": row.get("assessment_stage"),
         "assessment_stage_label": ASSESSMENT_STAGES.get(row.get("assessment_stage") or "", row.get("assessment_stage")),
+        "assessment_year": row.get("assessment_year"),
         "date": row.get("date"),
         "scores": scores,
-        "technical_sub": scores.get("technical_sub"),
-        "technical_skill_avg": scores.get("technical_skill_avg"),
+        "technical_detail": scores.get("technical_detail"),
+        "sub_parameter_averages": scores.get("sub_parameter_averages"),
+        "technical_skill_master_average": scores.get("technical_skill_master_average"),
         "overall_score": scores.get("overall_score"),
-        "technical_skill_avg": scores.get("technical_skill_avg"),
-        "overall_score": scores.get("overall_score"),
-        "completion_status": _completion_status(scores, sport),
+        "completion_status": completion_status(scores, sport),
         "coach_remark": row.get("coach_remark"),
         "status": row.get("status"),
         "complete": complete,
@@ -416,7 +235,7 @@ async def _batch_status(
         {"_id": 0, "status": 1, "scores": 1},
     ).to_list(500)
     statuses = [r.get("status") for r in rows if r.get("status")]
-    completed = sum(1 for r in rows if _scores_complete(r.get("scores"), sport))
+    completed = sum(1 for r in rows if scores_complete(r.get("scores"), sport))
     if not statuses:
         return {"batch_status": None, "saved_count": 0, "all_complete": False, "completed_count": 0}
     if all(s == "published" for s in statuses):
@@ -428,7 +247,7 @@ async def _batch_status(
     else:
         batch_status = statuses[0]
     all_complete = player_count > 0 and completed >= player_count and all(
-        _scores_complete(r.get("scores"), sport) for r in rows
+        scores_complete(r.get("scores"), sport) for r in rows
     )
     return {
         "batch_status": batch_status,
@@ -449,17 +268,19 @@ async def assessment_metadata(user: dict = Depends(get_current_user)):
     if not sports:
         sports = ["Cricket", "Football"]
     return {
+        "schema_version": SCHEMA_VERSION,
         "stages": [{"id": k, "label": v} for k, v in ASSESSMENT_STAGES.items()],
         "player_types": SETUP_PLAYER_TYPES,
         "allowed_centres": centres,
         "allowed_sports": sports,
-        "cricket_technical": [{"key": k, **CRICKET_TECH[k]} for k in CRICKET_TECH_KEYS],
-        "football_technical": [{"key": k, **FOOTBALL_TECH[k]} for k in FOOTBALL_TECH_KEYS],
+        "cricket_technical": metadata_export("Cricket"),
+        "football_technical": metadata_export("Football"),
         "core_parameters": [
-            {"key": k, "label": PARAMETERS[k]["label"], "description": PARAMETERS[k]["coach"]}
+            {"key": k, "label": PARAMETERS[k]["label"], "description": PARAMETERS[k]["coach"], "parent": PARAMETERS[k]["parent"]}
             for k in CORE_SCORE_KEYS
         ],
         "score_scale": [
+            {"range": "0", "label": "N/A"},
             {"range": "1–3", "label": "Beginner"},
             {"range": "4–5", "label": "Developing"},
             {"range": "6–7", "label": "Good"},
@@ -473,11 +294,12 @@ async def assessment_metadata(user: dict = Depends(get_current_user)):
 # ------------------ Coach entry grid ------------------
 class AssessmentEntryIn(BaseModel):
     player_id: str
-    technical_sub: Optional[Dict[str, int]] = None
-    strength_conditioning: Optional[int] = Field(None, ge=1, le=10)
-    game_awareness: Optional[int] = Field(None, ge=1, le=10)
-    mental_attributes: Optional[int] = Field(None, ge=1, le=10)
-    training_attitude: Optional[int] = Field(None, ge=1, le=10)
+    technical_detail: Optional[Dict[str, Dict[str, int]]] = None
+    technical_sub: Optional[Dict[str, int]] = None  # legacy v3 flat scores
+    strength_conditioning: Optional[int] = Field(None, ge=0, le=10)
+    game_awareness: Optional[int] = Field(None, ge=0, le=10)
+    mental_attributes: Optional[int] = Field(None, ge=0, le=10)
+    training_attitude: Optional[int] = Field(None, ge=0, le=10)
     coach_remark: Optional[str] = Field(None, max_length=300)
 
 
@@ -526,8 +348,8 @@ async def assessment_grid(
     rows = []
     for p in players:
         m = by_player.get(p["id"])
-        scores = _normalize_scores(m.get("scores") if m else None, sport)
-        complete = _scores_complete(scores, sport)
+        scores = normalize_scores(m.get("scores") if m else None, sport)
+        complete = scores_complete(scores, sport)
         rec_status = m.get("status") if m else None
         rows.append({
             "player_id": p["id"],
@@ -536,10 +358,11 @@ async def assessment_grid(
             "role": _player_role_label(p),
             "player_type": p.get("player_type"),
             "scores": scores,
-            "technical_sub": scores.get("technical_sub"),
-            "technical_skill_avg": scores.get("technical_skill_avg"),
+            "technical_detail": scores.get("technical_detail"),
+            "sub_parameter_averages": scores.get("sub_parameter_averages"),
+            "technical_skill_master_average": scores.get("technical_skill_master_average"),
             "overall_score": scores.get("overall_score"),
-            "completion_status": _completion_status(scores, sport),
+            "completion_status": completion_status(scores, sport),
             "coach_remark": m.get("coach_remark") if m else None,
             "status": rec_status,
             "complete": complete,
@@ -558,7 +381,7 @@ async def assessment_grid(
         "session": session,
         "assessment_stage": assessment_stage,
         "assessment_stage_label": ASSESSMENT_STAGES[assessment_stage],
-        "technical_parameters": [{"key": k, **_tech_meta(sport)[k]} for k in _tech_keys(sport)],
+        "technical_parameters": metadata_export(sport),
         "core_parameters": [{"key": k, **PARAMETERS[k]} for k in CORE_SCORE_KEYS],
         "players": rows,
         "player_count": len(rows),
@@ -567,6 +390,75 @@ async def assessment_grid(
         "all_complete": batch["all_complete"],
         "saved_count": batch["saved_count"],
     }
+
+
+async def _upsert_assessment_entry(
+    user: dict,
+    payload: "AssessmentBatchIn",
+    entry: AssessmentEntryIn,
+    player: dict,
+    *,
+    status: str,
+    ts: str,
+) -> bool:
+    """Save one player assessment. Returns True if persisted."""
+    existing = await db.player_assessments.find_one({
+        "schema_version": SCHEMA_VERSION,
+        "player_id": entry.player_id,
+        "assessment_stage": payload.assessment_stage,
+        "date": payload.date,
+    })
+    if existing and existing.get("status") == "published":
+        raise HTTPException(403, "Published assessments cannot be edited")
+    if existing and existing.get("status") == "final" and user.get("role") == "coach":
+        raise HTTPException(403, "Finalized assessments are locked. Contact admin to reopen.")
+
+    scores = _entry_to_scores(payload.sport, entry)
+    has_data = (
+        scores_complete(scores, payload.sport)
+        or completion_status(scores, payload.sport) != "not_started"
+        or (entry.coach_remark or "").strip()
+    )
+    if not has_data:
+        if existing and existing.get("status") not in ("final", "published"):
+            await db.player_assessments.delete_one({"id": existing["id"]})
+        return False
+
+    doc = {
+        "player_id": entry.player_id,
+        "player_name": player["name"],
+        "centre": payload.centre,
+        "sport": payload.sport,
+        "player_type": payload.player_type,
+        "session": payload.session,
+        "slot": payload.session,
+        "assessment_stage": payload.assessment_stage,
+        "assessment_year": assessment_year_from_date(payload.date),
+        "date": payload.date,
+        "scores": scores,
+        "coach_remark": (entry.coach_remark or "").strip()[:300] or None,
+        "status": status,
+        "schema_version": SCHEMA_VERSION,
+        "entity_id": ENTITY_ALPHA,
+        "saved_by": user["id"],
+        "saved_by_name": user.get("name"),
+        "entered_by": user["id"],
+        "entered_by_name": user.get("name"),
+        "entered_at": ts,
+        "updated_at": ts,
+    }
+    if status == "final":
+        doc["finalized_at"] = ts
+        doc["finalized_by"] = user["id"]
+
+    if existing:
+        doc["created_at"] = existing.get("created_at", ts)
+        await db.player_assessments.update_one({"id": existing["id"]}, {"$set": doc})
+    else:
+        doc["id"] = str(uuid.uuid4())
+        doc["created_at"] = ts
+        await db.player_assessments.insert_one(doc)
+    return True
 
 
 @router.post("/batch")
@@ -585,15 +477,8 @@ async def save_assessment_batch(payload: AssessmentBatchIn, user: dict = Depends
         for entry in payload.entries:
             if entry.player_id not in valid_ids:
                 continue
-            scores = _build_scores_payload(
-                payload.sport,
-                entry.technical_sub,
-                entry.strength_conditioning,
-                entry.game_awareness,
-                entry.mental_attributes,
-                entry.training_attitude,
-            )
-            if not _scores_complete(scores, payload.sport):
+            scores = _entry_to_scores(payload.sport, entry)
+            if not scores_complete(scores, payload.sport):
                 missing.append(valid_ids[entry.player_id]["name"])
         if missing:
             raise HTTPException(
@@ -606,67 +491,62 @@ async def save_assessment_batch(payload: AssessmentBatchIn, user: dict = Depends
         if entry.player_id not in valid_ids:
             raise HTTPException(403, f"Player {entry.player_id} is not in your assigned roster")
         player = valid_ids[entry.player_id]
-        existing = await db.player_assessments.find_one({
-            "schema_version": SCHEMA_VERSION,
-            "player_id": entry.player_id,
-            "assessment_stage": payload.assessment_stage,
-            "date": payload.date,
-        })
-        if existing and existing.get("status") == "published":
-            raise HTTPException(403, "Published assessments cannot be edited")
-        if existing and existing.get("status") == "final" and user.get("role") == "coach":
-            raise HTTPException(403, "Finalized assessments are locked. Contact admin to reopen.")
-
-        scores = _build_scores_payload(
-            payload.sport,
-            entry.technical_sub,
-            entry.strength_conditioning,
-            entry.game_awareness,
-            entry.mental_attributes,
-            entry.training_attitude,
-        )
-        has_data = _scores_complete(scores, payload.sport) or _completion_status(scores, payload.sport) != "not_started" or (entry.coach_remark or "").strip()
-        if not has_data:
-            if existing and existing.get("status") not in ("final", "published"):
-                await db.player_assessments.delete_one({"id": existing["id"]})
-            continue
-
-        doc = {
-            "player_id": entry.player_id,
-            "player_name": player["name"],
-            "centre": payload.centre,
-            "sport": payload.sport,
-            "player_type": payload.player_type,
-            "session": payload.session,
-            "slot": payload.session,
-            "assessment_stage": payload.assessment_stage,
-            "date": payload.date,
-            "scores": scores,
-            "coach_remark": (entry.coach_remark or "").strip()[:300] or None,
-            "status": payload.status,
-            "schema_version": SCHEMA_VERSION,
-            "entity_id": ENTITY_ALPHA,
-            "saved_by": user["id"],
-            "saved_by_name": user.get("name"),
-            "entered_by": user["id"],
-            "entered_by_name": user.get("name"),
-            "entered_at": ts,
-            "updated_at": ts,
-        }
-        if payload.status == "final":
-            doc["finalized_at"] = ts
-            doc["finalized_by"] = user["id"]
-
-        if existing:
-            doc["created_at"] = existing.get("created_at", ts)
-            await db.player_assessments.update_one({"id": existing["id"]}, {"$set": doc})
-        else:
-            doc["id"] = str(uuid.uuid4())
-            doc["created_at"] = ts
-            await db.player_assessments.insert_one(doc)
-        saved += 1
+        if await _upsert_assessment_entry(user, payload, entry, player, status=payload.status, ts=ts):
+            saved += 1
 
     return {"ok": True, "saved": saved, "status": payload.status}
+
+
+class SinglePlayerSaveIn(BaseModel):
+    centre: Centre
+    sport: Sport
+    player_type: PlayerType
+    session: Optional[Session] = None
+    assessment_stage: AssessmentStage
+    date: str
+    entry: AssessmentEntryIn
+    status: Literal["draft"] = "draft"
+
+    @model_validator(mode="after")
+    def _daily_session_required(self):
+        if self.player_type == "Daily" and not self.session:
+            raise ValueError("Session type is required when player type is Daily")
+        return self
+
+
+@router.post("/player")
+async def save_single_player_assessment(payload: SinglePlayerSaveIn, user: dict = Depends(get_current_user)):
+    """Auto-save one player without submitting the full batch."""
+    _assert_enter(user)
+    _coach_scope_ok(user, payload.centre, payload.sport, payload.player_type)
+    players = await _players_filtered(
+        user, payload.centre, payload.sport, payload.player_type, session=payload.session,
+    )
+    valid_ids = {p["id"]: p for p in players}
+    if payload.entry.player_id not in valid_ids:
+        raise HTTPException(403, "Player is not in your assigned roster")
+    ts = now_utc().isoformat()
+    batch = AssessmentBatchIn(
+        centre=payload.centre,
+        sport=payload.sport,
+        player_type=payload.player_type,
+        session=payload.session,
+        assessment_stage=payload.assessment_stage,
+        date=payload.date,
+        entries=[payload.entry],
+        status="draft",
+    )
+    saved = await _upsert_assessment_entry(
+        user, batch, payload.entry, valid_ids[payload.entry.player_id], status="draft", ts=ts,
+    )
+    scores = _entry_to_scores(payload.sport, payload.entry)
+    return {
+        "ok": True,
+        "saved": saved,
+        "scores": scores,
+        "completion_status": completion_status(scores, payload.sport),
+        "complete": scores_complete(scores, payload.sport),
+    }
 
 
 class PublishIn(BaseModel):
@@ -747,29 +627,104 @@ async def reopen_assessments(payload: ReopenIn, user: dict = Depends(get_current
     return {"reopened": result.modified_count, "audit_id": audit["id"]}
 
 
-async def _prior_stages_for_player(player_id: str, current_stage: str, sport: str) -> list[dict]:
-    idx = STAGE_ORDER.index(current_stage) if current_stage in STAGE_ORDER else -1
-    if idx <= 0:
-        return []
-    prior_keys = STAGE_ORDER[:idx]
+async def _year_assessments_for_player(player_id: str, year: int, sport: str) -> list[dict]:
     rows = await db.player_assessments.find(
         {
             "player_id": player_id,
-            "assessment_stage": {"$in": prior_keys},
+            "assessment_year": year,
             "status": {"$in": ["final", "published"]},
-            "schema_version": {"$gte": 2},
+            "schema_version": {"$gte": 3},
         },
         {"_id": 0},
-    ).sort("date", -1).to_list(20)
-    seen = set()
-    out = []
+    ).sort("date", 1).to_list(20)
+    by_stage: Dict[str, dict] = {}
     for r in rows:
         stage = r.get("assessment_stage")
-        if stage in seen:
-            continue
-        seen.add(stage)
-        out.append(_serialize_record(r, sport))
-    return sorted(out, key=lambda x: STAGE_ORDER.index(x["assessment_stage"]))
+        if stage in STAGE_ORDER and stage not in by_stage:
+            by_stage[stage] = _serialize_record(r, sport)
+    return [by_stage[s] for s in STAGE_ORDER if s in by_stage]
+
+
+def _year_summary_rows(year_records: list[dict], sport: str) -> list[dict]:
+    """Build comparison table rows for year summary (4 assessment columns)."""
+    by_stage = {r.get("assessment_stage"): r for r in year_records}
+    param_defs: List[Tuple[str, str, str]] = []
+    for area in _tech_keys(sport):
+        meta = _tech_meta(sport)[area]
+        param_defs.append((area, f"{meta['label']} Average", "area"))
+    param_defs.extend([
+        ("technical_skill", "Technical Skill", "tech_master"),
+        ("strength_conditioning", "S&C", "core"),
+        ("game_awareness", "Game Awareness", "core"),
+        ("mental_attributes", "Mental Attributes", "core"),
+        ("training_attitude", "Training Attitude", "core"),
+        ("overall_score", "Overall Score", "overall"),
+    ])
+
+    out = []
+    for key, label, kind in param_defs:
+        vals: List[Optional[float]] = []
+        for stage in STAGE_ORDER:
+            rec = by_stage.get(stage)
+            scores = (rec or {}).get("scores") or {}
+            if kind == "area":
+                v = (scores.get("sub_parameter_averages") or {}).get(key)
+            elif kind == "tech_master":
+                v = scores.get("technical_skill_master_average")
+            elif kind == "overall":
+                v = scores.get("overall_score")
+            else:
+                raw = scores.get(key)
+                v = float(raw) if raw is not None and int(raw) > 0 else None
+            vals.append(v)
+        scored = [v for v in vals if v is not None]
+        change = None
+        if len(scored) >= 2:
+            first = next((v for v in vals if v is not None), None)
+            last = next((v for v in reversed(vals) if v is not None), None)
+            if first is not None and last is not None:
+                change = round(last - first, 1)
+        out.append({"key": key, "label": label, "values": vals, "change": change})
+    return out
+
+
+@router.get("/year-summary/{player_id}")
+async def year_summary(
+    player_id: str,
+    year: Optional[int] = None,
+    user: dict = Depends(get_current_user),
+):
+    _assert_enter(user)
+    person = await db.people.find_one({"id": player_id, "kind": "player"}, {"_id": 0})
+    if not person:
+        raise HTTPException(404, "Player not found")
+    if user.get("role") == "coach":
+        from routers.coach import assert_player_in_coach_roster
+        await assert_player_in_coach_roster(user, player_id)
+    sport = person.get("sport") or "Cricket"
+    yr = year or now_utc().year
+    records = await _year_assessments_for_player(player_id, yr, sport)
+    rows = _year_summary_rows(records, sport)
+    return {
+        "player_id": player_id,
+        "player_name": person.get("name"),
+        "sport": sport,
+        "assessment_year": yr,
+        "stages": [{"id": s, "label": ASSESSMENT_STAGES[s]} for s in STAGE_ORDER],
+        "assessments": records,
+        "comparison_rows": rows,
+        "completed_count": len(records),
+    }
+
+
+async def _prior_stages_for_player(player_id: str, current_stage: str, sport: str, year: Optional[int] = None) -> list[dict]:
+    yr = year or now_utc().year
+    records = await _year_assessments_for_player(player_id, yr, sport)
+    idx = STAGE_ORDER.index(current_stage) if current_stage in STAGE_ORDER else -1
+    if idx <= 0:
+        return []
+    prior_keys = set(STAGE_ORDER[:idx])
+    return [r for r in records if r.get("assessment_stage") in prior_keys]
 
 
 def _wrap_text(text: str, max_chars: int) -> list[str]:
@@ -789,16 +744,97 @@ def _wrap_text(text: str, max_chars: int) -> list[str]:
     return lines or [""]
 
 
-def _render_assessment_pdf(record: dict, prior: list[dict]) -> bytes:
+def _draw_progress_chart(c, x: float, y: float, w: float, h: float, year_records: list[dict], sport: str) -> float:
+    """Draw multi-line progress chart. Returns new y below chart."""
+    from reportlab.lib import colors as rl_colors
+
+    if len(year_records) < 2:
+        return y
+
+    rows = _year_summary_rows(year_records, sport)
+    if not rows:
+        return y
+
+    chart_keys = [r["key"] for r in rows if r["key"] in ("overall_score", "technical_skill") or r["key"] in _tech_keys(sport)][:8]
+    palette = [
+        rl_colors.HexColor("#1E3A8A"),
+        rl_colors.HexColor("#DC2626"),
+        rl_colors.HexColor("#059669"),
+        rl_colors.HexColor("#D97706"),
+        rl_colors.HexColor("#7C3AED"),
+        rl_colors.HexColor("#0891B2"),
+        rl_colors.HexColor("#BE185D"),
+        rl_colors.HexColor("#374151"),
+    ]
+    stage_labels = [ASSESSMENT_STAGES.get(r.get("assessment_stage", ""), "")[:12] for r in year_records]
+    n_pts = len(year_records)
+    margin_l, margin_b = 8, 14
+    plot_w = w - margin_l - 4
+    plot_h = h - margin_b - 8
+    base_y = y - h
+
+    c.setStrokeColor(rl_colors.HexColor("#E2E8F0"))
+    c.setLineWidth(0.5)
+    c.rect(x, base_y, w, h, stroke=1, fill=0)
+    for tick in range(0, 11, 2):
+        ty = base_y + margin_b + (tick / 10.0) * plot_h
+        c.line(x + margin_l, ty, x + w - 4, ty)
+        c.setFont("Helvetica", 6)
+        c.setFillColor(rl_colors.HexColor("#94A3B8"))
+        c.drawString(x, ty - 2, str(tick))
+
+    row_by_key = {r["key"]: r for r in rows}
+    legend_y = y + 4
+    for i, key in enumerate(chart_keys):
+        row = row_by_key.get(key)
+        if not row:
+            continue
+        color = palette[i % len(palette)]
+        vals = row["values"][:n_pts]
+        pts = []
+        for j, v in enumerate(vals):
+            if v is None:
+                continue
+            px = x + margin_l + (j / max(n_pts - 1, 1)) * plot_w
+            py = base_y + margin_b + (float(v) / 10.0) * plot_h
+            pts.append((px, py))
+        if len(pts) < 2:
+            continue
+        c.setStrokeColor(color)
+        c.setLineWidth(2.5 if key == "overall_score" else 1.2)
+        path = c.beginPath()
+        path.moveTo(pts[0][0], pts[0][1])
+        for px, py in pts[1:]:
+            path.lineTo(px, py)
+        c.drawPath(path, stroke=1, fill=0)
+        for px, py in pts:
+            c.setFillColor(color)
+            c.circle(px, py, 2, fill=1, stroke=0)
+        c.setFont("Helvetica", 6)
+        c.setFillColor(color)
+        lbl = row["label"][:18]
+        c.drawString(x + w + 6, legend_y - i * 8, lbl)
+
+    c.setFont("Helvetica", 6)
+    c.setFillColor(rl_colors.HexColor("#64748B"))
+    for j, lbl in enumerate(stage_labels):
+        px = x + margin_l + (j / max(n_pts - 1, 1)) * plot_w
+        c.drawCentredString(px, base_y + 2, lbl[:10])
+    return base_y - 8
+
+
+def _render_assessment_pdf(record: dict, year_records: list[dict]) -> bytes:
     from reportlab.lib import colors as rl_colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import mm
     from reportlab.pdfgen import canvas as pdfcanvas
 
     sport = record.get("sport") or "Cricket"
-    scores = _normalize_scores(record.get("scores"), sport)
+    scores = normalize_scores(record.get("scores"), sport)
     tech_meta = _tech_meta(sport)
-    tech_keys = _tech_keys(sport)
+    year_records = year_records or [record]
+    if record.get("id") and not any(r.get("id") == record.get("id") for r in year_records):
+        year_records = sorted(year_records + [_serialize_record(record, sport)], key=lambda x: STAGE_ORDER.index(x.get("assessment_stage", "assessment_1")) if x.get("assessment_stage") in STAGE_ORDER else 99)
 
     buf = io.BytesIO()
     c = pdfcanvas.Canvas(buf, pagesize=A4)
@@ -808,6 +844,17 @@ def _render_assessment_pdf(record: dict, prior: list[dict]) -> bytes:
     navy = rl_colors.HexColor("#1E3A8A")
     muted = rl_colors.HexColor("#64748B")
 
+    def new_page():
+        nonlocal y
+        c.showPage()
+        y = h - margin
+
+    def ensure_space(need_mm: float):
+        nonlocal y
+        if y < need_mm * mm:
+            new_page()
+
+    # ---- Page 1: Profile & summary ----
     c.setFillColor(navy)
     c.setFont("Helvetica-Bold", 20)
     c.drawString(margin, y, "ALPHA Sports Academy")
@@ -824,108 +871,168 @@ def _render_assessment_pdf(record: dict, prior: list[dict]) -> bytes:
     c.setFont("Helvetica", 10)
     session_txt = record.get("session") or record.get("slot") or ""
     if record.get("player_type") != "Daily":
-        session_txt = "—"
+        session_txt = ""
     meta = (
         f"{record.get('sport', '—')}  ·  {record.get('centre', '—')}  ·  "
         f"{record.get('player_type', '—')}"
-        + (f"  ·  {session_txt}" if session_txt and session_txt != "—" else "")
+        + (f"  ·  {session_txt}" if session_txt else "")
         + f"  ·  {ASSESSMENT_STAGES.get(record.get('assessment_stage', ''), '—')}"
     )
     c.drawString(margin, y, meta)
     y -= 5 * mm
     c.drawString(margin, y, f"Assessment date: {format_date_display(record.get('date'))}")
     y -= 5 * mm
-    c.drawString(margin, y, f"Coach: {record.get('saved_by_name') or '—'}")
-    y -= 5 * mm
-    c.drawString(margin, y, f"Saved: {format_datetime_display(record.get('updated_at') or record.get('created_at'))}")
+    c.drawString(margin, y, f"Assessed by: {record.get('saved_by_name') or '—'} on {format_datetime_display(record.get('updated_at') or record.get('created_at'))}")
     y -= 10 * mm
-    c.setFont("Helvetica", 8)
+
+    overall = scores.get("overall_score")
+    if overall is not None:
+        c.setFillColor(navy)
+        c.roundRect(margin, y - 10 * mm, 55 * mm, 12 * mm, 3 * mm, fill=1, stroke=0)
+        c.setFillColor(rl_colors.white)
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(margin + 4 * mm, y - 7 * mm, f"Overall: {overall} / 10")
+        y -= 16 * mm
     c.setFillColor(muted)
-    c.drawString(margin, y, "Score guide: 1–3 Beginner | 4–5 Developing | 6–7 Good | 8–9 Very Good | 10 Elite")
+    c.setFont("Helvetica", 8)
+    c.drawString(margin, y, "0 = N/A | 1–3 Beginner | 4–5 Developing | 6–7 Good | 8–9 Very Good | 10 Elite")
     y -= 10 * mm
     c.setFillColor(rl_colors.black)
 
+    tech_master = scores.get("technical_skill_master_average")
     c.setFont("Helvetica-Bold", 11)
-    c.drawString(margin, y, "Technical Skill")
+    c.drawString(margin, y, f"Technical Skill: {tech_master}/10" if tech_master else "Technical Skill: —")
     y -= 6 * mm
-    tech_avg = scores.get("technical_skill_avg")
-    c.setFont("Helvetica", 10)
-    c.drawString(margin, y, f"Average: {tech_avg}/10 — {score_label(int(round(tech_avg)))}" if tech_avg else "Average: —")
-    y -= 6 * mm
-    c.setFont("Helvetica", 8)
-    c.setFillColor(muted)
-    for line in _wrap_text(PARAMETERS["technical_skill"]["parent"], 95):
-        c.drawString(margin, y, line)
-        y -= 4 * mm
-    c.setFillColor(rl_colors.black)
-    y -= 4 * mm
-    tech_sub = scores.get("technical_sub") or {}
-    for key in tech_keys:
-        if y < 35 * mm:
-            c.showPage()
-            y = h - margin
-        val = tech_sub.get(key)
-        c.setFont("Helvetica-Bold", 9)
-        lbl = tech_meta[key]["label"]
-        score_txt = f"{val}/10 — {score_label(val)}" if val is not None else "—"
-        c.drawString(margin, y, f"{lbl}: {score_txt}")
-        y -= 4 * mm
+    for key in CORE_SCORE_KEYS:
+        val = scores.get(key)
+        c.setFont("Helvetica", 10)
+        lbl = PARAMETERS[key]["label"]
+        if val is not None and int(val) > 0:
+            c.drawString(margin, y, f"{lbl}: {val}/10 — {score_label(int(val))}")
+        elif val == 0:
+            c.drawString(margin, y, f"{lbl}: N/A")
+        else:
+            c.drawString(margin, y, f"{lbl}: —")
+        y -= 5 * mm
+
+    # ---- Page 2: Technical detail ----
+    new_page()
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(margin, y, "Technical Skill Detail")
+    y -= 10 * mm
+    detail = scores.get("technical_detail") or {}
+    sub_avgs = scores.get("sub_parameter_averages") or {}
+    for area in _tech_keys(sport):
+        ensure_space(45)
+        ameta = tech_meta[area]
+        avg = sub_avgs.get(area)
+        c.setFont("Helvetica-Bold", 11)
+        avg_txt = f" — {avg}/10" if avg is not None else ""
+        c.drawString(margin, y, f"{ameta['label']}{avg_txt}")
+        y -= 5 * mm
         c.setFont("Helvetica", 8)
         c.setFillColor(muted)
-        for line in _wrap_text(tech_meta[key]["parent"], 95):
-            c.drawString(margin + 3 * mm, y, line)
+        for line in _wrap_text(ameta.get("parent", ""), 95):
+            c.drawString(margin, y, line)
             y -= 3.5 * mm
         c.setFillColor(rl_colors.black)
-        y -= 2 * mm
+        subs = detail.get(area) or {}
+        for sk, (slabel, scoach) in ameta["sub_params"].items():
+            ensure_space(18)
+            val = subs.get(sk)
+            c.setFont("Helvetica-Bold", 9)
+            if val is not None and int(val) > 0:
+                score_txt = f"{val}/10 — {score_label(int(val))}"
+            elif val == 0:
+                score_txt = "N/A"
+            else:
+                score_txt = "—"
+            c.drawString(margin + 2 * mm, y, f"{slabel}: {score_txt}")
+            y -= 3.5 * mm
+            c.setFont("Helvetica", 7)
+            c.setFillColor(muted)
+            for line in _wrap_text(scoach, 92):
+                c.drawString(margin + 4 * mm, y, line)
+                y -= 3 * mm
+            c.setFillColor(rl_colors.black)
+        y -= 3 * mm
 
+    ensure_space(12)
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(margin, y, f"Technical Skill Master Average: {tech_master or '—'} / 10")
+    y -= 8 * mm
+
+    # ---- Page 3: Other parameters & remarks ----
+    new_page()
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(margin, y, "Other Parameters & Remarks")
+    y -= 10 * mm
     for key in CORE_SCORE_KEYS:
-        if y < 40 * mm:
-            c.showPage()
-            y = h - margin
+        ensure_space(25)
         val = scores.get(key)
-        c.setFont("Helvetica-Bold", 10)
-        score_txt = f"{val}/10 — {score_label(val)}" if val is not None else "—"
-        c.drawString(margin, y, f"{PARAMETERS[key]['label']}: {score_txt}")
+        c.setFont("Helvetica-Bold", 11)
+        if val is not None and int(val) > 0:
+            c.drawString(margin, y, f"{PARAMETERS[key]['label']}: {val}/10 — {score_label(int(val))}")
+        elif val == 0:
+            c.drawString(margin, y, f"{PARAMETERS[key]['label']}: N/A")
+        else:
+            c.drawString(margin, y, f"{PARAMETERS[key]['label']}: —")
         y -= 5 * mm
         c.setFont("Helvetica", 8)
         c.setFillColor(muted)
         for line in _wrap_text(PARAMETERS[key]["parent"], 95):
-            c.drawString(margin + 3 * mm, y, line)
+            c.drawString(margin, y, line)
             y -= 3.5 * mm
         c.setFillColor(rl_colors.black)
-        y -= 3 * mm
-
-    overall = scores.get("overall_score")
-    if overall is not None:
-        c.setFont("Helvetica-Bold", 11)
-        c.drawString(margin, y, f"Overall Score: {overall} / 10")
-        y -= 10 * mm
+        y -= 4 * mm
 
     if record.get("coach_remark"):
-        if y < 35 * mm:
-            c.showPage()
-            y = h - margin
+        ensure_space(30)
         c.setFont("Helvetica-Bold", 11)
-        c.drawString(margin, y, "Coach remarks")
+        c.drawString(margin, y, "Coach Remark")
         y -= 7 * mm
         c.setFont("Helvetica", 9)
         for line in _wrap_text(record["coach_remark"], 95):
             c.drawString(margin, y, line)
             y -= 5 * mm
 
-    if prior:
-        if y < 50 * mm:
-            c.showPage()
-            y = h - margin
-        c.setFont("Helvetica-Bold", 11)
-        c.drawString(margin, y, "Progress comparison (overall score)")
+    # ---- Page 4: Year progress (if 2+ assessments) ----
+    if len(year_records) >= 2:
+        new_page()
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(margin, y, "Year Progress")
         y -= 8 * mm
-        c.setFont("Helvetica", 8)
-        for p in prior:
-            c.drawString(margin, y, f"{ASSESSMENT_STAGES.get(p['assessment_stage'], p['assessment_stage'])}: {p.get('overall_score', '—')}")
-            y -= 5 * mm
-        c.drawString(margin, y, f"Current: {overall or '—'}")
-        y -= 8 * mm
+        summary = _year_summary_rows(year_records, sport)
+        c.setFont("Helvetica-Bold", 8)
+        headers = ["Parameter"] + [f"A{i+1}" for i in range(4)] + ["Change"]
+        col_w = [42 * mm, 18 * mm, 18 * mm, 18 * mm, 18 * mm, 16 * mm]
+        x0 = margin
+        for i, hdr in enumerate(headers):
+            c.drawString(x0 + sum(col_w[:i]), y, hdr)
+        y -= 5 * mm
+        c.setFont("Helvetica", 7)
+        for row in summary:
+            ensure_space(8)
+            cells = [row["label"][:22]]
+            vals = (row["values"] + [None, None, None, None])[:4]
+            for v in vals:
+                cells.append(f"{v:.1f}" if v is not None else "—")
+            ch = row.get("change")
+            if ch is not None:
+                cells.append(f"{'+' if ch >= 0 else ''}{ch:.1f} {'↑' if ch > 0 else '↓' if ch < 0 else ''}".strip())
+            else:
+                cells.append("—")
+            for i, cell in enumerate(cells):
+                weight = "Helvetica-Bold" if row["key"] == "overall_score" else "Helvetica"
+                c.setFont(weight, 7)
+                c.drawString(x0 + sum(col_w[:i]), y, str(cell)[:14])
+            y -= 4 * mm
+        y -= 6 * mm
+        ensure_space(55)
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(margin, y, "Progress Chart")
+        y -= 4 * mm
+        y = _draw_progress_chart(c, margin, y, w - 2 * margin - 30 * mm, 45 * mm, year_records, sport)
 
     c.setFont("Helvetica", 7)
     c.setFillColor(muted)
@@ -944,6 +1051,7 @@ async def export_assessment_pdf(
     date: str,
     session: Optional[Session] = None,
     player_id: Optional[str] = None,
+    completed_only: bool = False,
     user: dict = Depends(get_current_user),
 ):
     _assert_enter(user)
@@ -961,14 +1069,21 @@ async def export_assessment_pdf(
     rows = await db.player_assessments.find(q, {"_id": 0}).sort("player_name", 1).to_list(200)
     if not rows:
         raise HTTPException(404, "No finalized assessments found for export")
-    incomplete = [r for r in rows if not _scores_complete(r.get("scores"), sport)]
-    if incomplete:
+    if completed_only:
+        rows = [r for r in rows if scores_complete(r.get("scores"), sport)]
+        if not rows:
+            raise HTTPException(404, "No completed player assessments found for export")
+    incomplete = [r for r in rows if not scores_complete(r.get("scores"), sport)]
+    if incomplete and not completed_only:
         raise HTTPException(400, "All player scores must be completed before PDF export")
 
+    year = assessment_year_from_date(date)
+
     if len(rows) == 1:
-        prior = await _prior_stages_for_player(rows[0]["player_id"], assessment_stage, sport)
-        pdf = _render_assessment_pdf(rows[0], prior)
-        name = (rows[0].get("player_name") or "player").replace(" ", "_")
+        row = rows[0]
+        year_records = await _year_assessments_for_player(row["player_id"], year, sport)
+        pdf = _render_assessment_pdf(row, year_records)
+        name = (row.get("player_name") or "player").replace(" ", "_")
         return Response(
             content=pdf,
             media_type="application/pdf",
@@ -978,8 +1093,8 @@ async def export_assessment_pdf(
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for row in rows:
-            prior = await _prior_stages_for_player(row["player_id"], assessment_stage, sport)
-            pdf = _render_assessment_pdf(row, prior)
+            year_records = await _year_assessments_for_player(row["player_id"], year, sport)
+            pdf = _render_assessment_pdf(row, year_records)
             name = (row.get("player_name") or row["player_id"]).replace(" ", "_")
             zf.writestr(f"assessment-{name}-{date}.pdf", pdf)
     zip_buf.seek(0)

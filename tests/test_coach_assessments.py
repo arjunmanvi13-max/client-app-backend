@@ -1,4 +1,4 @@
-"""Player assessment — sport-specific technical sub-scores, player-type setup."""
+"""Player assessment — v4 deep technical sub-parameters, 4-term layout."""
 import os
 import datetime
 import pytest
@@ -19,11 +19,6 @@ LEGACY_CREDS = {
 }
 TOKENS = {}
 
-CRICKET_TECH = {
-    "batting": 7, "bowling": 6, "fielding": 8,
-    "wicket_keeping": 6, "running_between_wickets": 7, "cricket_iq": 8,
-}
-
 
 def _login(role):
     if role in TOKENS:
@@ -43,15 +38,28 @@ def _hdr(role):
     return {"Authorization": f"Bearer {_login(role)}"}
 
 
+def _cricket_detail():
+    from assessment_schema import empty_technical_detail
+    detail = empty_technical_detail("Cricket")
+    for area in detail:
+        for k in detail[area]:
+            detail[area][k] = 7
+    return detail
+
+
 @pytest.mark.integration
 class TestPlayerAssessment:
-    def test_metadata_includes_player_types_and_technical(self):
+    def test_metadata_includes_four_stages_and_na_scale(self):
         r = requests.get(f"{API}/coach-assessments/metadata", headers=_hdr("coach"), timeout=15)
         assert r.status_code == 200, r.text
         data = r.json()
         assert "Daily" in data.get("player_types", [])
         assert len(data.get("cricket_technical", [])) == 6
-        assert data.get("score_scale", [])[0]["label"] == "Beginner"
+        assert data.get("cricket_technical", [])[0].get("sub_params")
+        assert data.get("score_scale", [])[0]["label"] == "N/A"
+        stage_ids = [s["id"] for s in data.get("stages", [])]
+        assert "assessment_1" in stage_ids
+        assert "assessment_4" in stage_ids
 
     def test_grid_requires_player_type(self):
         today = datetime.date.today().isoformat()
@@ -63,13 +71,13 @@ class TestPlayerAssessment:
                 "sport": "Cricket",
                 "player_type": "Daily",
                 "session": "Morning",
-                "assessment_stage": "week_1_baseline",
+                "assessment_stage": "assessment_1",
                 "date": today,
             },
             timeout=15,
         )
         assert r.status_code == 200, r.text
-        assert r.json().get("schema_version") == 3
+        assert r.json().get("schema_version") == 4
 
     def test_daily_requires_session(self):
         today = datetime.date.today().isoformat()
@@ -80,14 +88,14 @@ class TestPlayerAssessment:
                 "centre": "Balua",
                 "sport": "Cricket",
                 "player_type": "Daily",
-                "assessment_stage": "week_1_baseline",
+                "assessment_stage": "assessment_1",
                 "date": today,
             },
             timeout=15,
         )
         assert r.status_code == 400, r.text
 
-    def test_save_draft_with_technical_sub_scores(self):
+    def test_save_draft_with_technical_detail(self):
         players = requests.get(
             f"{API}/coach/players",
             headers=_hdr("coach"),
@@ -106,12 +114,12 @@ class TestPlayerAssessment:
                 "sport": "Cricket",
                 "player_type": "Daily",
                 "session": "Morning",
-                "assessment_stage": "week_4_progress",
+                "assessment_stage": "assessment_2",
                 "date": today,
                 "status": "draft",
                 "entries": [{
                     "player_id": player["id"],
-                    "technical_sub": CRICKET_TECH,
+                    "technical_detail": _cricket_detail(),
                     "strength_conditioning": 7,
                     "game_awareness": 8,
                     "mental_attributes": 7,
@@ -123,12 +131,44 @@ class TestPlayerAssessment:
         )
         assert r.status_code == 200, r.text
 
+    def test_single_player_auto_save(self):
+        players = requests.get(f"{API}/coach/players", headers=_hdr("coach"), params={"centre": "Balua", "sport": "Cricket", "slot": "Morning"}, timeout=15)
+        if not players.json().get("players"):
+            pytest.skip("No players")
+        player = players.json()["players"][0]
+        today = datetime.date.today().isoformat()
+        r = requests.post(
+            f"{API}/coach-assessments/player",
+            headers=_hdr("coach"),
+            json={
+                "centre": "Balua",
+                "sport": "Cricket",
+                "player_type": "Daily",
+                "session": "Morning",
+                "assessment_stage": "assessment_3",
+                "date": today,
+                "entry": {
+                    "player_id": player["id"],
+                    "technical_detail": _cricket_detail(),
+                    "strength_conditioning": 6,
+                    "game_awareness": 6,
+                    "mental_attributes": 6,
+                    "training_attitude": 6,
+                },
+            },
+            timeout=15,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json().get("complete") is True
+
     def test_finalize_requires_all_scores(self):
         players = requests.get(f"{API}/coach/players", headers=_hdr("coach"), params={"centre": "Balua", "sport": "Cricket", "slot": "Morning"}, timeout=15)
         if not players.json().get("players"):
             pytest.skip("No players")
         player = players.json()["players"][0]
         today = datetime.date.today().isoformat()
+        detail = _cricket_detail()
+        detail["batting"]["technique"] = None
         r = requests.post(
             f"{API}/coach-assessments/batch",
             headers=_hdr("coach"),
@@ -137,14 +177,23 @@ class TestPlayerAssessment:
                 "sport": "Cricket",
                 "player_type": "Daily",
                 "session": "Morning",
-                "assessment_stage": "week_8_12_final",
+                "assessment_stage": "assessment_4",
                 "date": today,
                 "status": "final",
-                "entries": [{"player_id": player["id"], "technical_sub": {"batting": 5}, "coach_remark": "Incomplete"}],
+                "entries": [{"player_id": player["id"], "technical_detail": detail, "coach_remark": "Incomplete"}],
             },
             timeout=15,
         )
         assert r.status_code == 400, r.text
+
+    def test_year_summary_endpoint(self):
+        players = requests.get(f"{API}/coach/players", headers=_hdr("coach"), params={"centre": "Balua", "sport": "Cricket", "slot": "Morning"}, timeout=15)
+        if not players.json().get("players"):
+            pytest.skip("No players")
+        pid = players.json()["players"][0]["id"]
+        r = requests.get(f"{API}/coach-assessments/year-summary/{pid}", headers=_hdr("coach"), timeout=15)
+        assert r.status_code == 200, r.text
+        assert "comparison_rows" in r.json()
 
     def test_parent_published_assessments(self):
         wards = requests.get(f"{API}/parent/wards", headers=_hdr("parent_alpha"), timeout=15)
@@ -167,7 +216,7 @@ class TestPlayerAssessment:
                 "sport": "Cricket",
                 "player_type": "Daily",
                 "session": "Morning",
-                "assessment_stage": "week_1_baseline",
+                "assessment_stage": "assessment_1",
                 "date": today,
             },
             timeout=15,

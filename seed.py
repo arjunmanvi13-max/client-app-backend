@@ -736,47 +736,51 @@ async def _seed_academic_marks():
 
 
 async def _seed_coach_assessments():
-    """Player assessment samples — five-parameter 1–10 scoring for ALPHA players."""
+    """Player assessment samples — v4 deep technical sub-parameters for ALPHA players."""
+    from assessment_schema import build_scores, SCHEMA_VERSION, empty_technical_detail
+
     karan = await db.people.find_one({"name": "Karan Raj", "kind": "player"})
     aditya = await db.people.find_one({"name": "Aditya Verma", "kind": "player"})
     ts = now_utc().isoformat()
     today = ts[:10]
+    year = int(today[:4])
+
+    def _filled_detail(sport: str, base: int) -> dict:
+        detail = empty_technical_detail(sport)
+        for area in detail:
+            for k in detail[area]:
+                detail[area][k] = base + (hash(k) % 3)
+        return detail
+
     for player in [karan, aditya]:
         if not player:
             continue
+        sport = player.get("sport", "Cricket")
         if await db.player_assessments.find_one({
-            "schema_version": 3,
+            "schema_version": SCHEMA_VERSION,
             "player_id": player["id"],
-            "assessment_stage": "week_1_baseline",
+            "assessment_stage": "assessment_1",
             "date": today,
         }):
             continue
+        detail = _filled_detail(sport, 6)
+        scores = build_scores(sport, detail, 6, 7, 7, 8)
         await db.player_assessments.insert_one({
             "id": str(uuid.uuid4()),
             "player_id": player["id"],
             "player_name": player["name"],
             "centre": player.get("centre", "Balua"),
-            "sport": player.get("sport", "Cricket"),
+            "sport": sport,
             "player_type": player.get("player_type", "Daily"),
             "session": player.get("slot", "Morning"),
             "slot": player.get("slot", "Morning"),
-            "assessment_stage": "week_1_baseline",
+            "assessment_stage": "assessment_1",
+            "assessment_year": year,
             "date": today,
-            "scores": {
-                "technical_sub": {
-                    "batting": 7, "bowling": 6, "fielding": 8,
-                    "wicket_keeping": 6, "running_between_wickets": 7, "cricket_iq": 8,
-                },
-                "technical_skill_avg": 7.0,
-                "strength_conditioning": 6,
-                "game_awareness": 8,
-                "mental_attributes": 7,
-                "training_attitude": 9,
-                "overall_score": 7.4,
-            },
+            "scores": scores,
             "coach_remark": "Strong progress in training; keep focusing on match awareness.",
             "status": "published",
-            "schema_version": 3,
+            "schema_version": SCHEMA_VERSION,
             "entity_id": "alpha",
             "saved_by": "seed",
             "saved_by_name": "Seed Coach",
