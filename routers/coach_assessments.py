@@ -24,6 +24,9 @@ from assessment_schema import (
     metadata_export,
     assessment_year_from_date,
     avg_non_na,
+    normalize_assessment_stage,
+    stage_label_for,
+    stage_query_value,
 )
 from core import db, get_current_user, get_perm, is_admin, is_super_admin, now_utc, format_date_display, format_datetime_display
 from routers.coach import _coach_visibility_filter
@@ -32,7 +35,10 @@ router = APIRouter(prefix="/coach-assessments", tags=["coach-assessments"])
 
 ENTITY_ALPHA = "alpha"
 
-AssessmentStage = Literal["assessment_1", "assessment_2", "assessment_3", "assessment_4"]
+AssessmentStage = Literal[
+    "assessment_1", "assessment_2", "assessment_3", "assessment_4",
+    "week_1_baseline", "week_4_progress", "week_8_12_final",
+]
 Centre = Literal["Balua", "Harding Park"]
 Sport = Literal["Cricket", "Football"]
 Session = Literal["Morning", "Evening"]
@@ -148,7 +154,7 @@ def _serialize_record(row: dict, sport: Optional[str] = None) -> dict:
         "player_type": row.get("player_type"),
         "session": row.get("session") or row.get("slot"),
         "assessment_stage": row.get("assessment_stage"),
-        "assessment_stage_label": ASSESSMENT_STAGES.get(row.get("assessment_stage") or "", row.get("assessment_stage")),
+        "assessment_stage_label": stage_label_for(row.get("assessment_stage") or ""),
         "assessment_year": row.get("assessment_year"),
         "date": row.get("date"),
         "scores": scores,
@@ -213,7 +219,7 @@ def _batch_filter(
         "centre": centre,
         "sport": sport,
         "player_type": player_type,
-        "assessment_stage": assessment_stage,
+        "assessment_stage": stage_query_value(assessment_stage),
         "date": date,
     }
     if player_type == "Daily" and session:
@@ -379,8 +385,8 @@ async def assessment_grid(
         "sport": sport,
         "player_type": player_type,
         "session": session,
-        "assessment_stage": assessment_stage,
-        "assessment_stage_label": ASSESSMENT_STAGES[assessment_stage],
+        "assessment_stage": normalize_assessment_stage(assessment_stage),
+        "assessment_stage_label": stage_label_for(assessment_stage),
         "technical_parameters": metadata_export(sport),
         "core_parameters": [{"key": k, **PARAMETERS[k]} for k in CORE_SCORE_KEYS],
         "players": rows,
@@ -405,7 +411,7 @@ async def _upsert_assessment_entry(
     existing = await db.player_assessments.find_one({
         "schema_version": SCHEMA_VERSION,
         "player_id": entry.player_id,
-        "assessment_stage": payload.assessment_stage,
+        "assessment_stage": stage_query_value(payload.assessment_stage),
         "date": payload.date,
     })
     if existing and existing.get("status") == "published":
@@ -432,7 +438,7 @@ async def _upsert_assessment_entry(
         "player_type": payload.player_type,
         "session": payload.session,
         "slot": payload.session,
-        "assessment_stage": payload.assessment_stage,
+        "assessment_stage": normalize_assessment_stage(payload.assessment_stage),
         "assessment_year": assessment_year_from_date(payload.date),
         "date": payload.date,
         "scores": scores,
@@ -604,7 +610,7 @@ async def reopen_assessments(payload: ReopenIn, user: dict = Depends(get_current
         "sport": payload.sport,
         "player_type": payload.player_type,
         "session": payload.session,
-        "assessment_stage": payload.assessment_stage,
+        "assessment_stage": normalize_assessment_stage(payload.assessment_stage),
         "date": payload.date,
         "reason": payload.reason.strip(),
         "reopened_by": user["id"],
@@ -639,9 +645,12 @@ async def _year_assessments_for_player(player_id: str, year: int, sport: str) ->
     ).sort("date", 1).to_list(20)
     by_stage: Dict[str, dict] = {}
     for r in rows:
-        stage = r.get("assessment_stage")
+        stage = normalize_assessment_stage(r.get("assessment_stage") or "")
         if stage in STAGE_ORDER and stage not in by_stage:
-            by_stage[stage] = _serialize_record(r, sport)
+            rec = _serialize_record(r, sport)
+            rec["assessment_stage"] = stage
+            rec["assessment_stage_label"] = stage_label_for(stage)
+            by_stage[stage] = rec
     return [by_stage[s] for s in STAGE_ORDER if s in by_stage]
 
 
@@ -724,7 +733,7 @@ async def _prior_stages_for_player(player_id: str, current_stage: str, sport: st
     if idx <= 0:
         return []
     prior_keys = set(STAGE_ORDER[:idx])
-    return [r for r in records if r.get("assessment_stage") in prior_keys]
+    return [r for r in records if normalize_assessment_stage(r.get("assessment_stage") or "") in prior_keys]
 
 
 def _wrap_text(text: str, max_chars: int) -> list[str]:
@@ -766,7 +775,7 @@ def _draw_progress_chart(c, x: float, y: float, w: float, h: float, year_records
         rl_colors.HexColor("#BE185D"),
         rl_colors.HexColor("#374151"),
     ]
-    stage_labels = [ASSESSMENT_STAGES.get(r.get("assessment_stage", ""), "")[:12] for r in year_records]
+    stage_labels = [stage_label_for(normalize_assessment_stage(r.get("assessment_stage", "")))[:12] for r in year_records]
     n_pts = len(year_records)
     margin_l, margin_b = 8, 14
     plot_w = w - margin_l - 4
@@ -834,7 +843,11 @@ def _render_assessment_pdf(record: dict, year_records: list[dict]) -> bytes:
     tech_meta = _tech_meta(sport)
     year_records = year_records or [record]
     if record.get("id") and not any(r.get("id") == record.get("id") for r in year_records):
-        year_records = sorted(year_records + [_serialize_record(record, sport)], key=lambda x: STAGE_ORDER.index(x.get("assessment_stage", "assessment_1")) if x.get("assessment_stage") in STAGE_ORDER else 99)
+        year_records = sorted(
+            year_records + [_serialize_record(record, sport)],
+            key=lambda x: STAGE_ORDER.index(normalize_assessment_stage(x.get("assessment_stage", "assessment_1")))
+            if normalize_assessment_stage(x.get("assessment_stage", "")) in STAGE_ORDER else 99,
+        )
 
     buf = io.BytesIO()
     c = pdfcanvas.Canvas(buf, pagesize=A4)
@@ -876,7 +889,7 @@ def _render_assessment_pdf(record: dict, year_records: list[dict]) -> bytes:
         f"{record.get('sport', '—')}  ·  {record.get('centre', '—')}  ·  "
         f"{record.get('player_type', '—')}"
         + (f"  ·  {session_txt}" if session_txt else "")
-        + f"  ·  {ASSESSMENT_STAGES.get(record.get('assessment_stage', ''), '—')}"
+        + f"  ·  {stage_label_for(record.get('assessment_stage', ''))}"
     )
     c.drawString(margin, y, meta)
     y -= 5 * mm

@@ -13,6 +13,43 @@ ASSESSMENT_STAGES: Dict[str, str] = {
 }
 STAGE_ORDER = ["assessment_1", "assessment_2", "assessment_3", "assessment_4"]
 
+# Legacy v3 stage IDs accepted on input and mapped to v4 on save/query
+LEGACY_STAGE_ALIASES: Dict[str, str] = {
+    "week_1_baseline": "assessment_1",
+    "week_4_progress": "assessment_2",
+    "week_8_12_final": "assessment_3",
+}
+LEGACY_STAGE_LABELS: Dict[str, str] = {
+    "week_1_baseline": "Week 1 - Baseline",
+    "week_4_progress": "Week 4 - Progress",
+    "week_8_12_final": "Week 8-12 - Final",
+}
+
+ALL_STAGE_IDS = tuple(STAGE_ORDER) + tuple(LEGACY_STAGE_ALIASES.keys())
+
+
+def normalize_assessment_stage(stage: str) -> str:
+    return LEGACY_STAGE_ALIASES.get(stage, stage)
+
+
+def stage_label_for(stage: str) -> str:
+    normalized = normalize_assessment_stage(stage)
+    if normalized in ASSESSMENT_STAGES:
+        return ASSESSMENT_STAGES[normalized]
+    return LEGACY_STAGE_LABELS.get(stage, stage)
+
+
+def stage_query_value(stage: str) -> Any:
+    """Match v4 and legacy v3 records for the same assessment period."""
+    normalized = normalize_assessment_stage(stage)
+    keys = {normalized}
+    for legacy, target in LEGACY_STAGE_ALIASES.items():
+        if target == normalized:
+            keys.add(legacy)
+    if len(keys) == 1:
+        return next(iter(keys))
+    return {"$in": list(keys)}
+
 CORE_SCORE_KEYS = (
     "strength_conditioning",
     "game_awareness",
