@@ -8,7 +8,7 @@ for perm, keys in PERMISSION_TO_LEGACY.items():
     for key in keys:
         LEGACY_KEY_TO_PERMISSIONS.setdefault(key, [])
         if perm not in LEGACY_KEY_TO_PERMISSIONS[key]:
-            LEGACY_KEY_TO_PERMISSIONS[key] = LEGACY_KEY_TO_PERMISSIONS[key] + (perm,)
+            LEGACY_KEY_TO_PERMISSIONS[key].append(perm)
 
 # Direct mappings for keys not covered above
 LEGACY_KEY_TO_PERMISSIONS.update({
