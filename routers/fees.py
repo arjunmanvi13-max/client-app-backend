@@ -20,7 +20,14 @@ from datetime import datetime, timezone
 from typing import Optional, Literal, List
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from core import db, get_current_user, is_admin, is_super_admin, assert_perm, now_utc, get_perm, notify_role, resolve_user_institution, fee_entity_filter, derive_person_entities, format_date_display, format_datetime_display, format_month_display
+from collections import defaultdict
+from core import (
+    db, get_current_user, is_admin, is_super_admin, assert_perm, now_utc, get_perm, notify_role,
+    resolve_user_institution, fee_entity_filter, derive_person_entities, person_entity_filter,
+    is_sports_admin, format_date_display, format_datetime_display, format_month_display,
+)
+
+from fees_collection_utils import compute_player_fee_status
 
 router = APIRouter(prefix="/fees", tags=["fees"])
 
@@ -451,6 +458,214 @@ def _require_view_fees(user: dict):
         raise HTTPException(403, "view_fees permission required")
 
 
+
+async def _collection_people_query(
+    user: dict,
+    institution: Optional[str],
+    centre: Optional[str],
+    sport: Optional[str],
+    group: Optional[str],
+    search: Optional[str],
+) -> dict:
+    inst = (institution or resolve_user_institution(user, None) or "ALPHA").upper()
+    if inst not in ("PWS", "ALPHA"):
+        inst = "ALPHA"
+    query: dict = {"status": {"$ne": "deactivated"}}
+    if inst == "PWS":
+        query["kind"] = "student"
+        query.update(person_entity_filter("PWS"))
+        section = group or centre
+        if section:
+            query["group"] = section
+    else:
+        query["kind"] = "player"
+        query.update(person_entity_filter("ALPHA"))
+        if centre:
+            query["centre"] = centre
+        if sport:
+            query["sport"] = sport
+    if user.get("role") == "coach":
+        from routers.people import _coach_visibility_filter
+        coach_q = _coach_visibility_filter(user)
+        query = {"$and": [query, coach_q]}
+    if is_sports_admin(user) and query.get("kind") == "student":
+        return {"kind": "__none__"}
+    if search and search.strip():
+        from routers.people import _search_filter
+        query.update(_search_filter(search.strip()))
+    return query
+
+
+def _fee_match_for_institution(inst: str, player_ids: List[str]) -> dict:
+    if not player_ids:
+        return {"player_id": "__none__"}
+    base = {"player_id": {"$in": player_ids}}
+    if inst == "PWS":
+        return {**base, "entity_id": "pws"}
+    return {**base, "$or": [{"entity_id": "alpha"}, {"entity_id": {"$exists": False}}]}
+
+
+def _sort_collection_players(players: List[dict], sort: str) -> List[dict]:
+    if sort == "name":
+        return sorted(players, key=lambda p: (p.get("name") or "").lower())
+    if sort == "overdue_days":
+        return sorted(players, key=lambda p: p.get("overdue_days") or 0, reverse=True)
+    return sorted(players, key=lambda p: p.get("amount_due") or 0, reverse=True)
+
+
+@router.get("/summary")
+async def fees_collection_summary(
+    institution: Optional[Literal["PWS", "ALPHA"]] = None,
+    centre: Optional[str] = None,
+    sport: Optional[str] = None,
+    group: Optional[str] = None,
+    status: Optional[Literal["all", "overdue", "due_this_month", "paid_ahead"]] = "all",
+    sort: Optional[Literal["amount_due", "name", "overdue_days"]] = "amount_due",
+    search: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    """KPI strip + enriched player rows for the Collect Fees screen."""
+    _require_view_fees(user)
+    await ensure_all_players_monthly_fees()
+    today = now_utc().strftime("%Y-%m-%d")
+    current_month = today[:7]
+    inst = (institution or resolve_user_institution(user, None) or "ALPHA").upper()
+    if inst not in ("PWS", "ALPHA"):
+        inst = "ALPHA"
+
+    pq = await _collection_people_query(user, institution, centre, sport, group, search)
+    if pq.get("kind") == "__none__":
+        empty = {
+            "total_players": 0,
+            "amount_due_today": 0,
+            "overdue_count": 0,
+            "collected_this_month": 0,
+        }
+        return {
+            "institution": inst,
+            "kpis": empty,
+            "players": [],
+            "filtered_count": 0,
+            "total_due": 0,
+            "current_month": current_month,
+        }
+
+    people = await db.people.find(pq, {"_id": 0}).sort("name", 1).to_list(2000)
+    player_ids = [p["id"] for p in people]
+    fee_match = _fee_match_for_institution(inst, player_ids)
+    all_fees = await db.fees.find(fee_match, {"_id": 0}).to_list(20000)
+    by_player: dict = defaultdict(lambda: {"unpaid": [], "paid": []})
+    for f in all_fees:
+        bucket = "paid" if f.get("status") == "paid" else "unpaid"
+        by_player[f["player_id"]][bucket].append(f)
+
+    collected_agg = await db.fees.aggregate([
+        {"$match": {**fee_match, "status": "paid", "paid_at": {"$regex": f"^{current_month}"}}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount_due"}}},
+    ]).to_list(1)
+    collected_this_month = int(collected_agg[0]["total"]) if collected_agg else 0
+
+    enriched: List[dict] = []
+    for person in people:
+        pid = person["id"]
+        buckets = by_player.get(pid, {"unpaid": [], "paid": []})
+        snap = compute_player_fee_status(buckets["unpaid"], buckets["paid"], today, current_month)
+        enriched.append({
+            "id": pid,
+            "name": person.get("name"),
+            "mobile": person.get("mobile"),
+            "centre": person.get("centre") or person.get("group"),
+            "sport": person.get("sport"),
+            "player_type": person.get("player_type") or person.get("pws_student_type"),
+            "group": person.get("group"),
+            "pws_class": person.get("pws_class"),
+            "is_resident": person.get("is_resident"),
+            "organization": person.get("organization"),
+            **snap,
+        })
+
+    kpis = {
+        "total_players": len(enriched),
+        "amount_due_today": sum(p["amount_due_today"] for p in enriched),
+        "overdue_count": sum(1 for p in enriched if p["fee_status"] == "overdue"),
+        "collected_this_month": collected_this_month,
+    }
+
+    filtered = enriched
+    if status and status != "all":
+        if status == "overdue":
+            filtered = [p for p in enriched if p["fee_status"] == "overdue"]
+        elif status == "due_this_month":
+            filtered = [p for p in enriched if p["has_current_month_due"]]
+        elif status == "paid_ahead":
+            filtered = [p for p in enriched if p["fee_status"] == "paid_ahead"]
+
+    total_due = sum(p["amount_due"] for p in filtered)
+    sorted_players = _sort_collection_players(filtered, sort or "amount_due")
+
+    return {
+        "institution": inst,
+        "kpis": kpis,
+        "players": sorted_players,
+        "filtered_count": len(sorted_players),
+        "total_due": total_due,
+        "current_month": current_month,
+    }
+
+
+class RemindIn(BaseModel):
+    player_ids: List[str]
+    channel: Literal["whatsapp", "sms"] = "whatsapp"
+
+
+@router.post("/remind")
+async def send_fee_reminders(payload: RemindIn, user: dict = Depends(get_current_user)):
+    """Prepare fee reminders for overdue players (WhatsApp deep links / SMS text)."""
+    if not get_perm(user, "collect_fees") and not get_perm(user, "view_fees"):
+        raise HTTPException(403, "collect_fees or view_fees permission required")
+    if not payload.player_ids:
+        raise HTTPException(400, "Select at least one player")
+    today = now_utc().strftime("%Y-%m-%d")
+    current_month = today[:7]
+    reminders = []
+    for pid in payload.player_ids:
+        person = await db.people.find_one({"id": pid}, {"_id": 0})
+        if not person:
+            continue
+        fees = await db.fees.find({"player_id": pid, "status": {"$ne": "paid"}}, {"_id": 0}).to_list(200)
+        paid = await db.fees.find({"player_id": pid, "status": "paid"}, {"_id": 0}).to_list(200)
+        snap = compute_player_fee_status(fees, paid, today, current_month)
+        if snap["fee_status"] != "overdue":
+            continue
+        mobile = (person.get("mobile") or person.get("guardian_phone") or "").strip()
+        digits = "".join(c for c in mobile if c.isdigit())
+        if digits.startswith("91") and len(digits) > 10:
+            wa_phone = digits
+        elif len(digits) == 10:
+            wa_phone = f"91{digits}"
+        else:
+            wa_phone = digits or None
+        msg = (
+            f"Dear Parent/Guardian, fee reminder for {person.get('name')}: "
+            f"₹{snap['amount_due']:,} outstanding ({snap['badge']}). "
+            f"Please contact the office to settle dues. — PWS & ALPHA"
+        )
+        import urllib.parse
+        link = f"https://wa.me/{wa_phone}?text={urllib.parse.quote(msg)}" if wa_phone else None
+        reminders.append({
+            "player_id": pid,
+            "name": person.get("name"),
+            "mobile": mobile or None,
+            "amount_due": snap["amount_due"],
+            "overdue_days": snap["overdue_days"],
+            "message": msg,
+            "whatsapp_url": link,
+        })
+    if not reminders:
+        raise HTTPException(400, "None of the selected players are overdue")
+    return {"count": len(reminders), "reminders": reminders}
+
+
 @router.get("/rate-card")
 async def get_rate_card(entity: Optional[Literal["alpha", "pws"]] = None, user: dict = Depends(get_current_user)):
     _require_view_fees(user)
@@ -551,8 +766,11 @@ async def _aggregate_fee_bucket(base: dict, today: str, this_month: str) -> dict
     }
 
 
+PaymentMode = Literal["Cash", "Online", "UPI"]
+
+
 class CollectIn(BaseModel):
-    payment_mode: Literal["Cash", "Online"]
+    payment_mode: PaymentMode
     reference_id: Optional[str] = None
 
 
@@ -565,8 +783,8 @@ async def collect_fee(fee_id: str, payload: CollectIn, user: dict = Depends(get_
         raise HTTPException(404, "Fee not found")
     if fee.get("status") == "paid":
         raise HTTPException(400, "Fee already paid")
-    if payload.payment_mode == "Online" and not (payload.reference_id or "").strip():
-        raise HTTPException(400, "Reference ID required for Online payments")
+    if payload.payment_mode in ("Online", "UPI") and not (payload.reference_id or "").strip():
+        raise HTTPException(400, "Reference ID required for Online/UPI payments")
     update = {
         "status": "paid",
         "payment_mode": payload.payment_mode,
@@ -653,7 +871,7 @@ class MultiCollectIn(BaseModel):
     fee_ids: List[str] = []
     advance: List[AdvanceSel] = []   # future months paid in advance (same FY)
     player_id: Optional[str] = None  # required when only advance months are selected
-    payment_mode: Literal["Cash", "Online"]
+    payment_mode: PaymentMode
     reference_id: Optional[str] = None
     transaction_date: Optional[str] = None  # YYYY-MM-DD, defaults to today
     notes: Optional[str] = None
@@ -674,8 +892,8 @@ async def collect_multi(payload: MultiCollectIn, user: dict = Depends(get_curren
         raise HTTPException(403, "collect_fees permission required")
     if not payload.fee_ids and not payload.advance:
         raise HTTPException(400, "Select at least one fee")
-    if payload.payment_mode == "Online" and not (payload.reference_id or "").strip():
-        raise HTTPException(400, "Reference ID required for Online payments")
+    if payload.payment_mode in ("Online", "UPI") and not (payload.reference_id or "").strip():
+        raise HTTPException(400, "Reference ID required for Online/UPI payments")
     fees = await db.fees.find({"id": {"$in": payload.fee_ids}}, {"_id": 0}).to_list(100) if payload.fee_ids else []
     if len(fees) != len(payload.fee_ids):
         raise HTTPException(404, "One or more fees not found")
@@ -763,6 +981,12 @@ async def collect_multi(payload: MultiCollectIn, user: dict = Depends(get_curren
         "collected_by": {"id": user["id"], "name": user["name"], "role": user["role"]},
     }
     return receipt
+
+
+@router.post("/payments")
+async def collect_payments(payload: MultiCollectIn, user: dict = Depends(get_current_user)):
+    """Alias for collect-multi — used by the inline collection drawer."""
+    return await collect_multi(payload, user)
 
 
 # ------------------ Ad-Hoc / Manual Fee Creation (Super Admin only) ------------------
