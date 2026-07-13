@@ -485,7 +485,7 @@ async def _collection_people_query(
         if sport:
             query["sport"] = sport
     if user.get("role") == "coach":
-        from routers.people import _coach_visibility_filter
+        from routers.coach import _coach_visibility_filter
         coach_q = _coach_visibility_filter(user)
         query = {"$and": [query, coach_q]}
     if is_sports_admin(user) and query.get("kind") == "student":
@@ -944,6 +944,27 @@ async def collect_multi(payload: MultiCollectIn, user: dict = Depends(get_curren
     paid_at = now_utc().isoformat()
     txn_date = (payload.transaction_date or now_utc().strftime("%Y-%m-%d"))
 
+    from entity_receipt_branding import (
+        branding_for_receipt_response,
+        entity_id_from_fee_batch,
+        next_legacy_fee_receipt_number,
+        resolve_entity_branding,
+        validate_player_entity_match,
+    )
+
+    source_fees = fees if fees else []
+    try:
+        entity_id = entity_id_from_fee_batch(source_fees, player)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    try:
+        validate_player_entity_match(player, entity_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    receipt_number = await next_legacy_fee_receipt_number(entity_id)
+    branding = resolve_entity_branding(entity_id)
+
     update = {
         "status": "paid",
         "payment_mode": payload.payment_mode,
@@ -953,6 +974,8 @@ async def collect_multi(payload: MultiCollectIn, user: dict = Depends(get_curren
         "collected_by_id": user["id"],
         "collected_by_name": user["name"],
         "batch_id": batch_id,
+        "receipt_number": receipt_number,
+        "entity_id": entity_id,
         "notes": payload.notes or None,
     }
     await db.fees.update_many({"id": {"$in": all_ids}}, {"$set": update})
@@ -960,21 +983,57 @@ async def collect_multi(payload: MultiCollectIn, user: dict = Depends(get_curren
     # Reload the fees with the update applied so we can render the receipt
     fees_after = await db.fees.find({"id": {"$in": all_ids}}, {"_id": 0}).sort("period_month", 1).to_list(100)
     total_amount = sum(f.get("amount_due", 0) for f in fees_after)
+    remaining = await db.fees.find(
+        {"player_id": player_id, "status": {"$ne": "paid"}},
+        {"_id": 0, "amount_due": 1},
+    ).to_list(500)
+    balance_after = sum(int(f.get("amount_due") or 0) for f in remaining)
+
+    section_label = None
+    grade_label = player.get("pws_class")
+    if player.get("section_id"):
+        section_doc = await db.sections.find_one(
+            {"id": player["section_id"]},
+            {"_id": 0, "label": 1, "grade_name": 1},
+        )
+        if section_doc:
+            section_label = section_doc.get("label")
+            if not grade_label:
+                grade_label = section_doc.get("grade_name")
+
+    org_titles = {
+        "pws": "Prarambhika World School",
+        "alpha": "ALPHA Sports Academy",
+    }
     receipt = {
         "batch_id": batch_id,
+        "receipt_number": receipt_number,
+        "entity_id": entity_id,
+        "entity_code": branding["entity_code"],
+        "organization_title": org_titles.get(entity_id, org_titles["alpha"]),
+        "branding": branding_for_receipt_response(entity_id),
         "paid_at": paid_at,
         "transaction_date": txn_date,
         "player": {
             "id": player.get("id"),
             "name": player.get("name"),
+            "mobile": player.get("mobile"),
+            "admission_number": player.get("admission_number"),
             "centre": player.get("centre") or player.get("group"),
             "sport": player.get("sport"),
-            "category": player.get("player_type") or _pws_category(player) if player.get("kind") == "student" else player.get("player_type"),
+            "group": player.get("group"),
+            "pws_class": player.get("pws_class"),
+            "grade": grade_label,
+            "section": section_label,
+            "category": player.get("player_type") or (_pws_category(player) if player.get("kind") == "student" else player.get("player_type")),
+            "player_type": player.get("player_type"),
             "kind": player.get("kind"),
             "organization": player.get("organization"),
+            "is_resident": player.get("is_resident"),
         },
         "fees": fees_after,
         "total_amount": total_amount,
+        "balance_after_payment": balance_after,
         "payment_mode": payload.payment_mode,
         "reference_id": payload.reference_id,
         "notes": payload.notes,
@@ -1067,124 +1126,48 @@ async def receipt_pdf(batch_id: str):
     if not fees:
         raise HTTPException(404, "Receipt not found")
     player = await db.people.find_one({"id": fees[0]["player_id"]}, {"_id": 0}) or {}
-    total = sum(f.get("amount_due", 0) for f in fees)
     f0 = fees[0]
-    is_pws = fees[0].get("entity_id") == "pws" or player.get("kind") == "student"
-    org_title = "Prarambhika World School" if is_pws else "ALPHA Sports Academy"
-    person_label = "Student" if is_pws else "Player"
 
-    from io import BytesIO
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import mm
-    from reportlab.pdfgen import canvas as pdfcanvas
+    from entity_receipt_branding import (
+        entity_id_from_fee_batch,
+        format_receipt_number_display,
+        resolve_entity_branding,
+    )
     from fastapi.responses import Response
+    from fee_receipt_pdf import render_batch_receipt_pdf
 
-    buf = BytesIO()
-    c = pdfcanvas.Canvas(buf, pagesize=A4)
-    W, H = A4
+    try:
+        entity_id = entity_id_from_fee_batch(fees, player)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    branding = resolve_entity_branding(entity_id)
+    is_pws = entity_id == "pws"
+    person_label = "Student" if is_pws else "Player"
+    receipt_number = f0.get("receipt_number") or format_receipt_number_display(None, entity_id)
 
-    def rs(n):
-        return f"Rs. {n:,}"
-
-    # Header band
-    c.setFillColorRGB(0.06, 0.09, 0.16)  # slate-900
-    c.rect(0, H - 38 * mm, W, 38 * mm, fill=1, stroke=0)
-    c.setFillColorRGB(1, 1, 1)
-    c.setFont("Helvetica-Bold", 18)
-    c.drawString(20 * mm, H - 18 * mm, org_title)
-    c.setFont("Helvetica", 10)
-    c.drawString(20 * mm, H - 25 * mm, "Payment Receipt")
-    c.setFont("Helvetica-Bold", 11)
-    c.drawRightString(W - 20 * mm, H - 18 * mm, f"Receipt #{batch_id[:8].upper()}")
-    c.setFont("Helvetica", 9)
-    c.drawRightString(W - 20 * mm, H - 25 * mm, f"Transaction date: {format_date_display(f0.get('transaction_date'))}")
-
-    y = H - 50 * mm
-    # Player block
-    c.setFillColorRGB(0.06, 0.09, 0.16)
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(20 * mm, y, f"{person_label} Details")
-    y -= 7 * mm
-    c.setFont("Helvetica", 10)
     if is_pws:
-        lines = [
-            ("Name", player.get("name") or f0.get("player_name") or "-"),
-            ("Class / Section", player.get("group") or f0.get("centre") or "-"),
-            ("Category", _pws_category(player) if player.get("kind") == "student" else f0.get("category") or "-"),
+        person_lines = [
+            player.get("group") or f0.get("centre") or "-",
+            _pws_category(player) if player.get("kind") == "student" else (f0.get("category") or "-"),
         ]
     else:
-        lines = [
-            ("Name", player.get("name") or f0.get("player_name") or "-"),
-            ("Centre / Sport", f"{player.get('centre') or '-'}  ·  {player.get('sport') or '-'}"),
-            ("Category", _canonical_category(player.get("player_type") or f0.get("category") or "-")),
+        person_lines = [
+            f"{player.get('centre') or '-'} · {player.get('sport') or '-'}",
+            _canonical_category(player.get("player_type") or f0.get("category") or "-"),
         ]
-    for label, val in lines:
-        c.setFillColorRGB(0.39, 0.45, 0.55)
-        c.drawString(20 * mm, y, label)
-        c.setFillColorRGB(0.06, 0.09, 0.16)
-        c.drawString(60 * mm, y, str(val))
-        y -= 6 * mm
 
-    y -= 4 * mm
-    # Fee table header
-    c.setFillColorRGB(0.95, 0.96, 0.98)
-    c.rect(20 * mm, y - 2 * mm, W - 40 * mm, 8 * mm, fill=1, stroke=0)
-    c.setFillColorRGB(0.28, 0.33, 0.41)
-    c.setFont("Helvetica-Bold", 9)
-    c.drawString(23 * mm, y, "FEE")
-    c.drawString(90 * mm, y, "PERIOD")
-    c.drawRightString(W - 23 * mm, y, "AMOUNT")
-    y -= 8 * mm
-    c.setFont("Helvetica", 10)
-    for f in fees:
-        c.setFillColorRGB(0.06, 0.09, 0.16)
-        c.drawString(23 * mm, y, str(f.get("fee_type") or "-"))
-        c.drawString(90 * mm, y, format_month_display(f.get("period_month")))
-        c.drawRightString(W - 23 * mm, y, rs(f.get("amount_due", 0)))
-        y -= 6.5 * mm
-        if y < 60 * mm:
-            c.showPage()
-            y = H - 30 * mm
-            c.setFont("Helvetica", 10)
-    # Total
-    y -= 2 * mm
-    c.setStrokeColorRGB(0.89, 0.91, 0.94)
-    c.line(20 * mm, y + 4 * mm, W - 20 * mm, y + 4 * mm)
-    c.setFont("Helvetica-Bold", 12)
-    c.setFillColorRGB(0.06, 0.09, 0.16)
-    c.drawString(23 * mm, y - 2 * mm, "Total Paid")
-    c.setFillColorRGB(0.02, 0.53, 0.32)
-    c.drawRightString(W - 23 * mm, y - 2 * mm, rs(total))
-    y -= 14 * mm
-
-    # Payment details
-    c.setFillColorRGB(0.06, 0.09, 0.16)
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(20 * mm, y, "Payment Details")
-    y -= 7 * mm
-    c.setFont("Helvetica", 10)
-    paid_at = f0.get("paid_at") or ""
-    details = [
-        ("Payment mode", f0.get("payment_mode") or "-"),
-        ("Reference / Txn ID", f0.get("reference_id") or "-"),
-        ("Collected by", f0.get("collected_by_name") or "-"),
-        ("Timestamp", format_datetime_display(paid_at) if paid_at else "—"),
-    ]
-    for label, val in details:
-        c.setFillColorRGB(0.39, 0.45, 0.55)
-        c.drawString(20 * mm, y, label)
-        c.setFillColorRGB(0.06, 0.09, 0.16)
-        c.drawString(60 * mm, y, str(val))
-        y -= 6 * mm
-
-    # Footer
-    c.setFont("Helvetica-Oblique", 8)
-    c.setFillColorRGB(0.58, 0.64, 0.72)
-    c.drawCentredString(W / 2, 15 * mm, "This is a computer-generated receipt and does not require a signature.")
-    c.drawCentredString(W / 2, 11 * mm, f"ALPHA Sports Academy · Receipt {batch_id[:8].upper()}")
-    c.save()
-
-    pdf_bytes = buf.getvalue()
+    pdf_bytes = render_batch_receipt_pdf(
+        batch_id,
+        fees,
+        player,
+        branding=branding,
+        receipt_number=f0.get("receipt_number"),
+        person_label=person_label,
+        person_lines=person_lines,
+        format_month=format_month_display,
+        format_date=format_date_display,
+        format_datetime=format_datetime_display,
+    )
     fname = f"receipt-{(player.get('name') or 'player').replace(' ', '-').lower()}-{batch_id[:8]}.pdf"
     return Response(
         content=pdf_bytes,

@@ -183,7 +183,7 @@ async def _seed_demo_users() -> None:
             "coach_type": u.get("coach_type"),
             "assigned_sport": "Cricket" if u["role"] == "coach" else None,
             "assigned_centres": ["Balua"] if u["role"] == "coach" else [],
-            "assigned_sports": ["Cricket", "Football"] if u["role"] == "coach" else [],
+            "assigned_sports": ["Cricket"] if u["role"] == "coach" else [],
             "created_at": now_utc().isoformat(),
         }
         await _seed_user_if_absent(u["email"], doc)

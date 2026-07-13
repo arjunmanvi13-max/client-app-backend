@@ -14,31 +14,22 @@ class CoachAttendanceIn(BaseModel):
     sport: Optional[Literal["Cricket", "Football"]] = None
     absent_player_ids: List[str] = []
 
+from coach_scope import build_coach_player_query, coach_assignment_lists, normalize_coach_assignments
+
+
 def _coach_assignment_lists(user: dict) -> tuple[list, list]:
-    centres = list(user.get("assigned_centres") or [])
-    sports = list(user.get("assigned_sports") or [])
-    if not sports and user.get("assigned_sport"):
-        sports = [user["assigned_sport"]]
-    return centres, sports
+    return coach_assignment_lists(user)
 
 
 def _coach_visibility_filter(user: dict, include_deactivated: bool = False) -> dict:
-    """Coach sees only players in their assigned centres + sports. Admin sees all."""
-    q: dict = {"kind": "player"}
-    if not include_deactivated:
-        q["status"] = {"$ne": "deactivated"}
+    """Coach sees only players in assigned sport(s), optionally scoped by centre."""
     if is_admin(user):
+        q: dict = {"kind": "player"}
+        if not include_deactivated:
+            q["status"] = {"$ne": "deactivated"}
         return q
     centres, sports = _coach_assignment_lists(user)
-    if not centres and not sports:
-        # Deny-by-default: no assignments means no roster visibility
-        q["id"] = {"$in": []}
-        return q
-    if centres:
-        q["centre"] = {"$in": centres}
-    if sports:
-        q["sport"] = {"$in": sports}
-    return q
+    return build_coach_player_query(centres, sports, include_deactivated=include_deactivated)
 
 
 async def assert_player_in_coach_roster(user: dict, player_id: str) -> None:

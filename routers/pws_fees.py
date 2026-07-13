@@ -1,5 +1,4 @@
 """PWS fee collection — 2026-27 roadmap, sync, and invoice export."""
-import io
 import uuid
 from typing import Dict, List, Literal, Optional
 
@@ -266,56 +265,15 @@ async def export_invoice_pdf(student_id: str, user: dict = Depends(get_current_u
     profile = pws_student_profile_from_person(student)
     fees = await db.fees.find({"player_id": student_id, "entity_id": "pws"}, {"_id": 0}).sort("period_month", 1).to_list(500)
 
-    from reportlab.lib.pagesizes import A4
-    from reportlab.pdfgen import canvas as pdfcanvas
+    from fee_receipt_pdf import render_pws_fee_statement_pdf
 
-    buf = io.BytesIO()
-    c = pdfcanvas.Canvas(buf, pagesize=A4)
-    w, h = A4
-    y = h - 50
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(50, y, "Prarambhika World School — Fee Statement")
-    y -= 24
-    c.setFont("Helvetica", 11)
-    c.drawString(50, y, f"Student: {student.get('name', '')}")
-    y -= 16
-    c.drawString(50, y, f"Class: {profile['pws_class']}  ·  Type: {profile['pws_student_type']}")
-    y -= 16
-    transport = "Yes" if profile["transport_enabled"] else "No"
-    if profile["transport_enabled"]:
-        transport += f" ({profile['transport_distance']})"
-    c.drawString(50, y, f"Transport: {transport}  ·  AY {PWS_ACADEMIC_YEAR}")
-    y -= 16
-    c.drawString(50, y, f"Generated: {format_date_display(now_utc().strftime('%Y-%m-%d'))}")
-    y -= 28
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(50, y, "Period")
-    c.drawString(130, y, "Fee")
-    c.drawString(280, y, "Amount")
-    c.drawString(360, y, "Status")
-    y -= 14
-    c.setFont("Helvetica", 9)
-    unpaid_total = 0
-    paid_total = 0
-    for f in fees:
-        if y < 60:
-            c.showPage()
-            y = h - 50
-        status = f.get("status", "due")
-        amt = f.get("amount_due", 0)
-        if status == "paid":
-            paid_total += amt
-        else:
-            unpaid_total += amt
-        c.drawString(50, y, format_month_display(f.get("period_month", "")))
-        c.drawString(130, y, str(f.get("fee_type", ""))[:22])
-        c.drawString(280, y, f"₹{amt:,}")
-        c.drawString(360, y, status.upper())
-        y -= 12
-    y -= 10
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(50, y, f"Paid: ₹{paid_total:,}   Pending: ₹{unpaid_total:,}")
-    c.save()
-    pdf_bytes = buf.getvalue()
+    pdf_bytes = render_pws_fee_statement_pdf(
+        student,
+        profile,
+        fees,
+        PWS_ACADEMIC_YEAR,
+        format_month=format_month_display,
+        format_date=lambda _: format_date_display(now_utc().strftime("%Y-%m-%d")),
+    )
     fname = f"pws-fees-{student.get('name', 'student').replace(' ', '-').lower()}.pdf"
     return Response(content=pdf_bytes, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{fname}"'})

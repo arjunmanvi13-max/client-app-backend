@@ -9,6 +9,7 @@ from routers.academic import (
     assert_teacher_section_access,
     assigned_section_ids_for_teacher,
 )
+from coach_scope import normalize_coach_assignments
 from routers.coach import _coach_visibility_filter, _coach_assignment_lists
 
 router = APIRouter(prefix="/people", tags=["people"])
@@ -140,9 +141,9 @@ def _assert_can_view_person(user: dict, person: dict) -> None:
         _assert_can_list_kind(user, kind)
     if user.get("role") == "coach" and kind == "player":
         centres, sports = _coach_assignment_lists(user)
-        if centres and person.get("centre") not in centres:
+        if not sports or person.get("sport") not in sports:
             raise HTTPException(404, "Person not found")
-        if sports and person.get("sport") not in sports:
+        if centres and person.get("centre") not in centres:
             raise HTTPException(404, "Person not found")
     if user.get("role") == "coach" and kind and kind != "player":
         raise HTTPException(404, "Person not found")
@@ -356,6 +357,14 @@ async def create_person(payload: PersonCreate, user: dict = Depends(get_current_
         _validate_player_centre_type(payload.centre, payload.player_type)
         if not payload.date_of_admission:
             raise HTTPException(400, "Date of admission is required for players")
+        if user.get("role") == "coach":
+            centres, sports = _coach_assignment_lists(user)
+            if not sports:
+                raise HTTPException(400, "Your coach account has no assigned sport — contact an admin")
+            if payload.sport and payload.sport not in sports:
+                raise HTTPException(403, f"You can only add {', '.join(sports)} players")
+            if centres and payload.centre and payload.centre not in centres:
+                raise HTTPException(403, f"You can only add players at: {', '.join(centres)}")
     else:
         _assert_can_add_kind(user, payload.kind)
     doc = {"id": str(uuid.uuid4()), **payload.dict(), "created_at": now_utc().isoformat()}

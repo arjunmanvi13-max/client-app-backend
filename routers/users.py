@@ -8,6 +8,7 @@ from core import (
     hash_password, public_user, directory_user, now_utc,
     validate_domain_email, default_permissions, PERMISSION_KEYS,
 )
+from coach_scope import normalize_coach_assignments
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -98,6 +99,10 @@ async def create_user(payload: UserCreate, user: dict = Depends(get_current_user
         "permissions": perms,
         "created_at": now_utc().isoformat(),
     }
+    if payload.role == "coach":
+        normalize_coach_assignments(doc)
+        if not doc.get("assigned_sports"):
+            raise HTTPException(400, "Assign at least one sport (Cricket or Football) for coach accounts")
     # Only include sparse-indexed fields when set so the sparse unique index works.
     if mobile:
         doc["mobile"] = mobile
@@ -136,6 +141,14 @@ async def update_user(user_id: str, payload: UserUpdate, user: dict = Depends(ge
             upd[k] = v
     if not upd:
         raise HTTPException(400, "No fields to update")
+    if target.get("role") == "coach" or upd.get("role") == "coach" or any(k in upd for k in ("assigned_sport", "assigned_sports", "assigned_centres")):
+        merged = {**target, **upd}
+        normalize_coach_assignments(merged)
+        if merged.get("role") == "coach" and not merged.get("assigned_sports"):
+            raise HTTPException(400, "Assign at least one sport (Cricket or Football) for coach accounts")
+        for k in ("assigned_sport", "assigned_sports", "assigned_centres"):
+            if k in merged:
+                upd[k] = merged[k]
     await db.users.update_one({"id": user_id}, {"$set": upd})
     doc = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
     return doc
