@@ -333,6 +333,22 @@ def _age_from_dob(dob: Optional[str]) -> Optional[int]:
     except Exception:
         return None
 
+def _normalize_pws_student(doc: dict) -> dict:
+    if doc.get("kind") != "student":
+        return doc
+    from pws_fee_structure import transport_amount
+    st = doc.get("pws_student_type")
+    if st == "Boarding":
+        doc["is_resident"] = True
+    elif st in ("Day School", "Day Boarding"):
+        doc["is_resident"] = False
+    if doc.get("transport_enabled"):
+        doc["transport_fee_monthly"] = transport_amount(doc.get("transport_distance") or "Up to 5 km")
+    elif not doc.get("transport_enabled"):
+        doc["transport_fee_monthly"] = 0
+    return doc
+
+
 @router.post("")
 async def create_person(payload: PersonCreate, user: dict = Depends(get_current_user)):
     if payload.kind == "player":
@@ -344,6 +360,7 @@ async def create_person(payload: PersonCreate, user: dict = Depends(get_current_
         _assert_can_add_kind(user, payload.kind)
     doc = {"id": str(uuid.uuid4()), **payload.dict(), "created_at": now_utc().isoformat()}
     doc = _normalize_guardian_fields(doc)
+    doc = _normalize_pws_student(doc)
     doc["entities"] = derive_person_entities(doc)
     await _assert_unique_ids(doc)
     if payload.kind == "student":
@@ -365,10 +382,11 @@ async def create_person(payload: PersonCreate, user: dict = Depends(get_current_
         derived = _age_from_dob(doc["dob"])
         if derived is not None:
             doc["age"] = derived
-    # Only Super Admin can set monthly/registration overrides at admission
-    if not is_super_admin(user):
+    # Only Super Admin / Principal can set fee overrides at admission
+    if not is_super_admin(user) and user.get("role") not in ("principal", "vice_principal"):
         doc.pop("monthly_fee_override", None)
         doc.pop("registration_fee_override", None)
+        doc.pop("pws_fee_overrides", None)
     if payload.kind == "player":
         # Players default to ALPHA; super admin may set entities for dual participation
         if not payload.entities and payload.organization != "BOTH":
@@ -418,10 +436,16 @@ async def update_person(person_id: str, payload: PersonUpdate, user: dict = Depe
         sid, label = await resolve_section_group(upd["section_id"])
         upd["section_id"] = sid
         upd["group"] = label
-    # Only Super Admin can update fee overrides post-admission
+    can_override_pws = is_super_admin(user) or user.get("role") in ("principal", "vice_principal")
+    if not can_override_pws:
+        upd.pop("pws_fee_overrides", None)
     if not is_super_admin(user):
         upd.pop("monthly_fee_override", None)
         upd.pop("registration_fee_override", None)
+    if target["kind"] == "student":
+        merged_norm = _normalize_pws_student({**target, **upd})
+        upd["is_resident"] = merged_norm.get("is_resident", target.get("is_resident"))
+        upd["transport_fee_monthly"] = merged_norm.get("transport_fee_monthly", target.get("transport_fee_monthly"))
     # Auto-compute age from DOB when DOB is being changed
     if upd.get("dob"):
         derived = _age_from_dob(upd["dob"])
@@ -441,6 +465,13 @@ async def update_person(person_id: str, payload: PersonUpdate, user: dict = Depe
         upd.pop("assigned_coach_id", None)
     await db.people.update_one({"id": person_id}, {"$set": upd})
     fresh = await db.people.find_one({"id": person_id}, {"_id": 0})
+    if fresh.get("kind") == "student" and fresh.get("pws_class"):
+        try:
+            from routers.pws_fees import sync_pws_fees_for_student
+            await sync_pws_fees_for_student(fresh)
+        except Exception:
+            import logging
+            logging.getLogger("people").exception("PWS fee sync failed for student %s", person_id)
     if fresh.get("kind") == "staff":
         try:
             await ensure_staff_user_account(fresh)

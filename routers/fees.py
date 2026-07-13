@@ -250,9 +250,15 @@ async def auto_create_fees_for_player(player: dict) -> List[dict]:
 
 
 async def auto_create_fees_for_student(student: dict) -> List[dict]:
-    """Create PWS school fees on student enrollment (tuition, exam, hostel, transport)."""
+    """Create PWS school fees on student enrollment."""
     if student.get("kind") != "student" or "PWS" not in derive_person_entities(student):
         return []
+    if student.get("pws_class"):
+        try:
+            from routers.pws_fees import sync_pws_fees_for_student
+            return await sync_pws_fees_for_student(student)
+        except Exception:
+            pass
     category = _pws_category(student)
     rates = await _rates_for_person(student)
     if not rates:
@@ -391,6 +397,12 @@ async def ensure_monthly_fees_up_to_current(player_id: str) -> List[dict]:
 
 
 async def _ensure_pws_recurring_fees(student: dict) -> List[dict]:
+    if student.get("pws_class"):
+        try:
+            from routers.pws_fees import sync_pws_fees_for_student
+            return await sync_pws_fees_for_student(student)
+        except Exception:
+            pass
     admission = student.get("date_of_admission") or now_utc().strftime("%Y-%m-%d")
     start_month = _month_key(admission)
     current_month = now_utc().strftime("%Y-%m")

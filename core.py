@@ -9,7 +9,7 @@ import os
 import uuid
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Dict
 
 import bcrypt
 import jwt
@@ -654,6 +654,12 @@ class PersonCreate(BaseModel):
     status: Literal["active", "deactivated"] = "active"
     parent_user_ids: List[str] = []  # parent users linked to this child
     transport_fee_monthly: Optional[int] = 0   # ALPHA player optional monthly transport
+    # PWS 2026-27 fee profile
+    pws_student_type: Optional[Literal["Day School", "Boarding", "Day Boarding"]] = None
+    pws_class: Optional[str] = None
+    transport_enabled: bool = False
+    transport_distance: Optional[Literal["Up to 5 km", "Over 5 km"]] = None
+    pws_fee_overrides: Optional[Dict[str, int]] = None
     hostel_fee_override: Optional[int] = None  # ALPHA hostel player optional manual override
     monthly_fee_override: Optional[int] = None  # Super Admin only — override rate-card monthly at admission
     registration_fee_override: Optional[int] = None  # Super Admin only — override rate-card registration
@@ -692,6 +698,11 @@ class PersonUpdate(BaseModel):
     status: Optional[Literal["active", "deactivated"]] = None
     parent_user_ids: Optional[List[str]] = None
     transport_fee_monthly: Optional[int] = None
+    pws_student_type: Optional[Literal["Day School", "Boarding", "Day Boarding"]] = None
+    pws_class: Optional[str] = None
+    transport_enabled: Optional[bool] = None
+    transport_distance: Optional[Literal["Up to 5 km", "Over 5 km"]] = None
+    pws_fee_overrides: Optional[Dict[str, int]] = None
     hostel_fee_override: Optional[int] = None
     monthly_fee_override: Optional[int] = None
     registration_fee_override: Optional[int] = None
