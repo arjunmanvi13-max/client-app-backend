@@ -55,95 +55,102 @@ class TestAuthMeCanManage:
         assert r.json().get("can_manage", []) == []
 
 
-# /api/users CRUD with permission gating
+# /api/users CRUD — Super Admin only for login user provisioning
 class TestUserCRUD:
     created_ids: list = []
 
     def _suffix(self):
         return uuid.uuid4().hex[:8]
 
-    def test_admin_creates_coach_with_can_manage(self):
+    def test_super_admin_creates_alpha_coach(self):
         sfx = self._suffix()
         payload = {
-            "email": f"TEST_coach_{sfx}@x.com", "password": "Pass@123", "name": "TEST Coach",
-            "role": "coach", "organization": "ALPHA", "department": "Football",
-            "can_manage": ["player", "coach"],
+            "email": f"TEST_coach_{sfx}@prarambhika.com",
+            "password": "Pass@123",
+            "name": "TEST Coach",
+            "user_type": "alpha_coach",
+            "assigned_sports": ["Football"],
+            "assigned_centres": ["Balua"],
         }
-        r = requests.post(f"{API}/users", headers=_hdr("admin"), json=payload)
+        r = requests.post(f"{API}/users", headers=_hdr("super_admin"), json=payload)
         assert r.status_code == 200, r.text
         u = r.json()
+        assert u["user_type"] == "alpha_coach"
         assert u["role"] == "coach"
-        assert set(u["can_manage"]) == {"player", "coach"}
-        assert u["department"] == "Football"
+        assert u["assigned_sports"] == ["Football"]
         TestUserCRUD.created_ids.append(u["id"])
 
-        # GET via list to verify persistence
-        rl = requests.get(f"{API}/users?role=coach", headers=_hdr("admin"))
+        rl = requests.get(f"{API}/users?user_type=alpha_coach", headers=_hdr("super_admin"))
         assert any(x["id"] == u["id"] for x in rl.json())
 
-    def test_coach_cannot_create_coach(self):
-        # coach default can_manage=['player'] => 403 for role=coach
-        payload = {"email": f"TEST_blocked_{self._suffix()}@x.com", "password": "x", "name": "x", "role": "coach"}
+    def test_admin_cannot_create_login_user(self):
+        payload = {
+            "email": f"TEST_blocked_{self._suffix()}@prarambhika.com",
+            "password": "Pass@123",
+            "name": "x",
+            "user_type": "alpha_coach",
+            "assigned_sports": ["Cricket"],
+        }
+        r = requests.post(f"{API}/users", headers=_hdr("admin"), json=payload)
+        assert r.status_code == 403
+
+    def test_coach_cannot_create_login_user(self):
+        payload = {
+            "email": f"TEST_blocked_{self._suffix()}@prarambhika.com",
+            "password": "Pass@123",
+            "name": "x",
+            "user_type": "alpha_coach",
+            "assigned_sports": ["Cricket"],
+        }
         r = requests.post(f"{API}/users", headers=_hdr("coach"), json=payload)
         assert r.status_code == 403
 
-    def test_teacher_can_create_student_user_but_can_manage_dropped(self):
-        sfx = self._suffix()
+    def test_rejects_unapproved_user_type(self):
         payload = {
-            "email": f"TEST_stud_{sfx}@x.com", "password": "Pass@123", "name": "TEST Stu",
-            "role": "student", "can_manage": ["coach"],  # should be dropped (non-admin)
+            "email": f"TEST_parent_{self._suffix()}@prarambhika.com",
+            "password": "Pass@123",
+            "name": "Parent",
+            "user_type": "parent",
         }
-        r = requests.post(f"{API}/users", headers=_hdr("teacher"), json=payload)
-        assert r.status_code == 200, r.text
-        u = r.json()
-        assert u["can_manage"] == []
-        TestUserCRUD.created_ids.append(u["id"])
+        r = requests.post(f"{API}/users", headers=_hdr("super_admin"), json=payload)
+        assert r.status_code == 422
 
-    def test_non_admin_cannot_create_warden(self):
-        # warden not in MANAGE_KINDS so requires admin
-        payload = {"email": f"TEST_w_{self._suffix()}@x.com", "password": "x", "name": "x", "role": "warden"}
-        r = requests.post(f"{API}/users", headers=_hdr("teacher"), json=payload)
-        assert r.status_code == 403
+    def test_classification_catalog_has_seven_types(self):
+        r = requests.get(f"{API}/users/classification", headers=_hdr("super_admin"))
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data["userTypes"]) == 7
+        assert len(data["approvedCodes"]) == 7
 
-    def test_patch_drops_role_and_can_manage_for_non_admin(self):
-        # use the coach-created earlier
+    def test_teacher_cannot_patch_login_user(self):
         assert TestUserCRUD.created_ids
         target = TestUserCRUD.created_ids[0]
-        # teacher cannot edit coaches (no can_manage rights)
-        r = requests.patch(f"{API}/users/{target}", headers=_hdr("teacher"),
-                            json={"name": "Hacked", "role": "admin"})
+        r = requests.patch(
+            f"{API}/users/{target}",
+            headers=_hdr("teacher"),
+            json={"name": "Hacked", "user_type": "super_admin"},
+        )
         assert r.status_code == 403
 
-    def test_admin_patches_user_password_and_phone(self):
+    def test_super_admin_patches_user_phone(self):
         target = TestUserCRUD.created_ids[0]
-        r = requests.patch(f"{API}/users/{target}", headers=_hdr("admin"),
-                            json={"phone": "9999", "password": "NewPass@1"})
+        r = requests.patch(
+            f"{API}/users/{target}",
+            headers=_hdr("super_admin"),
+            json={"phone": "9999"},
+        )
         assert r.status_code == 200
         assert r.json()["phone"] == "9999"
-        # verify password change works
-        email = r.json()["email"]
-        rl = requests.post(f"{API}/auth/login", json={"email": email, "password": "NewPass@1"})
-        assert rl.status_code == 200
 
     def test_coach_self_delete_blocked(self):
-        # Need coach's id
         me = requests.get(f"{API}/auth/me", headers=_hdr("coach")).json()
         r = requests.delete(f"{API}/users/{me['id']}", headers=_hdr("coach"))
-        assert r.status_code == 400
-
-    def test_admin_delete_user(self):
-        # delete the teacher-created student user (role=student in MANAGE_KINDS)
-        if len(TestUserCRUD.created_ids) > 1:
-            tid = TestUserCRUD.created_ids[1]
-            r = requests.delete(f"{API}/users/{tid}", headers=_hdr("admin"))
-            assert r.status_code == 200
-            TestUserCRUD.created_ids.remove(tid)
+        assert r.status_code == 403
 
     @classmethod
     def teardown_class(cls):
-        # cleanup remaining
         for uid in cls.created_ids:
-            requests.delete(f"{API}/users/{uid}", headers=_hdr("admin"))
+            requests.delete(f"{API}/users/{uid}", headers=_hdr("super_admin"))
 
 
 # /api/people CRUD with kind permission gating

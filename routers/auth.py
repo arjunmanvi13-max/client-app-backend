@@ -30,6 +30,11 @@ async def login(payload: LoginIn):
         raise HTTPException(401, "Invalid email or password")
     if user.get("status") == "deactivated":
         raise HTTPException(403, "Account deactivated. Contact your administrator.")
+    if user.get("requires_user_type_review"):
+        raise HTTPException(
+            403,
+            "Your account requires an approved user type assignment. Please contact the Super Admin.",
+        )
     token = create_token(user["id"], user.get("email") or "", user["role"])
     return {
         "access_token": token,

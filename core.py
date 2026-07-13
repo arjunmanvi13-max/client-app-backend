@@ -132,6 +132,11 @@ async def get_current_user(request: Request) -> dict:
         raise HTTPException(401, "User not found")
     if user.get("status") == "deactivated":
         raise HTTPException(403, "Account deactivated")
+    if user.get("requires_user_type_review"):
+        raise HTTPException(
+            403,
+            "Your account requires an approved user type assignment. Please contact the Super Admin.",
+        )
     return user
 
 def require_roles(*roles):
@@ -229,6 +234,15 @@ def default_permissions(role: str, coach_type: Optional[str] = None) -> dict:
             "view_students": True, "view_players": True, "dashboard_access": True,
             "mark_hostel_attendance": True, "view_attendance": True,
         })
+    elif role in ("pws_accounts", "alpha_accounts"):
+        p.update({
+            "view_fees": True, "collect_fees": True, "dashboard_access": True,
+            "access_reports": True, "supervise_tasks": True,
+        })
+        if role == "pws_accounts":
+            p.update({"view_students": True, "add_students": True})
+        else:
+            p.update({"view_players": True, "add_players": True})
     elif role in ("student", "player"):
         p.update({"dashboard_access": True})
     elif role == "parent":
@@ -280,15 +294,32 @@ def role_category(user: dict) -> str:
     return "Employee"
 
 
-def role_display(role: str) -> str:
-    """Human-friendly label. admin -> Sports Admin (per ALPHA-restriction spec)."""
+def role_display(role: str, user_type: Optional[str] = None, designation: Optional[str] = None) -> str:
+    """Human-friendly label from canonical user type when available."""
+    try:
+        from user_classification import CATALOG_BY_CODE, resolve_user_type
+        ut = user_type or resolve_user_type({"role": role, "user_type": user_type})
+        if ut and ut in CATALOG_BY_CODE:
+            label = CATALOG_BY_CODE[ut]["displayName"]
+            if ut == "pws_admin" and designation:
+                des = designation.replace("_", " ").title()
+                return f"{label} · {des}"
+            return label
+    except Exception:
+        pass
     return {
-        "admin": "Sports Admin",
+        "admin": "ALPHA Admin",
         "super_admin": "Super Admin",
-        "principal": "Principal",
-        "vice_principal": "Vice Principal",
-        "teacher": "Teacher",
-        "coach": "Coach",
+        "principal": "PWS Admin · Principal",
+        "vice_principal": "PWS Admin · Vice Principal",
+        "pws_accounts": "PWS Accounts",
+        "alpha_accounts": "ALPHA Accounts",
+        "teacher": "PWS Teacher",
+        "coach": "ALPHA Coach",
+        "pws_admin": "PWS Admin",
+        "alpha_admin": "ALPHA Admin",
+        "pws_teacher": "PWS Teacher",
+        "alpha_coach": "ALPHA Coach",
         "warden": "Warden",
         "staff": "Staff",
         "student": "Student",
@@ -530,6 +561,14 @@ async def notify_role(
     )
 
 
+def resolve_user_type_safe(u: dict) -> Optional[str]:
+    try:
+        from user_classification import resolve_user_type
+        return resolve_user_type(u)
+    except Exception:
+        return None
+
+
 def public_user(u: dict) -> dict:
     perms = u.get("permissions") or default_permissions(u.get("role", ""), u.get("coach_type"))
     rbac_effective: list[str] = []
@@ -547,7 +586,7 @@ def public_user(u: dict) -> dict:
         "name": u["name"],
         "role": u["role"],
         "role_canonical": role_canonical,
-        "role_display": role_display(u["role"]),
+        "role_display": role_display(u["role"], u.get("user_type"), u.get("designation")),
         "role_category": role_category(u),
         "organization": u.get("organization", "PWS"),
         "department": u.get("department"),
@@ -570,7 +609,20 @@ def public_user(u: dict) -> dict:
         "effective_permissions": rbac_effective,
         "created_at": u.get("created_at"),
         "sport_assignment_status": u.get("sport_assignment_status"),
+        "user_type": u.get("user_type") or resolve_user_type_safe(u),
+        "designation": u.get("designation"),
+        "entity_scope": u.get("entity_scope"),
+        "legacy_role": u.get("legacy_role"),
+        "requires_user_type_review": bool(u.get("requires_user_type_review")),
     }
+    try:
+        from user_classification import CATALOG_BY_CODE
+        ut = out.get("user_type")
+        if ut and ut in CATALOG_BY_CODE:
+            out["user_type_display"] = CATALOG_BY_CODE[ut]["displayName"]
+            out["user_type_meta"] = CATALOG_BY_CODE[ut]
+    except Exception:
+        pass
     if u.get("role") == "coach":
         try:
             from coach_scope import resolve_coach_data_scope
@@ -598,9 +650,14 @@ class UserCreate(BaseModel):
     email: Optional[EmailStr] = None
     password: Optional[str] = None
     name: str
-    mobile: Optional[str] = None     # 10-digit Indian mobile, login id
-    role: Literal["super_admin", "admin", "principal", "vice_principal", "teacher", "coach", "warden", "student", "player", "parent"]
-    organization: Literal["PWS", "ALPHA", "BOTH"] = "PWS"
+    mobile: Optional[str] = None
+    user_type: Literal[
+        "super_admin", "pws_admin", "alpha_admin",
+        "pws_accounts", "alpha_accounts", "pws_teacher", "alpha_coach",
+    ]
+    designation: Optional[Literal["PRINCIPAL", "VICE_PRINCIPAL"]] = None
+    role: Optional[str] = None  # ignored — derived from user_type
+    organization: Optional[Literal["PWS", "ALPHA", "BOTH"]] = None
     department: Optional[str] = None
     phone: Optional[str] = None
     can_manage: List[Literal["student", "player", "teacher", "coach", "staff"]] = []
@@ -609,14 +666,19 @@ class UserCreate(BaseModel):
     assigned_sport: Optional[str] = None
     assigned_centres: List[Literal["Balua", "Harding Park"]] = []
     assigned_sports: List[Literal["Cricket", "Football"]] = []
-    linked_person_ids: List[str] = []  # used by parent role
-    permissions: Optional[dict] = None  # tick-box permission map at creation (admins only)
+    linked_person_ids: List[str] = []
+    permissions: Optional[dict] = None
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
     email: Optional[EmailStr] = None
     mobile: Optional[str] = None
-    role: Optional[Literal["super_admin", "admin", "principal", "vice_principal", "teacher", "coach", "warden", "student", "player", "parent"]] = None
+    user_type: Optional[Literal[
+        "super_admin", "pws_admin", "alpha_admin",
+        "pws_accounts", "alpha_accounts", "pws_teacher", "alpha_coach",
+    ]] = None
+    designation: Optional[Literal["PRINCIPAL", "VICE_PRINCIPAL"]] = None
+    role: Optional[str] = None  # ignored when user_type supplied
     organization: Optional[Literal["PWS", "ALPHA", "BOTH"]] = None
     department: Optional[str] = None
     phone: Optional[str] = None

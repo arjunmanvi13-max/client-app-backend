@@ -3,6 +3,7 @@ import uuid
 from datetime import timedelta
 from pymongo.errors import DuplicateKeyError
 from core import db, hash_password, now_utc, logger
+from user_classification import apply_user_type_fields, migrate_legacy_role
 
 DEMO_USERS = [
     {"email": "admin@prarambhika.com", "password": "Admin@123", "name": "Rohan Sharma", "role": "admin", "organization": "ALPHA", "department": "ALPHA Operations"},
@@ -186,7 +187,13 @@ async def _seed_demo_users() -> None:
             "assigned_sports": ["Cricket"] if u["role"] == "coach" else [],
             "sport_assignment_status": "ok" if u["role"] == "coach" else None,
             "created_at": now_utc().isoformat(),
+            "legacy_role": u["role"],
         }
+        user_type, designation, needs_review = migrate_legacy_role(u["role"])
+        if user_type:
+            apply_user_type_fields(doc, user_type=user_type, designation=designation)
+        else:
+            doc["requires_user_type_review"] = True
         await _seed_user_if_absent(u["email"], doc)
 
 
@@ -209,7 +216,9 @@ async def _seed_super_admins() -> None:
             "assigned_centres": [],
             "assigned_sports": [],
             "created_at": now_utc().isoformat(),
+            "legacy_role": "super_admin",
         }
+        apply_user_type_fields(doc, user_type="super_admin")
         await _seed_user_if_absent(sa["email"], doc)
 
 

@@ -102,20 +102,36 @@ class TestOtpEndpointsRemoved:
 # ----------------- 3. User creation validation -----------------
 class TestUserCreate:
     def test_missing_email(self, super_token):
-        r = _post("/users", {"name": "TEST_x", "password": "Temp@123", "role": "teacher"}, token=super_token)
+        r = _post("/users", {"name": "TEST_x", "password": "Temp@123", "user_type": "pws_teacher"}, token=super_token)
         assert r.status_code == 400
 
     def test_missing_password(self, super_token):
-        r = _post("/users", {"name": "TEST_x", "email": "test_x@prarambhika.com", "role": "teacher"}, token=super_token)
+        r = _post("/users", {"name": "TEST_x", "email": "test_x@prarambhika.com", "user_type": "pws_teacher"}, token=super_token)
         assert r.status_code == 400
 
     def test_non_domain_email(self, super_token):
         r = _post(
             "/users",
-            {"name": "TEST_x", "email": "test_x@gmail.com", "password": "Temp@123", "role": "teacher"},
+            {"name": "TEST_x", "email": "test_x@gmail.com", "password": "Temp@123", "user_type": "pws_teacher"},
             token=super_token,
         )
         assert r.status_code == 400
+
+    def test_rejects_legacy_role_only(self, super_token):
+        r = _post(
+            "/users",
+            {"name": "TEST_x", "email": "test_x@prarambhika.com", "password": "Temp@123", "role": "teacher"},
+            token=super_token,
+        )
+        assert r.status_code == 422
+
+    def test_rejects_unapproved_user_type(self, super_token):
+        r = _post(
+            "/users",
+            {"name": "TEST_x", "email": "test_x@prarambhika.com", "password": "Temp@123", "user_type": "parent"},
+            token=super_token,
+        )
+        assert r.status_code == 422
 
 
 @pytest.fixture(scope="module")
@@ -126,7 +142,7 @@ def created_teacher(super_token):
         "name": "TEST Teacher",
         "email": email,
         "password": "Temp@123",
-        "role": "teacher",
+        "user_type": "pws_teacher",
         "organization": "PWS",
         "permissions": {"view_students": True, "mark_student_attendance": True, "dashboard_access": True},
     }
