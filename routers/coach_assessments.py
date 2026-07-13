@@ -81,13 +81,23 @@ def _coach_scope_ok(user: dict, centre: Optional[str], sport: Optional[str], pla
         return
     if user.get("role") != "coach":
         raise HTTPException(403, "Coach role required")
-    centres, sports = _coach_assignment_lists(user)
+    from coach_scope import assert_coach_sport_assigned, validate_coach_sport_param, ERR_SPORT_ACCESS
+    try:
+        assigned = assert_coach_sport_assigned(user)
+    except ValueError as e:
+        raise HTTPException(403, str(e)) from e
+    centres, _ = _coach_assignment_lists(user)
     if centre and centres and centre not in centres:
-        raise HTTPException(403, "Centre not in your assigned centres")
-    if sport and sports and sport not in sports:
-        raise HTTPException(403, "Sport not in your assigned sports")
+        raise HTTPException(403, ERR_SPORT_ACCESS)
+    if sport:
+        try:
+            validate_coach_sport_param(user, sport, is_admin_fn=is_admin)
+        except PermissionError as e:
+            raise HTTPException(403, str(e)) from e
+    elif assigned:
+        pass
     if player_type and centres and centre and centre not in centres:
-        raise HTTPException(403, "Player type not available for your centre allocation")
+        raise HTTPException(403, ERR_SPORT_ACCESS)
 
 
 def age_group_for_age(age: Optional[int]) -> str:

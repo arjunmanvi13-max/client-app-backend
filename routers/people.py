@@ -9,7 +9,12 @@ from routers.academic import (
     assert_teacher_section_access,
     assigned_section_ids_for_teacher,
 )
-from coach_scope import normalize_coach_assignments
+from coach_scope import (
+    coach_scope_metadata,
+    validate_coach_sport_param,
+    assert_coach_sport_assigned,
+    ERR_SPORT_ACCESS,
+)
 from routers.coach import _coach_visibility_filter, _coach_assignment_lists
 
 router = APIRouter(prefix="/people", tags=["people"])
@@ -198,9 +203,12 @@ async def list_people(
         query["section_id"] = {"$in": assigned} if assigned else {"$in": []}
     if sport:
         if user.get("role") == "coach" and kind == "player":
-            _, assigned_sports = _coach_assignment_lists(user)
-            if assigned_sports and sport not in assigned_sports:
-                raise HTTPException(403, "Sport not in your assigned sports")
+            try:
+                validate_coach_sport_param(user, sport, is_admin_fn=is_admin)
+            except PermissionError as e:
+                raise HTTPException(403, str(e)) from e
+            except ValueError as e:
+                raise HTTPException(403, str(e)) from e
         query["sport"] = sport
     if resident is not None:
         query["is_resident"] = resident
@@ -223,6 +231,10 @@ async def list_people(
     if q:
         query.update(_search_filter(q))
     if user.get("role") == "coach" and kind == "player":
+        try:
+            assert_coach_sport_assigned(user)
+        except ValueError as e:
+            raise HTTPException(403, str(e)) from e
         coach_q = _coach_visibility_filter(user, include_deactivated=include_deactivated)
         query = {"$and": [query, coach_q]} if query else coach_q
     elif user.get("role") == "coach":
@@ -233,7 +245,10 @@ async def list_people(
     if is_sports_admin(user):
         if kind in ("student", "teacher"):
             return []
-    return await db.people.find(query, {"_id": 0}).sort("name", 1).to_list(1000)
+    rows = await db.people.find(query, {"_id": 0}).sort("name", 1).to_list(1000)
+    if user.get("role") == "coach" and kind == "player":
+        return {"data": rows, "scope": coach_scope_metadata(user)}
+    return rows
 
 
 @router.get("/groups")
@@ -359,15 +374,19 @@ async def create_person(payload: PersonCreate, user: dict = Depends(get_current_
             raise HTTPException(400, "Date of admission is required for players")
         if user.get("role") == "coach":
             centres, sports = _coach_assignment_lists(user)
-            if not sports:
-                raise HTTPException(400, "Your coach account has no assigned sport — contact an admin")
-            if payload.sport and payload.sport not in sports:
-                raise HTTPException(403, f"You can only add {', '.join(sports)} players")
+            try:
+                assigned = assert_coach_sport_assigned(user)
+            except ValueError as e:
+                raise HTTPException(403, str(e)) from e
+            if payload.sport and payload.sport != assigned:
+                raise HTTPException(403, ERR_SPORT_ACCESS)
             if centres and payload.centre and payload.centre not in centres:
                 raise HTTPException(403, f"You can only add players at: {', '.join(centres)}")
     else:
         _assert_can_add_kind(user, payload.kind)
     doc = {"id": str(uuid.uuid4()), **payload.dict(), "created_at": now_utc().isoformat()}
+    if payload.kind == "player" and user.get("role") == "coach":
+        doc["sport"] = assert_coach_sport_assigned(user)
     doc = _normalize_guardian_fields(doc)
     doc = _normalize_pws_student(doc)
     doc["entities"] = derive_person_entities(doc)
@@ -435,11 +454,24 @@ async def update_person(person_id: str, payload: PersonUpdate, user: dict = Depe
     if not target:
         raise HTTPException(404, "Person not found")
     assert_person_entity_access(user, target)
+    _assert_can_view_person(user, target)
     if target["kind"] == "player":
         assert_player_action(user, "edit")
     else:
         _assert_can_edit_kind(user, target["kind"])
     upd = payload.dict(exclude_none=True)
+    if user.get("role") == "coach" and target.get("kind") == "player":
+        try:
+            assigned = assert_coach_sport_assigned(user)
+        except ValueError as e:
+            raise HTTPException(403, str(e)) from e
+        if upd.get("sport") and upd["sport"] != assigned:
+            raise HTTPException(403, ERR_SPORT_ACCESS)
+        upd.pop("sport", None)
+        if upd.get("centre"):
+            centres, _ = _coach_assignment_lists(user)
+            if centres and upd["centre"] not in centres:
+                raise HTTPException(403, ERR_SPORT_ACCESS)
     upd = _normalize_guardian_fields(upd)
     if target["kind"] == "student" and upd.get("section_id"):
         sid, label = await resolve_section_group(upd["section_id"])
@@ -495,6 +527,7 @@ async def activate_person(person_id: str, user: dict = Depends(get_current_user)
     if not target:
         raise HTTPException(404, "Person not found")
     assert_person_entity_access(user, target)
+    _assert_can_view_person(user, target)
     if not _can_manage_person_status(user, target.get("kind", "")):
         raise HTTPException(403, "Not allowed to reactivate this person")
     await db.people.update_one({"id": person_id}, {"$set": {"status": "active"}})
@@ -509,6 +542,7 @@ async def deactivate_person(person_id: str, user: dict = Depends(get_current_use
     if not target:
         raise HTTPException(404, "Person not found")
     assert_person_entity_access(user, target)
+    _assert_can_view_person(user, target)
     if not _can_manage_person_status(user, target.get("kind", "")):
         raise HTTPException(403, "Not allowed to deactivate this person")
 
@@ -570,6 +604,7 @@ async def delete_person(person_id: str, user: dict = Depends(get_current_user)):
     if not target:
         raise HTTPException(404, "Person not found")
     assert_person_entity_access(user, target)
+    _assert_can_view_person(user, target)
     if target["kind"] == "player":
         if not is_admin(user):
             assert_player_action(user, "edit")

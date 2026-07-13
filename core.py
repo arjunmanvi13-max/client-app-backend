@@ -541,7 +541,7 @@ def public_user(u: dict) -> dict:
         role_canonical = normalize_role(u.get("role", "")).value
     except Exception:
         pass
-    return {
+    out = {
         "id": u["id"],
         "email": u.get("email"),
         "name": u["name"],
@@ -569,7 +569,15 @@ def public_user(u: dict) -> dict:
         "permissions_rbac": u.get("permissions_rbac") or {},
         "effective_permissions": rbac_effective,
         "created_at": u.get("created_at"),
+        "sport_assignment_status": u.get("sport_assignment_status"),
     }
+    if u.get("role") == "coach":
+        try:
+            from coach_scope import resolve_coach_data_scope
+            out["coach_scope"] = resolve_coach_data_scope(u)
+        except Exception:
+            pass
+    return out
 
 # ------------------ Models ------------------
 class LoginIn(BaseModel):

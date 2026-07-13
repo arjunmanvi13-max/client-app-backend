@@ -542,6 +542,14 @@ async def list_attendance(
     if person_id:
         q["person_id"] = person_id
 
+    if user.get("role") == "coach" and (kind == "player" or not kind):
+        roster_ids = await _coach_player_roster_ids(user)
+        q = _apply_coach_attendance_scope(user, q, sport)
+        person_clause = {"person_id": {"$in": roster_ids}}
+        q = {"$and": [q, person_clause]} if q else person_clause
+        if person_id and person_id not in roster_ids:
+            return []
+
     if user.get("role") == "teacher":
         from routers.academic import assigned_section_ids_for_teacher
         assigned = await assigned_section_ids_for_teacher(user["id"])
@@ -567,6 +575,33 @@ def _pct(counts: dict) -> float:
         return 0.0
     present = counts.get("present", 0) + counts.get("late", 0)
     return round(100.0 * present / total, 1)
+
+
+async def _coach_player_roster_ids(user: dict) -> List[str]:
+    if is_admin(user) or user.get("role") != "coach":
+        return []
+    from routers.coach import _coach_visibility_filter
+    from coach_scope import assert_coach_sport_assigned
+    try:
+        assert_coach_sport_assigned(user)
+    except ValueError as e:
+        raise HTTPException(403, str(e)) from e
+    return await db.people.distinct("id", _coach_visibility_filter(user))
+
+
+def _apply_coach_attendance_scope(user: dict, q: dict, sport: Optional[str]) -> dict:
+    if user.get("role") != "coach":
+        return q
+    from coach_scope import validate_coach_sport_param, ERR_SPORT_ACCESS
+    try:
+        effective = validate_coach_sport_param(user, sport, is_admin_fn=is_admin)
+    except PermissionError as e:
+        raise HTTPException(403, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(403, str(e)) from e
+    if effective:
+        q["sport"] = effective
+    return q
 
 
 @router.get("/summary")
@@ -607,6 +642,12 @@ async def attendance_summary(
         match["session"] = normalize_session(session, kind=kind)
     if section_id:
         match["section_id"] = section_id
+
+    if user.get("role") == "coach":
+        roster_ids = await _coach_player_roster_ids(user)
+        match = _apply_coach_attendance_scope(user, match, sport)
+        person_clause = {"person_id": {"$in": roster_ids}}
+        match = {"$and": [match, person_clause]} if match else person_clause
 
     inst = resolve_user_institution(user, institution)
     ent_filt = attendance_entity_filter(inst)
@@ -722,6 +763,11 @@ async def export_attendance(
         q["sport"] = sport
     if session:
         q["session"] = normalize_session(session, kind=kind)
+    if user.get("role") == "coach":
+        roster_ids = await _coach_player_roster_ids(user)
+        q = _apply_coach_attendance_scope(user, q, sport)
+        person_clause = {"person_id": {"$in": roster_ids}}
+        q = {"$and": [q, person_clause]} if q else person_clause
     inst = resolve_user_institution(user, institution)
     ent_filt = attendance_entity_filter(inst)
     if ent_filt:

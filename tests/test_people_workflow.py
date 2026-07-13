@@ -131,12 +131,15 @@ class TestPeopleWorkflow:
         assert coach_players.status_code == 200, coach_players.text
         if all_players.status_code != 200:
             pytest.skip("Cannot compare player lists")
-        coach_ids = {p["id"] for p in coach_players.json()}
+        coach_rows = coach_players.json()
+        if isinstance(coach_rows, dict) and "data" in coach_rows:
+            coach_rows = coach_rows["data"]
+        coach_ids = {p["id"] for p in coach_rows}
         all_ids = {p["id"] for p in all_players.json()}
         assert coach_ids.issubset(all_ids)
-        if coach_players.json():
-            for p in coach_players.json():
-                assert p.get("centre") in ("Balua", None) or p.get("centre") == "Balua"
+        if coach_rows:
+            for p in coach_rows:
+                assert p.get("sport") == "Cricket"
 
     def test_principal_deactivate_student_via_approval(self):
         lst = requests.get(

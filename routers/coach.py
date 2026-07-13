@@ -14,7 +14,14 @@ class CoachAttendanceIn(BaseModel):
     sport: Optional[Literal["Cricket", "Football"]] = None
     absent_player_ids: List[str] = []
 
-from coach_scope import build_coach_player_query, coach_assignment_lists, normalize_coach_assignments
+from coach_scope import (
+    coach_assignment_lists,
+    coach_player_query_for_user,
+    coach_scope_metadata,
+    assert_coach_sport_assigned,
+    validate_coach_sport_param,
+    ERR_SPORT_ACCESS,
+)
 
 
 def _coach_assignment_lists(user: dict) -> tuple[list, list]:
@@ -22,14 +29,33 @@ def _coach_assignment_lists(user: dict) -> tuple[list, list]:
 
 
 def _coach_visibility_filter(user: dict, include_deactivated: bool = False) -> dict:
-    """Coach sees only players in assigned sport(s), optionally scoped by centre."""
+    """Coach sees only players in assigned sport, optionally scoped by centre."""
     if is_admin(user):
         q: dict = {"kind": "player"}
         if not include_deactivated:
             q["status"] = {"$ne": "deactivated"}
         return q
-    centres, sports = _coach_assignment_lists(user)
-    return build_coach_player_query(centres, sports, include_deactivated=include_deactivated)
+    return coach_player_query_for_user(user, include_deactivated=include_deactivated)
+
+
+def _apply_coach_sport_param(user: dict, sport: Optional[str]) -> Optional[str]:
+    try:
+        return validate_coach_sport_param(user, sport, is_admin_fn=is_admin)
+    except PermissionError as e:
+        raise HTTPException(403, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(403, str(e)) from e
+
+
+def _assert_coach_can_access_players(user: dict) -> None:
+    if is_admin(user) or user.get("role") != "coach":
+        return
+    try:
+        assert_coach_sport_assigned(user)
+    except ValueError as e:
+        msg = str(e)
+        code = 409 if "does not yet have" in msg else 403
+        raise HTTPException(code, msg)
 
 
 async def assert_player_in_coach_roster(user: dict, player_id: str) -> None:
@@ -39,15 +65,17 @@ async def assert_player_in_coach_roster(user: dict, player_id: str) -> None:
         if not person:
             raise HTTPException(404, "Player not found")
         return
+    _assert_coach_can_access_players(user)
     filt = {**_coach_visibility_filter(user), "id": player_id}
     person = await db.people.find_one(filt, {"_id": 0, "id": 1})
     if not person:
-        raise HTTPException(403, "Player is not in your assigned roster")
+        raise HTTPException(404, "Person not found")
 
 @router.get("/dashboard")
 async def coach_dashboard(user: dict = Depends(get_current_user)):
     if user["role"] != "coach" and not is_admin(user):
         raise HTTPException(403, "Coach role required")
+    _assert_coach_can_access_players(user)
     q = _coach_visibility_filter(user)
     players = await db.people.find(q, {"_id": 0}).to_list(2000)
 
@@ -73,7 +101,7 @@ async def coach_dashboard(user: dict = Depends(get_current_user)):
         {"_id": 0},
     ).to_list(2000)
 
-    return {
+    payload = {
         "total_players": len(players),
         "by_centre": dict(by_centre),
         "by_sport": dict(by_sport),
@@ -92,6 +120,9 @@ async def coach_dashboard(user: dict = Depends(get_current_user)):
         "deactivated_players": deactivated_players,
         "deactivated_count": len(deactivated_players),
     }
+    if user.get("role") == "coach":
+        payload["scope"] = coach_scope_metadata(user)
+    return payload
 
 @router.get("/players")
 async def coach_players(
@@ -102,13 +133,21 @@ async def coach_players(
 ):
     if not coach_can(user, "view"):
         raise HTTPException(403, "view_players permission required")
+    _assert_coach_can_access_players(user)
+    effective_sport = _apply_coach_sport_param(user, sport)
     q = _coach_visibility_filter(user)
-    if centre: q["centre"] = centre
-    if sport: q["sport"] = sport
-    if slot: q["slot"] = slot
+    if centre:
+        if user.get("role") == "coach":
+            assigned_centres, _ = _coach_assignment_lists(user)
+            if assigned_centres and centre not in assigned_centres:
+                raise HTTPException(403, ERR_SPORT_ACCESS)
+        q["centre"] = centre
+    if effective_sport:
+        q["sport"] = effective_sport
+    if slot:
+        q["slot"] = slot
     players = await db.people.find(q, {"_id": 0}).sort("name", 1).to_list(2000)
 
-    # Centre → Sport → PlayerType → [players]
     grouped: dict = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     for p in players:
         c = p.get("centre") or "Unassigned"
@@ -118,7 +157,10 @@ async def coach_players(
     out: dict = {}
     for c, by_sport_map in grouped.items():
         out[c] = {sp: dict(by_pt) for sp, by_pt in by_sport_map.items()}
-    return {"total": len(players), "groups": out, "players": players}
+    payload = {"total": len(players), "groups": out, "players": players}
+    if user.get("role") == "coach":
+        payload["scope"] = coach_scope_metadata(user)
+    return payload
 
 @router.post("/attendance")
 async def coach_mark_attendance(payload: CoachAttendanceIn, user: dict = Depends(get_current_user)):
@@ -126,13 +168,21 @@ async def coach_mark_attendance(payload: CoachAttendanceIn, user: dict = Depends
     from routers.attendance import upsert_attendance, normalize_session
     if user["role"] != "coach" and not is_admin(user):
         raise HTTPException(403, "Coach role required")
+    _assert_coach_can_access_players(user)
+    effective_sport = _apply_coach_sport_param(user, payload.sport)
     q = _coach_visibility_filter(user)
     q["slot"] = payload.slot
-    if payload.centre: q["centre"] = payload.centre
-    if payload.sport: q["sport"] = payload.sport
+    if payload.centre:
+        q["centre"] = payload.centre
+    if effective_sport:
+        q["sport"] = effective_sport
     players = await db.people.find(q, {"_id": 0}).to_list(2000)
     if not players:
         raise HTTPException(400, "No players found for that filter scope")
+    roster_ids = {p["id"] for p in players}
+    for pid in payload.absent_player_ids or []:
+        if pid not in roster_ids:
+            raise HTTPException(403, "Player is not in your assigned roster")
     absent_set = set(payload.absent_player_ids or [])
     today_str = now_utc().strftime("%Y-%m-%d")
     sess = normalize_session(None, slot=payload.slot, kind="player")
@@ -175,14 +225,33 @@ async def coach_attendance_history(
 ):
     if user["role"] != "coach" and not is_admin(user):
         raise HTTPException(403, "Coach role required")
+    _assert_coach_can_access_players(user)
+    effective_sport = _apply_coach_sport_param(user, sport)
     q = {"kind": "player"}
     if user["role"] == "coach":
         q["marked_by"] = user["id"]
-    if date: q["date"] = date
-    if slot: q["slot"] = slot
-    if centre: q["centre"] = centre
-    if sport: q["sport"] = sport
-    return await db.attendance.find(q, {"_id": 0}).sort("date", -1).to_list(2000)
+        roster_q = _coach_visibility_filter(user)
+        roster_ids = await db.people.distinct("id", roster_q)
+        q["person_id"] = {"$in": roster_ids}
+    if date:
+        q["date"] = date
+    if slot:
+        q["slot"] = slot
+    if centre:
+        q["centre"] = centre
+    if effective_sport:
+        q["sport"] = effective_sport
+    rows = await db.attendance.find(q, {"_id": 0}).sort("date", -1).to_list(2000)
+    if user.get("role") == "coach":
+        return {"data": rows, "scope": coach_scope_metadata(user)}
+    return rows
+
+@router.get("/scope")
+async def coach_scope(user: dict = Depends(get_current_user)):
+    """Read-only coach data scope for UI (authorization remains server-side)."""
+    if user.get("role") != "coach" and not is_admin(user):
+        raise HTTPException(403, "Coach role required")
+    return coach_scope_metadata(user)
 
 @router.get("/centres")
 async def list_centres(_user: dict = Depends(get_current_user)):

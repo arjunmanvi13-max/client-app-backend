@@ -224,6 +224,24 @@ def _people_base_query(kind: str, entity: str, centre: Optional[str], sport: Opt
     return q
 
 
+def _merge_coach_player_scope(user: dict, q: dict, sport: Optional[str]) -> dict:
+    if user.get("role") != "coach":
+        return q
+    from coach_scope import validate_coach_sport_param, assert_coach_sport_assigned
+    from routers.coach import _coach_visibility_filter
+    try:
+        assert_coach_sport_assigned(user)
+        effective = validate_coach_sport_param(user, sport, is_admin_fn=is_admin)
+    except PermissionError as e:
+        raise HTTPException(403, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(403, str(e)) from e
+    coach_q = _coach_visibility_filter(user)
+    if effective:
+        coach_q["sport"] = effective
+    return {"$and": [q, coach_q]} if q else coach_q
+
+
 async def run_students(user: dict, entity: str, filters: dict) -> dict:
     q = _people_base_query("student", entity, filters.get("centre"), filters.get("sport"), filters.get("status"), filters.get("section_id"), filters.get("grade"))
     rows_raw = await db.people.find(q, {"_id": 0}).sort("name", 1).to_list(3000)
@@ -245,6 +263,7 @@ async def run_students(user: dict, entity: str, filters: dict) -> dict:
 
 async def run_players(user: dict, entity: str, filters: dict) -> dict:
     q = _people_base_query("player", entity, filters.get("centre"), filters.get("sport"), filters.get("status"), None, None)
+    q = _merge_coach_player_scope(user, q, filters.get("sport"))
     rows_raw = await db.people.find(q, {"_id": 0}).sort("name", 1).to_list(3000)
     columns = ["Entity", "Name", "Player ID", "Centre", "Sport", "Category", "Slot", "Status"]
     rows = []
@@ -281,12 +300,33 @@ async def run_staff(user: dict, entity: str, filters: dict) -> dict:
     return build_meta("staff", "Staff List", user, entity, filters, columns, rows, row_keys=keys)
 
 
+async def _coach_attendance_match(user: dict, match: dict, sport: Optional[str]) -> dict:
+    if user.get("role") != "coach":
+        return match
+    from coach_scope import validate_coach_sport_param, assert_coach_sport_assigned
+    from routers.coach import _coach_visibility_filter
+    try:
+        assert_coach_sport_assigned(user)
+        effective = validate_coach_sport_param(user, sport, is_admin_fn=is_admin)
+    except PermissionError as e:
+        raise HTTPException(403, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(403, str(e)) from e
+    roster_ids = await db.people.distinct("id", _coach_visibility_filter(user))
+    clauses = [{"person_id": {"$in": roster_ids}}]
+    if effective:
+        clauses.append({"sport": effective})
+    scope = {"$and": clauses}
+    return {"$and": [match, scope]} if match else scope
+
+
 async def run_attendance_summary(user: dict, entity: str, filters: dict) -> dict:
     start = filters.get("date_from") or now_utc().strftime("%Y-%m-%d")
     end = filters.get("date_to") or start
     match: dict = {"date": {"$gte": start, "$lte": end}}
-    if filters.get("sport") and filters["sport"].lower() != "all":
-        match["sport"] = filters["sport"]
+    sport_filter = filters.get("sport") if filters.get("sport") and filters["sport"].lower() != "all" else None
+    if sport_filter:
+        match["sport"] = sport_filter
     if filters.get("centre") and filters["centre"].lower() != "all":
         match["centre"] = filters["centre"]
     if filters.get("section_id"):
@@ -296,6 +336,7 @@ async def run_attendance_summary(user: dict, entity: str, filters: dict) -> dict
     ent_f = attendance_entity_filter(entity)
     if ent_f:
         match = {"$and": [match, ent_f]}
+    match = await _coach_attendance_match(user, match, sport_filter)
     pipeline = [
         {"$match": match},
         {"$group": {
@@ -327,8 +368,9 @@ async def run_attendance_detail(user: dict, entity: str, filters: dict) -> dict:
     start = filters.get("date_from") or now_utc().strftime("%Y-%m-%d")
     end = filters.get("date_to") or start
     match: dict = {"date": {"$gte": start, "$lte": end}}
-    if filters.get("sport") and filters["sport"].lower() != "all":
-        match["sport"] = filters["sport"]
+    sport_filter = filters.get("sport") if filters.get("sport") and filters["sport"].lower() != "all" else None
+    if sport_filter:
+        match["sport"] = sport_filter
     if filters.get("centre") and filters["centre"].lower() != "all":
         match["centre"] = filters["centre"]
     if filters.get("status") and filters["status"].lower() != "all":
@@ -336,6 +378,7 @@ async def run_attendance_detail(user: dict, entity: str, filters: dict) -> dict:
     ent_f = attendance_entity_filter(entity)
     if ent_f:
         match = {"$and": [match, ent_f]}
+    match = await _coach_attendance_match(user, match, sport_filter)
     recs = await db.attendance.find(match, {"_id": 0}).sort([("date", -1), ("kind", 1)]).to_list(5000)
     pids = list({r["person_id"] for r in recs})
     people = await db.people.find({"id": {"$in": pids}}, {"_id": 0, "id": 1, "name": 1}).to_list(5000)

@@ -84,11 +84,18 @@ def _students_in_section(section_id, role="principal"):
     return r.json()
 
 
+def _coach_players_list(body):
+    if isinstance(body, dict) and "data" in body:
+        return body["data"]
+    return body
+
+
 def _coach_roster_player():
     r = requests.get(f"{API}/people", headers=_hdr("coach"), params={"kind": "player"}, timeout=15)
-    if r.status_code != 200 or not r.json():
+    players = _coach_players_list(r.json() if r.status_code == 200 else [])
+    if r.status_code != 200 or not players:
         pytest.skip("Coach roster empty")
-    return r.json()[0]
+    return players[0]
 
 
 def _player_outside_coach_roster():
@@ -96,7 +103,7 @@ def _player_outside_coach_roster():
     cr = requests.get(f"{API}/people", headers=_hdr("coach"), params={"kind": "player"}, timeout=15)
     if ar.status_code != 200:
         pytest.skip("Cannot list players")
-    coach_ids = {p["id"] for p in (cr.json() if cr.status_code == 200 else [])}
+    coach_ids = {p["id"] for p in _coach_players_list(cr.json() if cr.status_code == 200 else [])}
     for p in ar.json():
         if p["id"] not in coach_ids:
             return p
@@ -299,7 +306,7 @@ class TestCoachAssignmentBoundaries:
         admin_players = requests.get(f"{API}/people", headers=_hdr("admin"), params={"kind": "player"}, timeout=15)
         if admin_players.status_code != 200:
             pytest.skip("Admin player list unavailable")
-        coach_count = len(r.json())
+        coach_count = len(_coach_players_list(r.json()))
         admin_count = len(admin_players.json())
         if admin_count > coach_count:
             assert coach_count > 0, "Coach should see a subset of players when admin sees more"

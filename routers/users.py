@@ -8,9 +8,41 @@ from core import (
     hash_password, public_user, directory_user, now_utc,
     validate_domain_email, default_permissions, PERMISSION_KEYS,
 )
-from coach_scope import normalize_coach_assignments
+from coach_scope import normalize_coach_assignments, ERR_MULTI_SPORT
 
 router = APIRouter(prefix="/users", tags=["users"])
+
+
+async def _log_coach_sport_audit(
+    coach_id: str,
+    coach_name: str,
+    previous_sport: Optional[str],
+    new_sport: Optional[str],
+    changed_by: dict,
+) -> None:
+    if previous_sport == new_sport:
+        return
+    await db.coach_assignment_audit.insert_one({
+        "id": str(uuid.uuid4()),
+        "coach_id": coach_id,
+        "coach_name": coach_name,
+        "previous_sport": previous_sport,
+        "new_sport": new_sport,
+        "changed_by_id": changed_by["id"],
+        "changed_by_name": changed_by.get("name"),
+        "at": now_utc().isoformat(),
+    })
+
+
+def _apply_coach_assignment_fields(doc: dict) -> None:
+    try:
+        normalize_coach_assignments(doc)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    if doc.get("role") == "coach" and not doc.get("assigned_sports"):
+        raise HTTPException(400, "Assign exactly one sport (Cricket or Football) for coach accounts")
+    if doc.get("role") == "coach" and len(doc.get("assigned_sports") or []) != 1:
+        raise HTTPException(400, ERR_MULTI_SPORT)
 
 @router.get("")
 async def list_users(role: Optional[str] = None, user: dict = Depends(get_current_user)):
@@ -100,9 +132,8 @@ async def create_user(payload: UserCreate, user: dict = Depends(get_current_user
         "created_at": now_utc().isoformat(),
     }
     if payload.role == "coach":
-        normalize_coach_assignments(doc)
-        if not doc.get("assigned_sports"):
-            raise HTTPException(400, "Assign at least one sport (Cricket or Football) for coach accounts")
+        _apply_coach_assignment_fields(doc)
+        await _log_coach_sport_audit(doc["id"], doc["name"], None, doc.get("assigned_sport"), user)
     # Only include sparse-indexed fields when set so the sparse unique index works.
     if mobile:
         doc["mobile"] = mobile
@@ -141,17 +172,46 @@ async def update_user(user_id: str, payload: UserUpdate, user: dict = Depends(ge
             upd[k] = v
     if not upd:
         raise HTTPException(400, "No fields to update")
+    prev_sport = target.get("assigned_sport")
     if target.get("role") == "coach" or upd.get("role") == "coach" or any(k in upd for k in ("assigned_sport", "assigned_sports", "assigned_centres")):
         merged = {**target, **upd}
-        normalize_coach_assignments(merged)
-        if merged.get("role") == "coach" and not merged.get("assigned_sports"):
-            raise HTTPException(400, "Assign at least one sport (Cricket or Football) for coach accounts")
-        for k in ("assigned_sport", "assigned_sports", "assigned_centres"):
+        _apply_coach_assignment_fields(merged)
+        for k in ("assigned_sport", "assigned_sports", "assigned_centres", "sport_assignment_status"):
             if k in merged:
                 upd[k] = merged[k]
     await db.users.update_one({"id": user_id}, {"$set": upd})
+    if target.get("role") == "coach" or upd.get("role") == "coach":
+        new_sport = upd.get("assigned_sport", target.get("assigned_sport"))
+        if any(k in upd for k in ("assigned_sport", "assigned_sports")):
+            await _log_coach_sport_audit(user_id, target.get("name", ""), prev_sport, new_sport, user)
     doc = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
     return doc
+
+@router.get("/coach-assignment-audit")
+async def coach_assignment_audit(limit: int = 50, user: dict = Depends(get_current_user)):
+    if not is_admin(user):
+        raise HTTPException(403, "Admin only")
+    rows = await db.coach_assignment_audit.find({}, {"_id": 0}).sort("at", -1).to_list(min(limit, 200))
+    return rows
+
+
+@router.get("/coaches-needing-sport")
+async def coaches_needing_sport(user: dict = Depends(get_current_user)):
+    """Admin report: coaches missing or with ambiguous sport assignment."""
+    if not is_admin(user):
+        raise HTTPException(403, "Admin only")
+    q = {
+        "role": "coach",
+        "status": {"$ne": "deactivated"},
+        "$or": [
+            {"sport_assignment_status": {"$in": ["required", "ambiguous"]}},
+            {"assigned_sports": {"$size": 0}},
+            {"assigned_sports.1": {"$exists": True}},
+        ],
+    }
+    docs = await db.users.find(q, {"_id": 0, "password_hash": 0}).sort("name", 1).to_list(500)
+    return docs
+
 
 @router.post("/{user_id}/deactivate")
 async def deactivate_user(user_id: str, user: dict = Depends(get_current_user)):
