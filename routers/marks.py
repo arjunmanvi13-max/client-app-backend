@@ -19,25 +19,27 @@ ENTITY_PWS = "pws"
 MARK_STATUSES = ("draft", "final", "published")
 
 
+from rbac.guards import (
+    assert_enter_marks,
+    can_enter_marks,
+    can_manage_academic,
+)
+
+
 def _can_enter(user: dict) -> bool:
-    if user.get("role") == "coach" and not get_perm(user, "enter_academic_marks"):
-        return False
-    return is_super_admin(user) or get_perm(user, "enter_academic_marks") or get_perm(user, "manage_academic_structure")
+    return can_enter_marks(user)
 
 
 def _can_view(user: dict) -> bool:
-    if user.get("role") == "coach" and not get_perm(user, "view_academic_marks"):
-        return False
-    return _can_enter(user) or get_perm(user, "view_academic_marks")
+    return can_enter_marks(user) or get_perm(user, "view_academic_marks")
 
 
 def _can_manage(user: dict) -> bool:
-    return is_super_admin(user) or get_perm(user, "manage_academic_structure")
+    return can_manage_academic(user)
 
 
 def _assert_enter(user: dict) -> None:
-    if not _can_enter(user):
-        raise HTTPException(403, "Academic marks entry permission required")
+    assert_enter_marks(user)
 
 
 def _assert_view(user: dict) -> None:

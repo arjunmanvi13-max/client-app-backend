@@ -57,11 +57,13 @@ def _tech_keys(sport: str) -> Tuple[str, ...]:
 
 
 def _can_enter(user: dict) -> bool:
-    return is_admin(user) or get_perm(user, "enter_coach_assessments")
+    from rbac.guards import can_enter_coach_assessments, can_manage_coach_assessments_admin
+    return can_manage_coach_assessments_admin(user) or can_enter_coach_assessments(user)
 
 
 def _can_manage(user: dict) -> bool:
-    return is_super_admin(user) or get_perm(user, "manage_coach_assessments")
+    from rbac.guards import can_manage_coach_assessments_admin
+    return can_manage_coach_assessments_admin(user)
 
 
 def _assert_enter(user: dict) -> None:

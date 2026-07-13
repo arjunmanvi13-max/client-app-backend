@@ -42,12 +42,15 @@ RATE_KEYS = {
 }
 
 
+from rbac.guards import can_manage_fee_heads, can_collect_pws_fees, can_collect_alpha_fees
+
+
 def _can_manage(user: dict) -> bool:
-    return is_super_admin(user) or get_perm(user, "manage_fee_catalog") or get_perm(user, "edit_fees")
+    return can_manage_fee_heads(user)
 
 
 def _can_view(user: dict) -> bool:
-    return _can_manage(user) or get_perm(user, "view_fees")
+    return _can_manage(user) or can_collect_pws_fees(user) or can_collect_alpha_fees(user)
 
 
 def _assert_manage(user: dict) -> None:

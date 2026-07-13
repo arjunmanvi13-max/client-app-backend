@@ -13,13 +13,11 @@ ENTITY_PWS = "pws"
 YEAR_STATUSES = ("open", "closed", "archived")
 
 
-def _can_manage_academic(user: dict) -> bool:
-    return is_super_admin(user) or get_perm(user, "manage_academic_structure")
+from rbac.guards import assert_manage_academic, can_manage_academic as _can_manage_academic
 
 
 def _assert_manage_academic(user: dict) -> None:
-    if not _can_manage_academic(user):
-        raise HTTPException(403, "Academic structure management permission required")
+    assert_manage_academic(user)
 
 
 async def get_open_academic_year(entity_id: str = ENTITY_PWS) -> Optional[dict]:

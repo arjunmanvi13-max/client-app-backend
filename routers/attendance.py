@@ -131,20 +131,24 @@ async def upsert_attendance(
 
 
 def _can_view_attendance(user: dict) -> bool:
-    return is_admin(user) or get_perm(user, "view_attendance") or get_perm(user, "access_reports")
+    from rbac.guards import can_view_attendance
+    return can_view_attendance(user)
 
 
 def _can_correct_attendance(user: dict) -> bool:
-    return is_admin(user) or get_perm(user, "correct_attendance")
+    from rbac.guards import can_correct_attendance
+    return can_correct_attendance(user)
 
 
 # -------- Staff Attendance (default-present workflow) --------
 def _can_mark_pws_staff(user: dict) -> bool:
-    return is_admin(user) or user.get("role") in ("principal", "vice_principal")
+    from rbac.guards import can_mark_pws_attendance
+    return can_mark_pws_attendance(user)
 
 
 def _can_mark_alpha_staff(user: dict, centre: Optional[str]) -> bool:
-    if is_admin(user):
+    from rbac.guards import can_mark_alpha_attendance
+    if can_mark_alpha_attendance(user) and user.get("role") != "coach":
         return True
     if user.get("role") == "coach" and user.get("coach_type") == "head":
         if centre is None:

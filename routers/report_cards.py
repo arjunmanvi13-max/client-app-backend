@@ -18,13 +18,17 @@ SCHOOL_TAGLINE = "Excellence in Education & Character"
 
 
 def _can_build(user: dict) -> bool:
-    if user.get("role") == "coach" and not get_perm(user, "view_academic_marks"):
+    from rbac.guards import can_enter_marks
+    from rbac.authorization import normalize_role
+    from rbac.enums import UserRole
+    if normalize_role(user.get("role", "")) == UserRole.ALPHA_COACH and not get_perm(user, "view_academic_marks"):
         return False
-    return is_super_admin(user) or get_perm(user, "view_academic_marks") or get_perm(user, "enter_academic_marks")
+    return is_super_admin(user) or can_enter_marks(user) or get_perm(user, "view_academic_marks")
 
 
 def _can_publish(user: dict) -> bool:
-    return is_super_admin(user) or get_perm(user, "manage_academic_structure")
+    from rbac.guards import can_manage_academic
+    return is_super_admin(user) or can_manage_academic(user)
 
 
 def _assert_build(user: dict) -> None:

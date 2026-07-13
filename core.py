@@ -31,7 +31,11 @@ JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_ALGO = "HS256"
 ACCESS_TOKEN_EXPIRES_HOURS = 2     # spec: auto logout after inactivity ~2h
 
-ROLES = ["super_admin", "admin", "principal", "vice_principal", "teacher", "coach", "warden", "staff", "student", "player", "parent"]
+ROLES = [
+    "super_admin", "admin", "principal", "vice_principal",
+    "pws_accounts", "alpha_accounts",
+    "teacher", "coach", "warden", "staff", "student", "player", "parent",
+]
 MANAGE_KINDS = {"student", "player", "teacher", "coach", "staff"}
 
 # All login emails MUST belong to this domain (org policy).
@@ -299,13 +303,23 @@ def is_sports_admin(user: dict) -> bool:
 
 
 def get_perm(user: dict, key: str) -> bool:
-    """Read effective permission. Super admin always True; otherwise stored map (with default fallback)."""
+    """Read effective permission — legacy map + RBAC role grants."""
     if is_super_admin(user):
         return True
     perms = user.get("permissions")
     if not perms:
         perms = default_permissions(user.get("role", ""), user.get("coach_type"))
-    return bool(perms.get(key, False))
+    if perms.get(key):
+        return True
+    try:
+        from rbac.bridge import LEGACY_KEY_TO_PERMISSIONS
+        from rbac.authorization import has_permission
+        for perm in LEGACY_KEY_TO_PERMISSIONS.get(key, ()):
+            if has_permission(user, perm, use_legacy_fallback=False):
+                return True
+    except Exception:
+        pass
+    return False
 
 
 def assert_perm(user: dict, key: str) -> None:
@@ -326,13 +340,17 @@ def assert_can_manage(user: dict, kind: str) -> None:
     raise HTTPException(403, f"You don't have permission to manage {kind}s")
 
 def coach_can(user: dict, action: str) -> bool:
-    """For player CRUD, coaches need granular permission. action in {'view','add','edit'}."""
-    if is_admin(user):
-        return True
-    if user.get("role") != "coach":
-        return False
-    perm_map = {"view": "view_players", "add": "add_players", "edit": "edit_players"}
-    return perm_map.get(action, "") in (user.get("coach_permissions") or [])
+    """For player CRUD — RBAC MANAGE_PLAYERS + legacy coach_permissions."""
+    try:
+        from rbac.guards import can_manage_player_action
+        return can_manage_player_action(user, action)
+    except Exception:
+        if is_admin(user):
+            return True
+        if user.get("role") != "coach":
+            return False
+        perm_map = {"view": "view_players", "add": "add_players", "edit": "edit_players"}
+        return perm_map.get(action, "") in (user.get("coach_permissions") or [])
 
 def assert_player_action(user: dict, action: str) -> None:
     if not coach_can(user, action):
@@ -514,11 +532,21 @@ async def notify_role(
 
 def public_user(u: dict) -> dict:
     perms = u.get("permissions") or default_permissions(u.get("role", ""), u.get("coach_type"))
+    rbac_effective: list[str] = []
+    role_canonical = u.get("role", "")
+    try:
+        from rbac.authorization import list_effective_permissions, normalize_role
+        from rbac.guards import effective_permissions_list
+        rbac_effective = effective_permissions_list(u)
+        role_canonical = normalize_role(u.get("role", "")).value
+    except Exception:
+        pass
     return {
         "id": u["id"],
         "email": u.get("email"),
         "name": u["name"],
         "role": u["role"],
+        "role_canonical": role_canonical,
         "role_display": role_display(u["role"]),
         "role_category": role_category(u),
         "organization": u.get("organization", "PWS"),
@@ -535,8 +563,11 @@ def public_user(u: dict) -> dict:
         "is_password_set": bool(u.get("is_password_set", bool(u.get("password_hash")))),
         "must_change_password": bool(u.get("must_change_password", False)),
         "status": u.get("status", "active"),
+        "is_active": u.get("status", "active") == "active" and u.get("is_active", True) is not False,
         "person_id": u.get("person_id"),
         "permissions": perms,
+        "permissions_rbac": u.get("permissions_rbac") or {},
+        "effective_permissions": rbac_effective,
         "created_at": u.get("created_at"),
     }
 

@@ -27,8 +27,7 @@ def _normalize_status(status: Optional[str]) -> str:
     return TASK_STATUS_ALIASES.get(status, status)
 
 
-def _can_supervise_tasks(user: dict) -> bool:
-    return is_super_admin(user) or get_perm(user, "supervise_tasks")
+from rbac.guards import can_supervise_tasks as _can_supervise_tasks
 
 
 def _task_visibility_filter(user: dict) -> dict:

@@ -10,7 +10,8 @@ import uuid
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import PlainTextResponse
-from core import db, get_current_user, get_perm, now_utc, notify_role
+from core import db, get_current_user, now_utc, notify_role
+from rbac.guards import can_bulk_upload
 from routers.fees import auto_create_fees_for_player
 
 router = APIRouter(prefix="/bulk-upload", tags=["bulk-upload"])
@@ -119,7 +120,7 @@ def _parse_xlsx(raw: bytes) -> List[dict]:
 
 @router.get("/template", response_class=PlainTextResponse)
 async def download_template(user: dict = Depends(get_current_user)):
-    if not get_perm(user, "bulk_upload"):
+    if not can_bulk_upload(user):
         raise HTTPException(403, "bulk_upload permission required")
     sample = (
         ",".join(REQUIRED_FIELDS) + "\n"
@@ -130,7 +131,7 @@ async def download_template(user: dict = Depends(get_current_user)):
 
 @router.post("/players")
 async def upload_players(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
-    if not get_perm(user, "bulk_upload"):
+    if not can_bulk_upload(user):
         raise HTTPException(403, "bulk_upload permission required")
     raw = await file.read()
     name_lc = (file.filename or "").lower()
