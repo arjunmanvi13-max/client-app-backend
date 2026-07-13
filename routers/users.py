@@ -31,6 +31,8 @@ async def list_users(role: Optional[str] = None, user: dict = Depends(get_curren
 @router.get("/directory")
 async def directory(role: Optional[str] = None, user: dict = Depends(get_current_user)):
     """Lightweight directory — any authenticated user. No emails/phones."""
+    if user.get("role") == "coach":
+        raise HTTPException(403, "Directory is not available for coach accounts")
     q = {}
     if role:
         q["role"] = role

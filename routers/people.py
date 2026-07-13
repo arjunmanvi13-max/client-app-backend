@@ -9,7 +9,7 @@ from routers.academic import (
     assert_teacher_section_access,
     assigned_section_ids_for_teacher,
 )
-from routers.coach import _coach_visibility_filter
+from routers.coach import _coach_visibility_filter, _coach_assignment_lists
 
 router = APIRouter(prefix="/people", tags=["people"])
 
@@ -84,6 +84,10 @@ def _search_filter(qtext: str) -> dict:
 
 
 def _can_list_kind(user: dict, kind: str) -> bool:
+    if user.get("role") == "coach":
+        if kind != "player":
+            return False
+        return get_perm(user, "view_players") or get_perm(user, "mark_player_attendance") or coach_can(user, "view")
     if is_admin(user):
         return True
     if get_perm(user, _VIEW_PERM_BY_KIND.get(kind, "")):
@@ -135,12 +139,13 @@ def _assert_can_view_person(user: dict, person: dict) -> None:
     if kind:
         _assert_can_list_kind(user, kind)
     if user.get("role") == "coach" and kind == "player":
-        centres = user.get("assigned_centres") or []
-        sports = user.get("assigned_sports") or []
+        centres, sports = _coach_assignment_lists(user)
         if centres and person.get("centre") not in centres:
             raise HTTPException(404, "Person not found")
         if sports and person.get("sport") not in sports:
             raise HTTPException(404, "Person not found")
+    if user.get("role") == "coach" and kind and kind != "player":
+        raise HTTPException(404, "Person not found")
 
 
 @router.get("")
@@ -191,6 +196,10 @@ async def list_people(
         assigned = await assigned_section_ids_for_teacher(user["id"])
         query["section_id"] = {"$in": assigned} if assigned else {"$in": []}
     if sport:
+        if user.get("role") == "coach" and kind == "player":
+            _, assigned_sports = _coach_assignment_lists(user)
+            if assigned_sports and sport not in assigned_sports:
+                raise HTTPException(403, "Sport not in your assigned sports")
         query["sport"] = sport
     if resident is not None:
         query["is_resident"] = resident

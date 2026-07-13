@@ -29,7 +29,7 @@ from assessment_schema import (
     stage_query_value,
 )
 from core import db, get_current_user, get_perm, is_admin, is_super_admin, now_utc, format_date_display, format_datetime_display
-from routers.coach import _coach_visibility_filter
+from routers.coach import _coach_visibility_filter, _coach_assignment_lists
 
 router = APIRouter(prefix="/coach-assessments", tags=["coach-assessments"])
 
@@ -81,8 +81,7 @@ def _coach_scope_ok(user: dict, centre: Optional[str], sport: Optional[str], pla
         return
     if user.get("role") != "coach":
         raise HTTPException(403, "Coach role required")
-    centres = user.get("assigned_centres") or []
-    sports = user.get("assigned_sports") or []
+    centres, sports = _coach_assignment_lists(user)
     if centre and centres and centre not in centres:
         raise HTTPException(403, "Centre not in your assigned centres")
     if sport and sports and sport not in sports:
@@ -282,8 +281,7 @@ async def _batch_status(
 @router.get("/metadata")
 async def assessment_metadata(user: dict = Depends(get_current_user)):
     _assert_enter(user)
-    centres = list(user.get("assigned_centres") or []) if user.get("role") == "coach" else ["Balua", "Harding Park"]
-    sports = list(user.get("assigned_sports") or []) if user.get("role") == "coach" else ["Cricket", "Football"]
+    centres, sports = _coach_assignment_lists(user) if user.get("role") == "coach" else (["Balua", "Harding Park"], ["Cricket", "Football"])
     if not centres:
         centres = ["Balua", "Harding Park"]
     if not sports:
