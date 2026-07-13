@@ -150,7 +150,14 @@ def is_admin(user: dict) -> bool:
     return user["role"] in ("admin", "super_admin")
 
 def is_super_admin(user: dict) -> bool:
-    return user["role"] == "super_admin"
+    if user.get("role") == "super_admin":
+        return True
+    try:
+        from user_classification import resolve_user_type
+        from rbac.enums import UserRole
+        return resolve_user_type(user) == UserRole.SUPER_ADMIN.value
+    except Exception:
+        return False
 
 # ------------------ Permission System ------------------
 PERMISSION_KEYS = [

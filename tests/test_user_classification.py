@@ -113,5 +113,14 @@ def test_migrate_sports_admin_requires_review():
     assert review is True
 
 
+def test_create_pws_accounts_payload():
+    """PWS Accounts users must persist with PWS scope and legacy role."""
+    doc = apply_user_type_fields({}, user_type=UserRole.PWS_ACCOUNTS.value)
+    assert doc["user_type"] == UserRole.PWS_ACCOUNTS.value
+    assert doc["role"] == "pws_accounts"
+    assert doc["organization"] == "PWS"
+    validate_user_type_payload(UserRole.PWS_ACCOUNTS.value, organization="PWS")
+
+
 def test_legacy_role_for_pws_admin_designation():
     assert legacy_role_for_user_type(UserRole.PWS_ADMIN.value, "VICE_PRINCIPAL") == "vice_principal"
