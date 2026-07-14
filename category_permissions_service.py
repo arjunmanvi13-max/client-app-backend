@@ -64,7 +64,27 @@ async def get_category_modules(user_type: str) -> Dict[str, Any]:
     }
 
 
+async def _active_user_counts_by_type() -> Dict[str, int]:
+    """Count non-deactivated login accounts per canonical user type."""
+    counts = {ut: 0 for ut in APPROVED_LOGIN_USER_TYPES}
+    cursor = db.users.find(
+        {"status": {"$ne": "deactivated"}},
+        {"_id": 0, "user_type": 1, "role": 1},
+    )
+    async for doc in cursor:
+        ut = doc.get("user_type")
+        if ut in counts:
+            counts[ut] += 1
+            continue
+        legacy = doc.get("role") or ""
+        canonical = LEGACY_ROLE_TO_USER_TYPE.get(legacy)
+        if canonical in counts:
+            counts[canonical] += 1
+    return counts
+
+
 async def list_category_permissions() -> List[Dict[str, Any]]:
+    user_counts = await _active_user_counts_by_type()
     rows = []
     for ut in APPROVED_LOGIN_USER_TYPES:
         doc = await get_category_modules(ut)
@@ -76,6 +96,7 @@ async def list_category_permissions() -> List[Dict[str, Any]]:
             "locked": doc["locked"],
             "enabled_count": enabled_count,
             "total_count": len(doc["modules"]),
+            "active_user_count": user_counts.get(ut, 0),
         })
     return rows
 

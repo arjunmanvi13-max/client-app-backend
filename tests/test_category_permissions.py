@@ -48,6 +48,9 @@ class TestCategoryPermissions:
         assert "alpha_coach" in codes
         assert "PWS Teachers" in names
         assert "ALPHA Coaches" in names
+        for c in cats:
+            assert "active_user_count" in c
+            assert isinstance(c["active_user_count"], int)
 
     def test_super_admin_category_is_locked(self):
         r = requests.get(f"{API}/permissions/categories/super_admin", headers=_hdr(), timeout=15)
