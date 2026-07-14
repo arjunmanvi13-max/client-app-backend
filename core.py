@@ -716,6 +716,7 @@ class PersonCreate(BaseModel):
     guardian_name: Optional[str] = None
     guardian_phone: Optional[str] = None
     father_name: Optional[str] = None
+    mother_name: Optional[str] = None
     age: Optional[int] = None
     dob: Optional[str] = None  # ISO date YYYY-MM-DD (auto-computes age)
     skill_level: Optional[Literal["Beginner", "Intermediate", "Advanced"]] = None
@@ -760,6 +761,7 @@ class PersonUpdate(BaseModel):
     guardian_name: Optional[str] = None
     guardian_phone: Optional[str] = None
     father_name: Optional[str] = None
+    mother_name: Optional[str] = None
     age: Optional[int] = None
     dob: Optional[str] = None
     skill_level: Optional[Literal["Beginner", "Intermediate", "Advanced"]] = None

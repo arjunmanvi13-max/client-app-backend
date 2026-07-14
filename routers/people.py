@@ -85,6 +85,7 @@ def _search_filter(qtext: str) -> dict:
             {"mobile": {"$regex": rx, "$options": "i"}},
             {"guardian_name": {"$regex": rx, "$options": "i"}},
             {"father_name": {"$regex": rx, "$options": "i"}},
+            {"mother_name": {"$regex": rx, "$options": "i"}},
         ]
     }
 
