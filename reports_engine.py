@@ -111,7 +111,7 @@ def build_meta(
 
 def _subtitle(entity: str, filters: dict, user: dict) -> str:
     parts = [f"Entity: {ENTITY_LABELS.get(entity.lower(), entity)}"]
-    for k in ("date_from", "date_to", "grade", "section", "sport", "centre", "status"):
+    for k in ("date_from", "date_to", "grade", "section", "sport", "centre", "status", "player_type"):
         v = filters.get(k)
         if v:
             if k in ("date_from", "date_to"):
@@ -206,7 +206,16 @@ async def _section_label(section_id: Optional[str]) -> Optional[str]:
     return sec.get("label") if sec else None
 
 
-def _people_base_query(kind: str, entity: str, centre: Optional[str], sport: Optional[str], status: Optional[str], section_id: Optional[str], grade: Optional[str]) -> dict:
+def _people_base_query(
+    kind: str,
+    entity: str,
+    centre: Optional[str],
+    sport: Optional[str],
+    status: Optional[str],
+    section_id: Optional[str],
+    grade: Optional[str],
+    player_type: Optional[str] = None,
+) -> dict:
     q: dict = {"kind": kind}
     ent_f = person_entity_filter(entity)
     if ent_f:
@@ -217,6 +226,8 @@ def _people_base_query(kind: str, entity: str, centre: Optional[str], sport: Opt
         q["sport"] = sport
     if status and status.lower() != "all":
         q["status"] = status
+    if player_type and player_type.lower() != "all":
+        q["player_type"] = player_type
     if section_id:
         q["section_id"] = section_id
     elif grade and grade.lower() != "all":
@@ -262,7 +273,16 @@ async def run_students(user: dict, entity: str, filters: dict) -> dict:
 
 
 async def run_players(user: dict, entity: str, filters: dict) -> dict:
-    q = _people_base_query("player", entity, filters.get("centre"), filters.get("sport"), filters.get("status"), None, None)
+    q = _people_base_query(
+        "player",
+        entity,
+        filters.get("centre"),
+        filters.get("sport"),
+        filters.get("status"),
+        None,
+        None,
+        filters.get("player_type"),
+    )
     q = _merge_coach_player_scope(user, q, filters.get("sport"))
     rows_raw = await db.people.find(q, {"_id": 0}).sort("name", 1).to_list(3000)
     columns = ["Entity", "Name", "Player ID", "Centre", "Sport", "Category", "Slot", "Status"]
@@ -608,7 +628,7 @@ RUNNERS: Dict[str, Callable[..., Awaitable[dict]]] = {
 
 REPORT_CATALOG = [
     {"id": "students", "title": "Student List", "category": "People", "filters": ["entity", "grade", "section", "status"]},
-    {"id": "players", "title": "Player List", "category": "People", "filters": ["entity", "centre", "sport", "status"]},
+    {"id": "players", "title": "Player List", "category": "People", "filters": ["entity", "centre", "sport", "player_type", "status"]},
     {"id": "staff", "title": "Staff List", "category": "People", "filters": ["entity", "centre", "status"]},
     {"id": "attendance-summary", "title": "Attendance Summary", "category": "Attendance", "filters": ["entity", "date_range", "grade", "section", "centre", "sport"]},
     {"id": "attendance-detail", "title": "Attendance Detail", "category": "Attendance", "filters": ["entity", "date_range", "centre", "sport", "status"]},

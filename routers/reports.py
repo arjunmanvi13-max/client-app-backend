@@ -462,6 +462,7 @@ def _report_filters(
     sport: Optional[str],
     centre: Optional[str],
     status: Optional[str],
+    player_type: Optional[str] = None,
 ) -> dict:
     return {
         k: v for k, v in {
@@ -473,6 +474,7 @@ def _report_filters(
             "sport": sport,
             "centre": centre,
             "status": status,
+            "player_type": player_type,
         }.items() if v
     }
 
@@ -505,13 +507,14 @@ async def export_mvp_report(
     sport: Optional[str] = None,
     centre: Optional[str] = None,
     status: Optional[str] = None,
+    player_type: Optional[str] = None,
 ):
     _access_reports(user)
     runner = RUNNERS.get(report_id)
     if not runner:
         raise HTTPException(404, f"Unknown report: {report_id}")
     inst = resolve_entity(user, entity)
-    filters = _report_filters(entity, date_from, date_to, grade, section_id, sport, centre, status)
+    filters = _report_filters(entity, date_from, date_to, grade, section_id, sport, centre, status, player_type)
     meta = await runner(user, inst, filters)
     columns, matrix = dict_rows_to_matrix(meta)
     subtitle = _subtitle(inst, filters, user)
@@ -537,6 +540,7 @@ async def run_mvp_report(
     sport: Optional[str] = None,
     centre: Optional[str] = None,
     status: Optional[str] = None,
+    player_type: Optional[str] = None,
 ):
     """Run an MVP report and return JSON (table rows + summary)."""
     _access_reports(user)
@@ -544,5 +548,5 @@ async def run_mvp_report(
     if not runner:
         raise HTTPException(404, f"Unknown report: {report_id}")
     inst = resolve_entity(user, entity)
-    filters = _report_filters(entity, date_from, date_to, grade, section_id, sport, centre, status)
+    filters = _report_filters(entity, date_from, date_to, grade, section_id, sport, centre, status, player_type)
     return await runner(user, inst, filters)
