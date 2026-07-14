@@ -189,10 +189,17 @@ async def create_user(payload: UserCreate, user: dict = Depends(get_current_user
         raise HTTPException(400, str(e)) from e
 
     legacy_role = legacy_role_for_user_type(payload.user_type, payload.designation)
+    rbac_overrides: dict = {}
     if payload.permissions:
         perms = {k: bool(payload.permissions.get(k, False)) for k in PERMISSION_KEYS}
     else:
-        perms = default_permissions(legacy_role, payload.coach_type)
+        from category_permissions_service import permissions_for_user_type
+        cat_perms = await permissions_for_user_type(payload.user_type)
+        if cat_perms:
+            perms = {k: bool(cat_perms["permissions"].get(k, False)) for k in PERMISSION_KEYS}
+            rbac_overrides = dict(cat_perms.get("permissions_rbac") or {})
+        else:
+            perms = default_permissions(legacy_role, payload.coach_type)
 
     doc = {
         "id": str(uuid.uuid4()),
@@ -211,6 +218,7 @@ async def create_user(payload: UserCreate, user: dict = Depends(get_current_user
         "assigned_sports": payload.assigned_sports,
         "linked_person_ids": payload.linked_person_ids,
         "permissions": perms,
+        "permissions_rbac": rbac_overrides,
         "legacy_role": legacy_role,
         "created_at": now_utc().isoformat(),
         "status": "active",

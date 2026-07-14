@@ -1,8 +1,8 @@
-"""Permission Control Panel — Super Admin only (legacy + RBAC)."""
+"""Permission Control Panel — Super Admin only (category module access)."""
 import uuid
 from typing import Dict, Optional, Literal
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from core import (
     db, get_current_user, is_super_admin, now_utc, public_user,
     PERMISSION_KEYS, PERMISSION_GROUPS, PERMISSION_TEMPLATES, default_permissions,
@@ -10,6 +10,12 @@ from core import (
 from rbac.bridge import RBAC_PERMISSION_GROUPS, RBAC_PERMISSION_LABELS
 from rbac.enums import Permission
 from rbac.guards import assert_manage_access, can_manage_access
+from user_classification import APPROVED_LOGIN_USER_TYPES
+from category_permissions_service import (
+    get_category_modules,
+    list_category_permissions,
+    save_category_modules,
+)
 
 router = APIRouter(tags=["permissions"])
 
@@ -17,6 +23,40 @@ router = APIRouter(tags=["permissions"])
 def _require_super_admin(user: dict):
     if not can_manage_access(user):
         raise HTTPException(403, "Super Admin only")
+
+
+@router.get("/permissions/categories")
+async def list_categories(user: dict = Depends(get_current_user)):
+    _require_super_admin(user)
+    return {"categories": await list_category_permissions()}
+
+
+@router.get("/permissions/categories/{user_type}")
+async def get_category(user_type: str, user: dict = Depends(get_current_user)):
+    _require_super_admin(user)
+    if user_type not in APPROVED_LOGIN_USER_TYPES:
+        raise HTTPException(400, "Unknown user category")
+    try:
+        return await get_category_modules(user_type)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+class CategoryModulesPatch(BaseModel):
+    modules: Dict[str, bool] = Field(default_factory=dict)
+
+
+@router.put("/permissions/categories/{user_type}")
+async def update_category(user_type: str, payload: CategoryModulesPatch, user: dict = Depends(get_current_user)):
+    _require_super_admin(user)
+    if user_type not in APPROVED_LOGIN_USER_TYPES:
+        raise HTTPException(400, "Unknown user category")
+    try:
+        return await save_category_modules(user_type, payload.modules, user)
+    except PermissionError as e:
+        raise HTTPException(400, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @router.get("/permissions/templates")
