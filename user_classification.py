@@ -76,7 +76,7 @@ USER_TYPE_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "code": UserRole.PWS_TEACHER.value,
-        "displayName": "PWS Teacher",
+        "displayName": "PWS Teachers",
         "entityScope": BusinessEntity.PWS.value,
         "category": "Teaching",
         "description": "PWS student attendance and marks",
@@ -87,7 +87,7 @@ USER_TYPE_CATALOG: List[Dict[str, Any]] = [
     },
     {
         "code": UserRole.ALPHA_COACH.value,
-        "displayName": "ALPHA Coach",
+        "displayName": "ALPHA Coaches",
         "entityScope": BusinessEntity.ALPHA.value,
         "category": "Coaching",
         "description": "ALPHA player attendance and assessments",

@@ -42,9 +42,12 @@ class TestCategoryPermissions:
         cats = r.json()["categories"]
         assert len(cats) == 7
         codes = {c["user_type"] for c in cats}
+        names = {c["display_name"] for c in cats}
         assert "super_admin" in codes
         assert "pws_teacher" in codes
         assert "alpha_coach" in codes
+        assert "PWS Teachers" in names
+        assert "ALPHA Coaches" in names
 
     def test_super_admin_category_is_locked(self):
         r = requests.get(f"{API}/permissions/categories/super_admin", headers=_hdr(), timeout=15)
