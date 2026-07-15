@@ -13,6 +13,7 @@ from coach_scope import (
     coach_scope_metadata,
     validate_coach_sport_param,
     assert_coach_sport_assigned,
+    is_coach_user,
     ERR_SPORT_ACCESS,
 )
 from routers.coach import _coach_visibility_filter, _coach_assignment_lists
@@ -91,7 +92,7 @@ def _search_filter(qtext: str) -> dict:
 
 
 def _can_list_kind(user: dict, kind: str) -> bool:
-    if user.get("role") == "coach":
+    if is_coach_user(user):
         if kind != "player":
             return False
         return get_perm(user, "view_players") or get_perm(user, "mark_player_attendance") or coach_can(user, "view")
@@ -145,13 +146,13 @@ def _assert_can_view_person(user: dict, person: dict) -> None:
         return
     if kind:
         _assert_can_list_kind(user, kind)
-    if user.get("role") == "coach" and kind == "player":
+    if is_coach_user(user) and kind == "player":
         centres, sports = _coach_assignment_lists(user)
         if not sports or person.get("sport") not in sports:
             raise HTTPException(404, "Person not found")
         if centres and person.get("centre") not in centres:
             raise HTTPException(404, "Person not found")
-    if user.get("role") == "coach" and kind and kind != "player":
+    if is_coach_user(user) and kind and kind != "player":
         raise HTTPException(404, "Person not found")
 
 
@@ -186,7 +187,7 @@ async def list_people(
         return await db.people.find(filt, {"_id": 0}).sort("name", 1).to_list(100)
     if user.get("role") == "teacher" and not kind:
         raise HTTPException(400, "kind is required (e.g. kind=student)")
-    if user.get("role") == "coach" and not kind:
+    if is_coach_user(user) and not kind:
         raise HTTPException(400, "kind is required (e.g. kind=player)")
     if kind:
         _assert_can_list_kind(user, kind)
@@ -203,7 +204,7 @@ async def list_people(
         assigned = await assigned_section_ids_for_teacher(user["id"])
         query["section_id"] = {"$in": assigned} if assigned else {"$in": []}
     if sport:
-        if user.get("role") == "coach" and kind == "player":
+        if is_coach_user(user) and kind == "player":
             try:
                 validate_coach_sport_param(user, sport, is_admin_fn=is_admin)
             except PermissionError as e:
@@ -231,14 +232,14 @@ async def list_people(
         query["status"] = {"$ne": "deactivated"}
     if q:
         query.update(_search_filter(q))
-    if user.get("role") == "coach" and kind == "player":
+    if is_coach_user(user) and kind == "player":
         try:
             assert_coach_sport_assigned(user)
         except ValueError as e:
             raise HTTPException(403, str(e)) from e
         coach_q = _coach_visibility_filter(user, include_deactivated=include_deactivated)
         query = {"$and": [query, coach_q]} if query else coach_q
-    elif user.get("role") == "coach":
+    elif is_coach_user(user):
         # Coach may only list players
         return []
     inst = resolve_user_institution(user, institution)
@@ -247,7 +248,7 @@ async def list_people(
         if kind in ("student", "teacher"):
             return []
     rows = await db.people.find(query, {"_id": 0}).sort("name", 1).to_list(1000)
-    if user.get("role") == "coach" and kind == "player":
+    if is_coach_user(user) and kind == "player":
         return {"data": rows, "scope": coach_scope_metadata(user)}
     return rows
 

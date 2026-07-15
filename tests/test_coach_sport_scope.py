@@ -9,6 +9,7 @@ from coach_scope import (
     build_coach_player_query,
     coach_assignment_lists,
     coach_player_query_for_user,
+    is_coach_user,
     normalize_coach_assignments,
     resolve_coach_data_scope,
     sport_record,
@@ -137,3 +138,10 @@ def test_coach_player_query_ambiguous_sees_nobody():
 
 def test_allowed_sport_names():
     assert set(ALLOWED_COACH_SPORT_NAMES) == {"Cricket", "Football"}
+
+
+def test_is_coach_user_variants():
+    assert is_coach_user({"role": "coach"})
+    assert is_coach_user({"role": "alpha_coach"})
+    assert is_coach_user({"user_type": "alpha_coach", "role": "coach"})
+    assert not is_coach_user({"role": "admin"})

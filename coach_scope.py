@@ -23,6 +23,14 @@ ERR_SPORT_ASSIGNMENT = (
 ERR_MULTI_SPORT = "A coach can be assigned to exactly one sport (Cricket or Football)."
 
 
+def is_coach_user(user: dict) -> bool:
+    """True for legacy coach role, alpha_coach role, or canonical alpha_coach user type."""
+    role = (user.get("role") or "").lower()
+    if role in ("coach", "alpha_coach"):
+        return True
+    return user.get("user_type") == "alpha_coach"
+
+
 def sport_record(name_or_code: Optional[str]) -> Optional[Dict[str, str]]:
     if not name_or_code:
         return None
@@ -48,7 +56,7 @@ def coach_assignment_lists(user: dict) -> Tuple[List[str], List[str]]:
 
 def assigned_sport_name(user: dict) -> Optional[str]:
     """Return the coach's single assigned sport name, or None if unset/ambiguous."""
-    if user.get("role") != "coach":
+    if not is_coach_user(user):
         return None
     status = user.get("sport_assignment_status")
     if status == "ambiguous":
@@ -95,7 +103,7 @@ def normalize_coach_assignments(data: dict) -> dict:
 
 def resolve_coach_data_scope(user: dict) -> Dict[str, Any]:
     """Server-side coach data scope from authenticated user record."""
-    is_coach = user.get("role") == "coach"
+    is_coach = is_coach_user(user)
     if not is_coach:
         return {
             "is_coach": False,
@@ -141,7 +149,7 @@ def coach_scope_metadata(user: dict) -> Dict[str, Any]:
 
 def assert_coach_sport_assigned(user: dict) -> str:
     """Raise ValueError with user-facing message if coach lacks exactly one sport."""
-    if user.get("role") != "coach":
+    if not is_coach_user(user):
         return ""
     scope = resolve_coach_data_scope(user)
     if scope["requires_sport_assignment"]:
@@ -156,7 +164,7 @@ def assert_coach_sport_assigned(user: dict) -> str:
 
 def validate_coach_sport_param(user: dict, sport: Optional[str], *, is_admin_fn) -> Optional[str]:
     """Validate client-supplied sport for coaches. Returns effective sport or None."""
-    if is_admin_fn(user) or user.get("role") != "coach":
+    if is_admin_fn(user) or not is_coach_user(user):
         return sport
     assigned = assert_coach_sport_assigned(user)
     if not sport:
