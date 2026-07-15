@@ -172,6 +172,7 @@ async def list_people(
     gender: Optional[str] = None,
     q: Optional[str] = None,
     include_deactivated: bool = False,
+    pws_class: Optional[str] = None,
     institution: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
@@ -224,11 +225,13 @@ async def list_people(
         query["centre"] = centre
     if player_type:
         query["player_type"] = player_type
+    if pws_class and kind == "student":
+        query["pws_class"] = pws_class
     if gender:
         query["gender"] = gender
     if status:
         query["status"] = status
-    elif kind == "player" and not include_deactivated:
+    elif kind in ("player", "student") and not include_deactivated:
         query["status"] = {"$ne": "deactivated"}
     if q:
         query.update(_search_filter(q))
