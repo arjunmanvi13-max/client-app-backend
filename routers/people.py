@@ -17,6 +17,7 @@ from coach_scope import (
     ERR_SPORT_ACCESS,
 )
 from routers.coach import _coach_visibility_filter, _coach_assignment_lists
+from people_enrollment import assign_enrollment_ids
 
 router = APIRouter(prefix="/people", tags=["people"])
 
@@ -395,6 +396,8 @@ async def create_person(payload: PersonCreate, user: dict = Depends(get_current_
     doc = _normalize_guardian_fields(doc)
     doc = _normalize_pws_student(doc)
     doc["entities"] = derive_person_entities(doc)
+    if payload.kind in ("player", "student"):
+        doc = await assign_enrollment_ids(doc)
     await _assert_unique_ids(doc)
     if payload.kind == "student":
         doc.setdefault("organization", "PWS")

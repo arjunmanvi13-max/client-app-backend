@@ -125,6 +125,12 @@ async def _ensure_indexes() -> None:
             await db.otps.create_index([("mobile", 1), ("purpose", 1), ("created_at", -1)])
     except Exception as exc:
         logger.warning("Could not ensure otps indexes: %s", exc)
+    try:
+        idx_info = await db.people.index_information()
+        if "player_id_1" not in idx_info:
+            await db.people.create_index("player_id", unique=True, sparse=True)
+    except Exception as exc:
+        logger.warning("Could not ensure people.player_id index: %s", exc)
 
 
 async def _migrate_legacy_emails() -> None:
@@ -836,6 +842,8 @@ async def _migrate_entity_foundation():
         )
 
     await _backfill_enrollment_ids()
+    from people_enrollment import ensure_apl_id_counter
+    await ensure_apl_id_counter()
 
 
 async def _backfill_enrollment_ids():

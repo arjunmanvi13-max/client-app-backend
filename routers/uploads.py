@@ -13,6 +13,7 @@ from fastapi.responses import PlainTextResponse
 from core import db, get_current_user, now_utc, notify_role
 from rbac.guards import can_bulk_upload
 from routers.fees import auto_create_fees_for_player
+from people_enrollment import assign_enrollment_ids
 
 router = APIRouter(prefix="/bulk-upload", tags=["bulk-upload"])
 
@@ -171,6 +172,18 @@ async def upload_players(file: UploadFile = File(...), user: dict = Depends(get_
 
     if errors:
         return {"status": "validation_failed", "valid_count": len(docs), "errors": errors}
+
+    # Assign sequential APL IDs and run duplicate checks before insert
+    insert_errors = []
+    for i, doc in enumerate(docs, start=2):
+        try:
+            await assign_enrollment_ids(doc)
+        except HTTPException as exc:
+            insert_errors.append({"row": i, "errors": [exc.detail], "name": doc.get("name") or ""})
+        except Exception as exc:
+            insert_errors.append({"row": i, "errors": [str(exc)], "name": doc.get("name") or ""})
+    if insert_errors:
+        return {"status": "validation_failed", "valid_count": 0, "errors": insert_errors}
 
     # All valid — insert players + auto-create fees
     if docs:
