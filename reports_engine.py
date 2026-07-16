@@ -111,7 +111,7 @@ def build_meta(
 
 def _subtitle(entity: str, filters: dict, user: dict) -> str:
     parts = [f"Entity: {ENTITY_LABELS.get(entity.lower(), entity)}"]
-    for k in ("date_from", "date_to", "grade", "section", "sport", "centre", "status", "player_type"):
+    for k in ("date_from", "date_to", "grade", "section", "sport", "centre", "status", "player_type", "fee_collection_type", "payment_method", "pws_student_type"):
         v = filters.get(k)
         if v:
             if k in ("date_from", "date_to"):
@@ -215,6 +215,10 @@ def _people_base_query(
     section_id: Optional[str],
     grade: Optional[str],
     player_type: Optional[str] = None,
+    department: Optional[str] = None,
+    designation: Optional[str] = None,
+    employment_type: Optional[str] = None,
+    shift: Optional[str] = None,
 ) -> dict:
     q: dict = {"kind": kind}
     ent_f = person_entity_filter(entity)
@@ -232,6 +236,14 @@ def _people_base_query(
         q["section_id"] = section_id
     elif grade and grade.lower() != "all":
         q["group"] = {"$regex": f"^{grade}"}
+    if department and department.lower() != "all":
+        q["department"] = department
+    if designation and designation.lower() != "all":
+        q["group"] = designation
+    if employment_type and employment_type.lower() != "all":
+        q["employment_type"] = employment_type
+    if shift and shift.lower() != "all":
+        q["shift"] = shift
     return q
 
 
@@ -303,7 +315,19 @@ async def run_players(user: dict, entity: str, filters: dict) -> dict:
 
 
 async def run_staff(user: dict, entity: str, filters: dict) -> dict:
-    q = _people_base_query("staff", entity, filters.get("centre"), filters.get("sport"), filters.get("status"), None, None)
+    q = _people_base_query(
+        "staff",
+        entity,
+        filters.get("centre"),
+        filters.get("sport"),
+        filters.get("status"),
+        None,
+        None,
+        department=filters.get("department"),
+        designation=filters.get("designation"),
+        employment_type=filters.get("employment_type"),
+        shift=filters.get("shift"),
+    )
     rows_raw = await db.people.find(q, {"_id": 0}).sort("name", 1).to_list(2000)
     columns = ["Entity", "Name", "Employee ID", "Role/Dept", "Centre", "Status"]
     rows = []
@@ -423,22 +447,70 @@ async def run_attendance_detail(user: dict, entity: str, filters: dict) -> dict:
 
 
 async def run_fee_collection(user: dict, entity: str, filters: dict) -> dict:
-    q: dict = {"status": "paid"}
+    collection_type = (filters.get("fee_collection_type") or "monthly_collection").lower()
+    payment_method = filters.get("payment_method")
+    player_type = filters.get("player_type")
+    pws_student_type = filters.get("pws_student_type")
+    df, dt = filters.get("date_from"), filters.get("date_to")
+
+    monthly_types = {"Monthly", "Hostel", "Transport", "PE", "Day Boarding", "Tuition"}
+    daily_types = {"Registration", "Exam", "Uniform", "Kit", "Tournament", "Books", "Event", "Other", "Annual", "Security"}
+    is_due_report = collection_type in ("monthly_due", "historical_due")
+
+    q: dict = {"amount_due": {"$gt": 0}} if is_due_report else {"status": "paid"}
     q.update(fee_entity_filter(entity))
     if filters.get("centre") and filters["centre"].lower() != "all":
         q["centre"] = filters["centre"]
     if filters.get("sport") and filters["sport"].lower() != "all":
         q["sport"] = filters["sport"]
-    df, dt = filters.get("date_from"), filters.get("date_to")
-    if df or dt:
-        rng: dict = {}
-        if df:
-            rng["$gte"] = df
-        if dt:
-            rng["$lte"] = dt
-        q["paid_at"] = rng
-    fees = await db.fees.find(q, {"_id": 0}).sort("paid_at", -1).to_list(3000)
-    columns = ["Entity", "Person", "Fee Type", "Amount", "Paid At", "Mode", "Centre", "Sport"]
+
+    if collection_type == "monthly_collection":
+        q["fee_type"] = {"$in": list(monthly_types)}
+        if df or dt:
+            rng: dict = {}
+            if df:
+                rng["$gte"] = df
+            if dt:
+                rng["$lte"] = dt
+            q["paid_at"] = rng
+    elif collection_type == "daily_collection":
+        q["fee_type"] = {"$in": list(daily_types)}
+        if df or dt:
+            rng = {}
+            if df:
+                rng["$gte"] = df
+            if dt:
+                rng["$lte"] = dt
+            q["paid_at"] = rng
+    elif collection_type == "monthly_due":
+        q["status"] = {"$ne": "paid"}
+        q["fee_type"] = {"$in": list(monthly_types)}
+    elif collection_type == "historical_due":
+        q["status"] = {"$ne": "paid"}
+        q["fee_type"] = {"$in": list(monthly_types)}
+        if df or dt:
+            rng = {}
+            if df:
+                rng["$gte"] = df
+            if dt:
+                rng["$lte"] = dt
+            q["due_date"] = rng
+
+    if payment_method and str(payment_method).lower() != "all":
+        q["payment_mode"] = {"$regex": f"^{payment_method}$", "$options": "i"}
+
+    fees = await db.fees.find(q, {"_id": 0}).sort("paid_at" if not is_due_report else "due_date", -1).to_list(3000)
+
+    if player_type and player_type.lower() != "all":
+        pids = list({f.get("player_id") or f.get("person_id") for f in fees if f.get("player_id") or f.get("person_id")})
+        allowed = set(await db.people.distinct("id", {"id": {"$in": pids}, "player_type": player_type}))
+        fees = [f for f in fees if (f.get("player_id") or f.get("person_id")) in allowed]
+    if pws_student_type and pws_student_type.lower() != "all":
+        pids = list({f.get("player_id") or f.get("person_id") for f in fees if f.get("player_id") or f.get("person_id")})
+        allowed = set(await db.people.distinct("id", {"id": {"$in": pids}, "pws_student_type": pws_student_type}))
+        fees = [f for f in fees if (f.get("player_id") or f.get("person_id")) in allowed]
+
+    columns = ["Entity", "Person", "Fee Type", "Amount", "Paid At" if not is_due_report else "Due Date", "Mode", "Centre", "Sport"]
     rows = []
     total = 0
     for f in fees:
@@ -450,38 +522,46 @@ async def run_fee_collection(user: dict, entity: str, filters: dict) -> dict:
             "person": f.get("person_name") or f.get("player_name"),
             "fee_type": f.get("fee_type"),
             "amount": amt,
-            "paid_at": f.get("paid_at"),
-            "mode": f.get("payment_mode"),
+            "paid_at": f.get("paid_at") if not is_due_report else f.get("due_date"),
+            "mode": f.get("payment_mode") or ("—" if is_due_report else f.get("payment_mode")),
             "centre": f.get("centre"),
             "sport": f.get("sport"),
         })
-    inv_q: dict = {}
-    if entity == "PWS":
-        inv_q["entity_id"] = "pws"
-    elif entity == "ALPHA":
-        inv_q["entity_id"] = "alpha"
-    if df or dt:
-        inv_q["created_at"] = q.get("paid_at", {})
-    inv_payments = await db.payments.find(inv_q if inv_q else {}, {"_id": 0}).sort("created_at", -1).to_list(1000)
-    for p in inv_payments:
-        if df and (p.get("created_at") or "")[:10] < df:
-            continue
-        if dt and (p.get("created_at") or "")[:10] > dt:
-            continue
-        amt = int(p.get("amount") or 0)
-        total += amt
-        rows.append({
-            "entity_label": ENTITY_LABELS.get(str(p.get("entity_id", "pws")).lower(), "PWS"),
-            "person": p.get("person_name"),
-            "fee_type": "Invoice payment",
-            "amount": amt,
-            "paid_at": p.get("created_at"),
-            "mode": p.get("payment_mode"),
-            "centre": "",
-            "sport": "",
-        })
+
+    if not is_due_report:
+        inv_q: dict = {}
+        if entity == "PWS":
+            inv_q["entity_id"] = "pws"
+        elif entity == "ALPHA":
+            inv_q["entity_id"] = "alpha"
+        if df or dt:
+            inv_q["created_at"] = q.get("paid_at", {})
+        inv_payments = await db.payments.find(inv_q if inv_q else {}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+        for p in inv_payments:
+            if df and (p.get("created_at") or "")[:10] < df:
+                continue
+            if dt and (p.get("created_at") or "")[:10] > dt:
+                continue
+            if payment_method and str(payment_method).lower() != "all":
+                pm = (p.get("payment_mode") or "").lower()
+                if pm != str(payment_method).lower():
+                    continue
+            amt = int(p.get("amount") or 0)
+            total += amt
+            rows.append({
+                "entity_label": ENTITY_LABELS.get(str(p.get("entity_id", "pws")).lower(), "PWS"),
+                "person": p.get("person_name"),
+                "fee_type": "Invoice payment",
+                "amount": amt,
+                "paid_at": p.get("created_at"),
+                "mode": p.get("payment_mode"),
+                "centre": "",
+                "sport": "",
+            })
+
+    summary_key = "total_outstanding" if is_due_report else "total_collected"
     keys = ["entity_label", "person", "fee_type", "amount", "paid_at", "mode", "centre", "sport"]
-    return build_meta("fee-collection", "Fee Collection", user, entity, filters, columns, rows, {"total_collected": total}, row_keys=keys)
+    return build_meta("fee-collection", "Fee Collection", user, entity, filters, columns, rows, {summary_key: total}, row_keys=keys)
 
 
 async def run_outstanding_invoices(user: dict, entity: str, filters: dict) -> dict:

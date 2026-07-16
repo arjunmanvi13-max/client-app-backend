@@ -463,6 +463,13 @@ def _report_filters(
     centre: Optional[str],
     status: Optional[str],
     player_type: Optional[str] = None,
+    fee_collection_type: Optional[str] = None,
+    payment_method: Optional[str] = None,
+    pws_student_type: Optional[str] = None,
+    department: Optional[str] = None,
+    designation: Optional[str] = None,
+    employment_type: Optional[str] = None,
+    shift: Optional[str] = None,
 ) -> dict:
     return {
         k: v for k, v in {
@@ -475,6 +482,13 @@ def _report_filters(
             "centre": centre,
             "status": status,
             "player_type": player_type,
+            "fee_collection_type": fee_collection_type,
+            "payment_method": payment_method,
+            "pws_student_type": pws_student_type,
+            "department": department,
+            "designation": designation,
+            "employment_type": employment_type,
+            "shift": shift,
         }.items() if v
     }
 
@@ -508,13 +522,24 @@ async def export_mvp_report(
     centre: Optional[str] = None,
     status: Optional[str] = None,
     player_type: Optional[str] = None,
+    fee_collection_type: Optional[str] = None,
+    payment_method: Optional[str] = None,
+    pws_student_type: Optional[str] = None,
+    department: Optional[str] = None,
+    designation: Optional[str] = None,
+    employment_type: Optional[str] = None,
+    shift: Optional[str] = None,
 ):
     _access_reports(user)
     runner = RUNNERS.get(report_id)
     if not runner:
         raise HTTPException(404, f"Unknown report: {report_id}")
     inst = resolve_entity(user, entity)
-    filters = _report_filters(entity, date_from, date_to, grade, section_id, sport, centre, status, player_type)
+    filters = _report_filters(
+        entity, date_from, date_to, grade, section_id, sport, centre, status, player_type,
+        fee_collection_type, payment_method, pws_student_type,
+        department, designation, employment_type, shift,
+    )
     meta = await runner(user, inst, filters)
     columns, matrix = dict_rows_to_matrix(meta)
     subtitle = _subtitle(inst, filters, user)
@@ -541,6 +566,13 @@ async def run_mvp_report(
     centre: Optional[str] = None,
     status: Optional[str] = None,
     player_type: Optional[str] = None,
+    fee_collection_type: Optional[str] = None,
+    payment_method: Optional[str] = None,
+    pws_student_type: Optional[str] = None,
+    department: Optional[str] = None,
+    designation: Optional[str] = None,
+    employment_type: Optional[str] = None,
+    shift: Optional[str] = None,
 ):
     """Run an MVP report and return JSON (table rows + summary)."""
     _access_reports(user)
@@ -548,5 +580,9 @@ async def run_mvp_report(
     if not runner:
         raise HTTPException(404, f"Unknown report: {report_id}")
     inst = resolve_entity(user, entity)
-    filters = _report_filters(entity, date_from, date_to, grade, section_id, sport, centre, status, player_type)
+    filters = _report_filters(
+        entity, date_from, date_to, grade, section_id, sport, centre, status, player_type,
+        fee_collection_type, payment_method, pws_student_type,
+        department, designation, employment_type, shift,
+    )
     return await runner(user, inst, filters)
