@@ -1,14 +1,27 @@
-"""Report cards MVP — marks + attendance from DB, teacher remarks, admin publish, PDF."""
-import io
+"""Report cards — scholastic/co-scholastic format, finalize/lock, PDF export."""
 import uuid
 from datetime import timedelta
-from typing import Optional
+from typing import Any, Dict, List, Optional
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
 from core import db, get_current_user, get_perm, is_super_admin, now_utc
+from report_card_format import (
+    CO_SCHOLASTIC_AREAS,
+    FINALIZED_STATUSES,
+    GRADING_SCALE_NOTE,
+    aggregate_scholastic_rows,
+    default_co_scholastic,
+    enrich_card_computed,
+    format_attendance,
+    format_dob,
+    render_report_card_pdf,
+    validate_for_finalize,
+)
 from routers.academic import assert_teacher_section_access
-from routers.marks import grade_for_score, default_grading_scale, percentage_for_score
+from routers.marks import default_grading_scale, grade_for_score, percentage_for_score
 
 router = APIRouter(prefix="/report-cards", tags=["report-cards"])
 
@@ -38,7 +51,23 @@ def _assert_build(user: dict) -> None:
 
 def _assert_publish(user: dict) -> None:
     if not _can_publish(user):
-        raise HTTPException(403, "Only school administrators can publish report cards")
+        raise HTTPException(403, "Only school administrators can finalize or publish report cards")
+
+
+def _is_locked(card: dict) -> bool:
+    return card.get("status") in FINALIZED_STATUSES
+
+
+async def _audit(card_id: str, action: str, user: dict, detail: Optional[dict] = None) -> None:
+    await db.report_card_audit.insert_one({
+        "id": str(uuid.uuid4()),
+        "card_id": card_id,
+        "action": action,
+        "actor_id": user.get("id"),
+        "actor_name": user.get("name"),
+        "detail": detail or {},
+        "at": now_utc().isoformat(),
+    })
 
 
 async def _branding() -> dict:
@@ -50,7 +79,11 @@ async def _branding() -> dict:
     }
 
 
-async def _attendance_pct(person_id: str, start_date: Optional[str], end_date: Optional[str]) -> Optional[float]:
+async def _attendance_counts(
+    person_id: str,
+    start_date: Optional[str],
+    end_date: Optional[str],
+) -> tuple[Optional[int], Optional[int], Optional[float]]:
     q: dict = {"person_id": person_id, "kind": "student"}
     if start_date or end_date:
         date_q: dict = {}
@@ -62,22 +95,20 @@ async def _attendance_pct(person_id: str, start_date: Optional[str], end_date: O
     else:
         since = (now_utc() - timedelta(days=90)).strftime("%Y-%m-%d")
         q["date"] = {"$gte": since}
-    records = await db.attendance.find(q, {"_id": 0, "status": 1}).to_list(1000)
+    records = await db.attendance.find(q, {"_id": 0, "status": 1}).to_list(2000)
     if not records:
-        return None
+        return None, None, None
     attended = sum(1 for r in records if r.get("status") in ("present", "late"))
-    return round((attended / len(records)) * 100, 1)
+    total = len(records)
+    pct = round((attended / total) * 100, 1)
+    return attended, total, pct
 
 
 async def _coach_remark_for_student(person: dict, start_date: Optional[str], end_date: Optional[str]) -> Optional[str]:
-    """Latest published ALPHA coach assessment remark when student participates in sports."""
     ents = person.get("entities") or []
     if "ALPHA" not in ents and person.get("organization") != "BOTH":
         return None
-    player = await db.people.find_one(
-        {"kind": "player", "name": person.get("name")},
-        {"_id": 0, "id": 1},
-    )
+    player = await db.people.find_one({"kind": "player", "name": person.get("name")}, {"_id": 0, "id": 1})
     if not player:
         return None
     q: dict = {
@@ -117,47 +148,49 @@ async def build_report_card_data(person_id: str, exam_term_id: str) -> dict:
             "status": {"$in": ["final", "published"]},
         },
         {"_id": 0},
-    ).to_list(50)
-    subject_ids = [m["subject_id"] for m in marks]
-    subjects = {}
+    ).to_list(200)
+
+    assessment_ids = list({m["assessment_id"] for m in marks if m.get("assessment_id")})
+    assessments: Dict[str, dict] = {}
+    if assessment_ids:
+        rows = await db.assessments.find({"id": {"$in": assessment_ids}}, {"_id": 0}).to_list(200)
+        assessments = {a["id"]: a for a in rows}
+
+    subject_ids = list({m["subject_id"] for m in marks if m.get("subject_id")})
+    subjects: Dict[str, dict] = {}
     if subject_ids:
-        subs = await db.subjects.find({"id": {"$in": subject_ids}}, {"_id": 0}).to_list(50)
+        subs = await db.subjects.find({"id": {"$in": subject_ids}}, {"_id": 0}).to_list(100)
         subjects = {s["id"]: s for s in subs}
 
     scale = await default_grading_scale(year_id) if year_id else None
     bands = (scale or {}).get("bands") or []
 
+    scholastic_rows = aggregate_scholastic_rows(marks, assessments, subjects, bands)
+
     subject_rows = []
-    total_obtained = 0.0
-    total_max = 0.0
-    for m in marks:
-        sub = subjects.get(m["subject_id"], {})
-        obtained = m.get("marks_obtained")
-        if obtained is None:
-            continue
-        mx = m.get("max_marks") or 100
-        pct = m.get("percentage") or percentage_for_score(obtained, mx)
-        total_obtained += obtained
-        total_max += mx
+    for row in scholastic_rows:
         subject_rows.append({
-            "subject_id": m["subject_id"],
-            "subject_name": sub.get("name") or m["subject_id"],
-            "marks_obtained": obtained,
-            "max_marks": mx,
-            "percentage": pct,
-            "grade": m.get("grade") or grade_for_score(obtained, bands, mx),
+            "subject_id": row.get("subject_id"),
+            "subject_name": row.get("subject_name"),
+            "marks_obtained": row.get("marks_obtained"),
+            "max_marks": row.get("max_marks"),
+            "percentage": row.get("percentage"),
+            "grade": row.get("grade"),
         })
 
-    overall_pct = round((total_obtained / total_max) * 100, 1) if total_max else None
-    overall_grade = grade_for_score(overall_pct, bands, 100) if overall_pct is not None else None
-    att_pct = await _attendance_pct(person["id"], term.get("start_date"), term.get("end_date"))
+    att_present, att_total, att_pct = await _attendance_counts(
+        person["id"], term.get("start_date"), term.get("end_date"),
+    )
     suggested_coach = await _coach_remark_for_student(person, term.get("start_date"), term.get("end_date"))
     branding = await _branding()
 
-    return {
+    card: dict = {
         "person_id": person_id,
         "person_name": person.get("name"),
         "admission_number": person.get("admission_number"),
+        "father_name": person.get("father_name") or person.get("guardian_name"),
+        "mother_name": person.get("mother_name"),
+        "dob": person.get("dob"),
         "section_id": person.get("section_id"),
         "grade_name": (section or {}).get("grade_name") or person.get("group", "").split("-")[0],
         "section_label": (section or {}).get("label") or person.get("group"),
@@ -165,17 +198,20 @@ async def build_report_card_data(person_id: str, exam_term_id: str) -> dict:
         "exam_term_name": term.get("name"),
         "academic_year_id": year_id,
         "academic_year_name": (year or {}).get("name"),
+        "scholastic_rows": scholastic_rows,
         "subjects": subject_rows,
-        "total_obtained": total_obtained,
-        "total_max": total_max,
-        "percentage": overall_pct,
-        "overall_grade": overall_grade,
+        "co_scholastic": default_co_scholastic(),
+        "grading_scale_note": GRADING_SCALE_NOTE,
+        "attendance_present": att_present,
+        "attendance_total": att_total,
         "attendance_pct": att_pct,
+        "attendance_display": format_attendance(att_present, att_total, att_pct),
         "has_alpha_participation": "ALPHA" in (person.get("entities") or []) or person.get("organization") == "BOTH",
         "suggested_coach_remark": suggested_coach,
         "branding": branding,
         "entity_id": ENTITY_PWS,
     }
+    return enrich_card_computed(card, bands)
 
 
 class ReportCardBuildIn(BaseModel):
@@ -187,8 +223,52 @@ class TeacherRemarkIn(BaseModel):
     teacher_remark: str
 
 
+class CoScholasticIn(BaseModel):
+    music_dramatics: Optional[str] = None
+    art_education: Optional[str] = None
+    physical_education_yoga: Optional[str] = None
+
+
+class ScholasticRowIn(BaseModel):
+    subject_name: str
+    subject_id: Optional[str] = None
+    periodic_test: Optional[float] = None
+    independent_assessment: Optional[float] = None
+    written_assessment: Optional[float] = None
+    project: Optional[float] = None
+    group_discussion: Optional[float] = None
+    theory: Optional[float] = None
+    practical_viva: Optional[float] = None
+
+
+class ReportCardUpdateIn(BaseModel):
+    teacher_remark: Optional[str] = None
+    scholastic_rows: Optional[List[ScholasticRowIn]] = None
+    co_scholastic: Optional[CoScholasticIn] = None
+    attendance_present: Optional[int] = None
+    attendance_total: Optional[int] = None
+    attendance_display: Optional[str] = None
+    issue_date: Optional[str] = None
+
+
 class PublishIn(BaseModel):
     coach_remark: Optional[str] = None
+
+
+class ReopenIn(BaseModel):
+    reason: str = Field(min_length=3)
+
+
+async def _get_card(card_id: str) -> dict:
+    card = await db.report_cards.find_one({"id": card_id}, {"_id": 0})
+    if not card:
+        raise HTTPException(404, "Report card not found")
+    return card
+
+
+async def _bands_for_card(card: dict) -> list:
+    scale = await default_grading_scale(card.get("academic_year_id"))
+    return (scale or {}).get("bands") or []
 
 
 @router.post("/build")
@@ -208,58 +288,105 @@ async def build_report_card(payload: ReportCardBuildIn, user: dict = Depends(get
         "exam_term_id": payload.exam_term_id,
     })
 
-    if existing and existing.get("status") == "published":
-        raise HTTPException(403, "Published report cards cannot be rebuilt. Unpublish via admin first.")
+    if existing and _is_locked(existing):
+        raise HTTPException(403, "Finalized report cards cannot be rebuilt. Reopen via admin first.")
 
+    preserved_co = (existing or {}).get("co_scholastic") or data.get("co_scholastic")
     doc = {
         **data,
-        "status": existing.get("status") if existing and existing.get("status") != "published" else "draft",
+        "status": existing.get("status") if existing and existing.get("status") not in FINALIZED_STATUSES else "draft",
         "teacher_remark": (existing or {}).get("teacher_remark"),
         "coach_remark": (existing or {}).get("coach_remark"),
         "approved_coach_remark": (existing or {}).get("approved_coach_remark"),
+        "co_scholastic": preserved_co,
+        "issue_date": (existing or {}).get("issue_date"),
         "updated_at": ts,
+        "updated_by": user["id"],
         "built_at": ts,
         "built_by": user["id"],
     }
     if not existing:
         doc["id"] = str(uuid.uuid4())
         doc["created_at"] = ts
+        doc["created_by"] = user["id"]
         await db.report_cards.insert_one(doc)
+        await _audit(doc["id"], "created", user)
     else:
         doc["id"] = existing["id"]
+        doc["created_at"] = existing.get("created_at")
+        doc["created_by"] = existing.get("created_by")
         await db.report_cards.update_one({"id": existing["id"]}, {"$set": doc})
+        await _audit(doc["id"], "rebuilt", user)
     doc.pop("_id", None)
     return doc
 
 
-@router.patch("/{card_id}/teacher-remark")
-async def set_teacher_remark(card_id: str, payload: TeacherRemarkIn, user: dict = Depends(get_current_user)):
+@router.patch("/{card_id}")
+async def update_report_card_draft(card_id: str, payload: ReportCardUpdateIn, user: dict = Depends(get_current_user)):
+    """Update draft report card fields (remarks, scholastic rows, co-scholastic, attendance)."""
     _assert_build(user)
-    card = await db.report_cards.find_one({"id": card_id}, {"_id": 0})
-    if not card:
-        raise HTTPException(404, "Report card not found")
-    if card.get("status") == "published":
-        raise HTTPException(403, "Published report cards are read-only")
+    card = await _get_card(card_id)
+    if _is_locked(card):
+        raise HTTPException(403, "Reopen the report card before editing")
     if user.get("role") == "teacher" and card.get("section_id"):
         await assert_teacher_section_access(user, card["section_id"])
-    await db.report_cards.update_one(
-        {"id": card_id},
-        {"$set": {
-            "teacher_remark": payload.teacher_remark.strip(),
-            "status": "draft",
-            "remark_by": user["id"],
-            "remark_at": now_utc().isoformat(),
-        }},
+
+    bands = await _bands_for_card(card)
+    patch: dict = {"updated_at": now_utc().isoformat(), "updated_by": user["id"]}
+
+    if payload.teacher_remark is not None:
+        patch["teacher_remark"] = payload.teacher_remark.strip()
+    if payload.co_scholastic is not None:
+        patch["co_scholastic"] = {**default_co_scholastic(), **payload.co_scholastic.dict(exclude_none=True)}
+    if payload.attendance_present is not None:
+        patch["attendance_present"] = payload.attendance_present
+    if payload.attendance_total is not None:
+        patch["attendance_total"] = payload.attendance_total
+    if payload.attendance_display is not None:
+        patch["attendance_display"] = payload.attendance_display.strip()
+    if payload.issue_date is not None:
+        patch["issue_date"] = payload.issue_date
+
+    if payload.scholastic_rows is not None:
+        rows = []
+        for r in payload.scholastic_rows:
+            row = r.dict()
+            row["subject_name"] = (row.get("subject_name") or "").upper()
+            rows.append(row)
+        merged = {**card, "scholastic_rows": rows}
+        enrich_card_computed(merged, bands)
+        patch["scholastic_rows"] = merged["scholastic_rows"]
+        patch["subjects"] = merged.get("subjects") or merged["scholastic_rows"]
+        patch["total_obtained"] = merged["total_obtained"]
+        patch["total_max"] = merged["total_max"]
+        patch["percentage"] = merged["percentage"]
+        patch["overall_grade"] = merged["overall_grade"]
+        patch["overall_marks_display"] = merged["overall_marks_display"]
+
+    if len(patch) <= 2:
+        raise HTTPException(400, "No fields to update")
+
+    await db.report_cards.update_one({"id": card_id}, {"$set": patch})
+    await _audit(card_id, "updated", user, {"fields": list(patch.keys())})
+    fresh = await db.report_cards.find_one({"id": card_id}, {"_id": 0})
+    return enrich_card_computed(fresh, bands)
+
+
+@router.patch("/{card_id}/teacher-remark")
+async def set_teacher_remark(card_id: str, payload: TeacherRemarkIn, user: dict = Depends(get_current_user)):
+    return await update_report_card_draft(
+        card_id,
+        ReportCardUpdateIn(teacher_remark=payload.teacher_remark),
+        user,
     )
-    return await db.report_cards.find_one({"id": card_id}, {"_id": 0})
 
 
 @router.post("/{card_id}/submit")
 async def submit_for_review(card_id: str, user: dict = Depends(get_current_user)):
     _assert_build(user)
-    card = await db.report_cards.find_one({"id": card_id}, {"_id": 0})
-    if not card:
-        raise HTTPException(404, "Report card not found")
+    card = await _get_card(card_id)
+    if _is_locked(card):
+        raise HTTPException(403, "Finalized report cards cannot be submitted")
     if user.get("role") == "teacher" and card.get("section_id"):
         await assert_teacher_section_access(user, card["section_id"])
     if not (card.get("teacher_remark") or "").strip():
@@ -268,31 +395,80 @@ async def submit_for_review(card_id: str, user: dict = Depends(get_current_user)
         {"id": card_id},
         {"$set": {"status": "review", "submitted_at": now_utc().isoformat(), "submitted_by": user["id"]}},
     )
+    await _audit(card_id, "submitted", user)
+    return await db.report_cards.find_one({"id": card_id}, {"_id": 0})
+
+
+@router.post("/{card_id}/finalize")
+async def finalize_report_card(card_id: str, user: dict = Depends(get_current_user)):
+    _assert_publish(user)
+    card = await _get_card(card_id)
+    bands = await _bands_for_card(card)
+    card = enrich_card_computed(card, bands)
+    errors = validate_for_finalize(card)
+    if errors:
+        raise HTTPException(400, "; ".join(errors))
+    ts = now_utc().isoformat()
+    patch = {
+        "status": "finalized",
+        "finalized_at": ts,
+        "finalized_by": user["id"],
+        "issue_date": card.get("issue_date") or ts[:10],
+        "updated_at": ts,
+        "updated_by": user["id"],
+        **{k: card[k] for k in ("total_obtained", "total_max", "percentage", "overall_grade", "overall_marks_display") if k in card},
+    }
+    await db.report_cards.update_one({"id": card_id}, {"$set": patch})
+    await _audit(card_id, "finalized", user)
+    return await db.report_cards.find_one({"id": card_id}, {"_id": 0})
+
+
+@router.post("/{card_id}/reopen")
+async def reopen_report_card(card_id: str, payload: ReopenIn, user: dict = Depends(get_current_user)):
+    _assert_publish(user)
+    card = await _get_card(card_id)
+    if card.get("status") not in FINALIZED_STATUSES:
+        raise HTTPException(400, "Only finalized report cards can be reopened")
+    ts = now_utc().isoformat()
+    await db.report_cards.update_one(
+        {"id": card_id},
+        {"$set": {"status": "draft", "updated_at": ts, "updated_by": user["id"]}},
+    )
+    await _audit(card_id, "reopened", user, {"reason": payload.reason.strip()})
     return await db.report_cards.find_one({"id": card_id}, {"_id": 0})
 
 
 @router.post("/{card_id}/publish")
 async def publish_report_card(card_id: str, payload: PublishIn, user: dict = Depends(get_current_user)):
     _assert_publish(user)
-    card = await db.report_cards.find_one({"id": card_id}, {"_id": 0})
-    if not card:
-        raise HTTPException(404, "Report card not found")
-    if card.get("status") not in ("review", "draft"):
-        if card.get("status") == "published":
-            raise HTTPException(400, "Already published")
+    card = await _get_card(card_id)
+    if card.get("status") == "published":
+        raise HTTPException(400, "Already published")
+    if card.get("status") not in ("finalized", "review", "draft"):
+        raise HTTPException(400, "Invalid status for publish")
+    bands = await _bands_for_card(card)
+    if card.get("status") != "finalized":
+        card = enrich_card_computed(card, bands)
+        errors = validate_for_finalize(card)
+        if errors:
+            raise HTTPException(400, "; ".join(errors))
     ts = now_utc().isoformat()
-    patch = {
+    patch: dict = {
         "status": "published",
         "published_at": ts,
         "published_by": user["id"],
         "reviewed_by": user["id"],
         "reviewed_at": ts,
+        "finalized_at": card.get("finalized_at") or ts,
+        "finalized_by": card.get("finalized_by") or user["id"],
+        "issue_date": card.get("issue_date") or ts[:10],
     }
     if card.get("has_alpha_participation"):
         approved = (payload.coach_remark or "").strip() or card.get("approved_coach_remark") or card.get("suggested_coach_remark")
         if approved:
             patch["approved_coach_remark"] = approved
     await db.report_cards.update_one({"id": card_id}, {"$set": patch})
+    await _audit(card_id, "published", user)
     fresh = await db.report_cards.find_one({"id": card_id}, {"_id": 0})
     try:
         from notifications_service import send_notification
@@ -314,6 +490,15 @@ async def publish_report_card(card_id: str, payload: PublishIn, user: dict = Dep
     return fresh
 
 
+@router.get("/{card_id}/audit")
+async def report_card_audit(card_id: str, user: dict = Depends(get_current_user)):
+    card = await _get_card(card_id)
+    if not (_can_build(user) or _can_publish(user)):
+        raise HTTPException(403, "Not allowed")
+    rows = await db.report_card_audit.find({"card_id": card_id}, {"_id": 0}).sort("at", -1).to_list(100)
+    return rows
+
+
 def _can_view_card(user: dict, card: dict) -> bool:
     if card.get("status") == "published":
         if user.get("role") == "parent":
@@ -321,8 +506,6 @@ def _can_view_card(user: dict, card: dict) -> bool:
         if user.get("role") == "student":
             return True
     if _can_build(user):
-        if user.get("role") == "teacher" and card.get("section_id"):
-            return True  # caller must still check section access
         return True
     if _can_publish(user):
         return True
@@ -334,6 +517,7 @@ async def list_report_cards(
     person_id: Optional[str] = None,
     exam_term_id: Optional[str] = None,
     status: Optional[str] = None,
+    search: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
     q: dict = {"entity_id": ENTITY_PWS}
@@ -357,152 +541,53 @@ async def list_report_cards(
         q["exam_term_id"] = exam_term_id
     if status and user.get("role") != "parent":
         q["status"] = status
-    return await db.report_cards.find(q, {"_id": 0}).sort("built_at", -1).to_list(100)
+    rows = await db.report_cards.find(q, {"_id": 0}).sort("built_at", -1).to_list(200)
+    if search:
+        needle = search.strip().lower()
+        rows = [
+            r for r in rows
+            if needle in (r.get("person_name") or "").lower()
+            or needle in (r.get("admission_number") or "").lower()
+            or needle in (r.get("exam_term_name") or "").lower()
+        ]
+    return rows
 
 
 @router.get("/{card_id}")
 async def get_report_card(card_id: str, user: dict = Depends(get_current_user)):
-    card = await db.report_cards.find_one({"id": card_id}, {"_id": 0})
-    if not card:
-        raise HTTPException(404, "Report card not found")
+    card = await _get_card(card_id)
     if user.get("role") == "parent":
         if card.get("status") != "published":
             raise HTTPException(404, "Report card not found")
         if card["person_id"] not in (user.get("linked_person_ids") or []):
             raise HTTPException(404, "Report card not found")
-        return card
+        return enrich_card_computed(card, await _bands_for_card(card))
     if not _can_view_card(user, card):
         raise HTTPException(403, "Not allowed")
     if user.get("role") == "teacher" and card.get("section_id"):
         await assert_teacher_section_access(user, card["section_id"])
-    return card
+    return enrich_card_computed(card, await _bands_for_card(card))
 
 
 @router.post("/generate")
 async def generate_report_card_legacy(payload: ReportCardBuildIn, user: dict = Depends(get_current_user)):
-    """Backward-compatible alias for build."""
     return await build_report_card(payload, user)
-
-
-def _render_pdf(card: dict) -> bytes:
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import mm
-    from reportlab.lib import colors
-    from reportlab.pdfgen import canvas as pdfcanvas
-
-    branding = card.get("branding") or {}
-    school = branding.get("school_name") or SCHOOL_NAME
-    tagline = branding.get("tagline") or SCHOOL_TAGLINE
-
-    buf = io.BytesIO()
-    c = pdfcanvas.Canvas(buf, pagesize=A4)
-    w, h = A4
-    y = h - 18 * mm
-
-    c.setFillColor(colors.HexColor("#1E40AF"))
-    c.setFont("Helvetica-Bold", 18)
-    c.drawString(20 * mm, y, school)
-    y -= 7 * mm
-    c.setFillColor(colors.HexColor("#64748B"))
-    c.setFont("Helvetica", 9)
-    c.drawString(20 * mm, y, tagline)
-    y -= 5 * mm
-    c.setStrokeColor(colors.HexColor("#1E40AF"))
-    c.setLineWidth(1)
-    c.line(20 * mm, y, w - 20 * mm, y)
-    y -= 10 * mm
-
-    c.setFillColor(colors.black)
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(20 * mm, y, "Report Card")
-    y -= 8 * mm
-    c.setFont("Helvetica", 10)
-    lines = [
-        f"Student: {card.get('person_name', '')}",
-        f"Admission No: {card.get('admission_number') or '—'}",
-        f"Academic Year: {card.get('academic_year_name') or '—'}",
-        f"Grade / Section: {card.get('grade_name') or '—'} / {card.get('section_label') or '—'}",
-        f"Term: {card.get('exam_term_name', '')}",
-    ]
-    for line in lines:
-        c.drawString(20 * mm, y, line)
-        y -= 5 * mm
-    if card.get("percentage") is not None:
-        c.drawString(20 * mm, y, f"Overall: {card['percentage']}% ({card.get('overall_grade') or '—'})")
-        y -= 5 * mm
-    if card.get("attendance_pct") is not None:
-        c.drawString(20 * mm, y, f"Attendance: {card['attendance_pct']}%")
-        y -= 8 * mm
-
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(20 * mm, y, "Subject")
-    c.drawString(85 * mm, y, "Marks")
-    c.drawString(115 * mm, y, "%")
-    c.drawString(135 * mm, y, "Grade")
-    y -= 6 * mm
-    c.setFont("Helvetica", 10)
-    for row in card.get("subjects") or []:
-        if y < 45 * mm:
-            c.showPage()
-            y = h - 20 * mm
-        c.drawString(20 * mm, y, row.get("subject_name", ""))
-        c.drawString(85 * mm, y, f"{row.get('marks_obtained', '—')}/{row.get('max_marks', 100)}")
-        c.drawString(115 * mm, y, str(row.get("percentage") or "—"))
-        c.drawString(135 * mm, y, row.get("grade") or "—")
-        y -= 5 * mm
-
-    y -= 6 * mm
-    if card.get("teacher_remark"):
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(20 * mm, y, "Class Teacher's Remark")
-        y -= 5 * mm
-        c.setFont("Helvetica", 9)
-        for chunk in _wrap_text(card["teacher_remark"], 85):
-            c.drawString(20 * mm, y, chunk)
-            y -= 4 * mm
-    if card.get("approved_coach_remark"):
-        y -= 4 * mm
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(20 * mm, y, "Sports Coach Remark (Approved)")
-        y -= 5 * mm
-        c.setFont("Helvetica", 9)
-        for chunk in _wrap_text(card["approved_coach_remark"], 85):
-            c.drawString(20 * mm, y, chunk)
-            y -= 4 * mm
-
-    c.setFont("Helvetica-Oblique", 8)
-    c.setFillColor(colors.HexColor("#94A3B8"))
-    c.drawString(20 * mm, 12 * mm, f"Published {card.get('published_at', card.get('built_at', ''))[:10]} · {school}")
-    c.save()
-    return buf.getvalue()
-
-
-def _wrap_text(text: str, max_chars: int) -> list[str]:
-    words = text.split()
-    lines, cur = [], ""
-    for w in words:
-        if len(cur) + len(w) + 1 > max_chars:
-            lines.append(cur)
-            cur = w
-        else:
-            cur = f"{cur} {w}".strip()
-    if cur:
-        lines.append(cur)
-    return lines or [text[:max_chars]]
 
 
 @router.get("/{card_id}/pdf")
 async def report_card_pdf(card_id: str, user: dict = Depends(get_current_user)):
-    card = await db.report_cards.find_one({"id": card_id}, {"_id": 0})
-    if not card:
-        raise HTTPException(404, "Report card not found")
+    card = await _get_card(card_id)
     if user.get("role") == "parent":
         if card.get("status") != "published" or card["person_id"] not in (user.get("linked_person_ids") or []):
             raise HTTPException(404, "Report card not found")
     elif not (_can_build(user) or _can_publish(user)):
         if card.get("status") != "published":
             raise HTTPException(403, "Not allowed")
-    pdf = _render_pdf(card)
+    if card.get("status") not in FINALIZED_STATUSES:
+        raise HTTPException(403, "PDF export is available only for finalized report cards")
+    card = enrich_card_computed(card, await _bands_for_card(card))
+    await _audit(card_id, "exported_pdf", user)
+    pdf = render_report_card_pdf(card)
     name = (card.get("person_name") or "report").replace(" ", "_")
     return Response(
         content=pdf,
