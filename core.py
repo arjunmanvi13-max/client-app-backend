@@ -618,6 +618,9 @@ def public_user(u: dict) -> dict:
         "sport_assignment_status": u.get("sport_assignment_status"),
         "user_type": u.get("user_type") or resolve_user_type_safe(u),
         "designation": u.get("designation"),
+        "teacher_designation": u.get("teacher_designation"),
+        "date_of_joining": u.get("date_of_joining"),
+        "address": u.get("address"),
         "entity_scope": u.get("entity_scope"),
         "legacy_role": u.get("legacy_role"),
         "requires_user_type_review": bool(u.get("requires_user_type_review")),
@@ -675,6 +678,9 @@ class UserCreate(BaseModel):
     assigned_sports: List[Literal["Cricket", "Football"]] = []
     linked_person_ids: List[str] = []
     permissions: Optional[dict] = None
+    date_of_joining: Optional[str] = None
+    address: Optional[str] = None
+    teacher_designation: Optional[Literal["CLASS_TEACHER", "TEACHER"]] = None
 
 class UserUpdate(BaseModel):
     name: Optional[str] = None
@@ -697,6 +703,10 @@ class UserUpdate(BaseModel):
     assigned_centres: Optional[List[Literal["Balua", "Harding Park"]]] = None
     assigned_sports: Optional[List[Literal["Cricket", "Football"]]] = None
     linked_person_ids: Optional[List[str]] = None
+    permissions: Optional[dict] = None
+    date_of_joining: Optional[str] = None
+    address: Optional[str] = None
+    teacher_designation: Optional[Literal["CLASS_TEACHER", "TEACHER"]] = None
 
 class PersonCreate(BaseModel):
     name: str

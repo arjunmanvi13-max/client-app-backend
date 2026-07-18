@@ -23,6 +23,36 @@ from rbac.enums import UserRole
 
 router = APIRouter(prefix="/users", tags=["users"])
 
+TEACHER_DESIGNATIONS = frozenset({"CLASS_TEACHER", "TEACHER"})
+
+
+def _normalize_mobile(raw: Optional[str]) -> Optional[str]:
+    if not raw:
+        return None
+    digits = "".join(ch for ch in raw.strip() if ch.isdigit())
+    if len(digits) == 12 and digits.startswith("91"):
+        digits = digits[2:]
+    if len(digits) != 10 or digits[0] not in "6789":
+        raise HTTPException(400, "Mobile must be a valid 10-digit Indian number")
+    return digits
+
+
+def _apply_teacher_profile_fields(doc: dict, fields: dict, *, user_type: Optional[str] = None) -> None:
+    ut = user_type or doc.get("user_type") or resolve_user_type(doc)
+    if "date_of_joining" in fields and fields["date_of_joining"] is not None:
+        doc["date_of_joining"] = fields["date_of_joining"]
+    if "address" in fields:
+        addr = (fields.get("address") or "").strip()
+        doc["address"] = addr or None
+    if "teacher_designation" in fields:
+        td = fields.get("teacher_designation")
+        if td:
+            if td not in TEACHER_DESIGNATIONS:
+                raise HTTPException(400, "Teacher designation must be CLASS_TEACHER or TEACHER")
+            doc["teacher_designation"] = td
+    if ut == UserRole.PWS_TEACHER.value and not doc.get("teacher_designation"):
+        doc["teacher_designation"] = "TEACHER"
+
 
 def _user_type_list_query(user_type: str) -> dict:
     """Match users by canonical user_type, with legacy role fallback."""
@@ -173,6 +203,10 @@ async def create_user(payload: UserCreate, user: dict = Depends(get_current_user
         raise HTTPException(400, "Password must be at least 6 characters")
     email = validate_domain_email(payload.email)
     mobile = payload.mobile.strip() if payload.mobile else None
+    if mobile:
+        mobile = _normalize_mobile(mobile)
+    if payload.phone and not mobile:
+        mobile = _normalize_mobile(payload.phone)
     if await db.users.find_one({"email": email}):
         raise HTTPException(400, "Email already exists")
     if mobile and await db.users.find_one({"mobile": mobile}):
@@ -224,6 +258,15 @@ async def create_user(payload: UserCreate, user: dict = Depends(get_current_user
         "status": "active",
     }
     apply_user_type_fields(doc, user_type=payload.user_type, designation=payload.designation)
+    _apply_teacher_profile_fields(
+        doc,
+        {
+            "date_of_joining": payload.date_of_joining,
+            "address": payload.address,
+            "teacher_designation": payload.teacher_designation,
+        },
+        user_type=payload.user_type,
+    )
     _apply_coach_assignment_fields(doc)
     if doc.get("user_type") == UserRole.ALPHA_COACH.value:
         await _log_coach_sport_audit(doc["id"], doc["name"], None, doc.get("assigned_sport"), user)
@@ -271,6 +314,12 @@ async def update_user(user_id: str, payload: UserUpdate, user: dict = Depends(ge
             raise HTTPException(400, "Email already exists")
         body["email"] = new_email
 
+    if "mobile" in body:
+        body["mobile"] = _normalize_mobile(body["mobile"])
+
+    if body.get("permissions") is not None and not is_super_admin(user):
+        raise HTTPException(403, "Only Super Admin can change module permissions")
+
     prev_user_type = resolve_user_type(target)
     prev_designation = target.get("designation")
 
@@ -281,12 +330,25 @@ async def update_user(user_id: str, payload: UserUpdate, user: dict = Depends(ge
             upd["password_hash"] = hash_password(v)
             upd["is_password_set"] = True
             upd["must_change_password"] = True
+        elif k == "permissions":
+            perms = {pk: bool(v.get(pk, False)) for pk in PERMISSION_KEYS}
+            upd["permissions"] = perms
+        elif k == "teacher_designation":
+            if v not in TEACHER_DESIGNATIONS:
+                raise HTTPException(400, "Teacher designation must be CLASS_TEACHER or TEACHER")
+            upd[k] = v
         elif k not in ("user_type", "designation", "role"):
             upd[k] = v
 
     merged = {**target, **upd, **body}
     new_user_type = body.get("user_type") or prev_user_type
     new_designation = body.get("designation", target.get("designation"))
+    teacher_field_keys = ("date_of_joining", "address", "teacher_designation")
+    if any(k in body for k in teacher_field_keys):
+        _apply_teacher_profile_fields(merged, body, user_type=new_user_type)
+        for k in teacher_field_keys:
+            if k in merged:
+                upd[k] = merged[k]
 
     if body.get("user_type") or body.get("designation"):
         try:
