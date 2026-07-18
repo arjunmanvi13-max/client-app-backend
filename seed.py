@@ -26,6 +26,36 @@ SUPER_ADMIN_SEEDS = [
     {"email": "superadmin2@prarambhika.com", "password": "Super@123", "name": "Super Admin 2", "organization": "BOTH", "department": "Trustee"},
 ]
 
+DEFAULT_PWS_SUBJECTS = [
+    ("Mathematics", "MATH", 1),
+    ("English", "ENG", 2),
+    ("Science", "SCI", 3),
+    ("Hindi", "HIN", 4),
+    ("Computers", "IT", 5),
+    ("Social Science", "SST", 6),
+    ("Art", "ART", 7),
+    ("Music", "MUS", 8),
+    ("Sanskrit", "SAN", 9),
+    ("Physical Education", "PT", 10),
+    ("Yoga", "YOG", 11),
+]
+
+DEFAULT_PWS_STANDARDS = [
+    ("Nur", 1),
+    ("LKG", 2),
+    ("UKG", 3),
+    ("1", 4),
+    ("2", 5),
+    ("3", 6),
+    ("4", 7),
+    ("5", 8),
+    ("6", 9),
+    ("7", 10),
+    ("8", 11),
+    ("9", 12),
+    ("10", 13),
+]
+
 ROLE_DEFAULT_CAN_MANAGE = {
     "super_admin": ["student", "player", "teacher", "coach", "staff"],
     "admin": ["student", "player", "teacher", "coach", "staff"],
@@ -471,10 +501,12 @@ async def _seed_academic_structure():
     year_id = year["id"]
 
     grade_ids: dict[str, str] = {}
-    for gname, sort in [("9", 9), ("10", 10)]:
+    for gname, sort in DEFAULT_PWS_STANDARDS:
         existing = await db.grades.find_one({"academic_year_id": year_id, "name": gname})
         if existing:
             grade_ids[gname] = existing["id"]
+            if existing.get("sort_order") is None:
+                await db.grades.update_one({"id": existing["id"]}, {"$set": {"sort_order": sort}})
         else:
             gdoc = {
                 "id": str(uuid.uuid4()),
@@ -517,19 +549,17 @@ async def _seed_academic_structure():
     if teacher and nine_a:
         grade_9 = grade_ids.get("9")
         subject_ids: dict[str, str] = {}
-        for sname, code, sort in [
-            ("Mathematics", "MATH", 1),
-            ("English", "ENG", 2),
-            ("Science", "SCI", 3),
-        ]:
+        for sname, code, sort in DEFAULT_PWS_SUBJECTS:
             existing = await db.subjects.find_one({"academic_year_id": year_id, "name": sname})
             if existing:
                 subject_ids[sname] = existing["id"]
-                if not existing.get("grade_ids"):
-                    await db.subjects.update_one(
-                        {"id": existing["id"]},
-                        {"$set": {"grade_ids": [grade_9] if grade_9 else [], "section_ids": [nine_a]}},
-                    )
+                patch: dict = {}
+                if not existing.get("code") and code:
+                    patch["code"] = code
+                if existing.get("sort_order") is None:
+                    patch["sort_order"] = sort
+                if patch:
+                    await db.subjects.update_one({"id": existing["id"]}, {"$set": patch})
             else:
                 sdoc = {
                     "id": str(uuid.uuid4()),
@@ -537,8 +567,8 @@ async def _seed_academic_structure():
                     "name": sname,
                     "code": code,
                     "sort_order": sort,
-                    "grade_ids": [grade_9] if grade_9 else [],
-                    "section_ids": [nine_a],
+                    "grade_ids": [],
+                    "section_ids": [],
                     "entity_id": "pws",
                     "created_at": now_utc().isoformat(),
                 }
@@ -589,12 +619,7 @@ async def _seed_academic_marks():
         return
     section_id = section["id"]
 
-    subject_defs = [
-        ("Mathematics", "MATH", 1),
-        ("English", "ENG", 2),
-        ("Science", "SCI", 3),
-        ("Hindi", "HIN", 4),
-    ]
+    subject_defs = DEFAULT_PWS_SUBJECTS
     subject_ids: dict[str, str] = {}
     for name, code, sort in subject_defs:
         existing = await db.subjects.find_one({"academic_year_id": year_id, "name": name})
