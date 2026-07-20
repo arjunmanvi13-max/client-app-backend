@@ -1,12 +1,13 @@
 import uuid
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel
 from core import (
     db, UserCreate, UserUpdate, get_current_user,
     is_admin, is_sports_admin, is_super_admin, has_any_manage_rights, assert_can_manage, MANAGE_KINDS,
     hash_password, public_user, directory_user, now_utc,
-    validate_domain_email, default_permissions, PERMISSION_KEYS,
+    validate_domain_email, default_permissions, PERMISSION_KEYS, format_date_display,
 )
 from coach_scope import normalize_coach_assignments, ERR_MULTI_SPORT
 from user_classification import (
@@ -20,10 +21,31 @@ from user_classification import (
     CATALOG_BY_CODE,
 )
 from rbac.enums import UserRole
+from rbac.guards import can_manage_academic
+from teacher_profile_pdf import render_teacher_profile_pdf
 
 router = APIRouter(prefix="/users", tags=["users"])
 
 TEACHER_DESIGNATIONS = frozenset({"CLASS_TEACHER", "TEACHER"})
+
+
+def _is_teacher_account(doc: dict) -> bool:
+    ut = resolve_user_type(doc)
+    return ut == UserRole.PWS_TEACHER.value or doc.get("role") == "teacher"
+
+
+def _can_manage_teacher_account(actor: dict, target: dict) -> bool:
+    if is_super_admin(actor):
+        return True
+    return _is_teacher_account(target) and can_manage_academic(actor)
+
+
+def _can_toggle_account_status(actor: dict, target: dict) -> bool:
+    if is_super_admin(actor):
+        return True
+    if _is_teacher_account(target) and can_manage_academic(actor):
+        return True
+    return False
 
 
 def _normalize_mobile(raw: Optional[str]) -> Optional[str]:
@@ -300,7 +322,8 @@ async def update_user(user_id: str, payload: UserUpdate, user: dict = Depends(ge
         legacy_kind = target.get("role")
         if legacy_kind not in MANAGE_KINDS:
             raise HTTPException(403, "Only Super Admin can edit this user")
-        assert_can_manage(user, legacy_kind)
+        if not (legacy_kind == "teacher" and can_manage_academic(user)):
+            assert_can_manage(user, legacy_kind)
         body.pop("can_manage", None)
         body.pop("role", None)
         body.pop("email", None)
@@ -317,8 +340,9 @@ async def update_user(user_id: str, payload: UserUpdate, user: dict = Depends(ge
     if "mobile" in body:
         body["mobile"] = _normalize_mobile(body["mobile"])
 
-    if body.get("permissions") is not None and not is_super_admin(user):
-        raise HTTPException(403, "Only Super Admin can change module permissions")
+    if body.get("permissions") is not None:
+        if not is_super_admin(user) and not _can_manage_teacher_account(user, target):
+            raise HTTPException(403, "Only Super Admin can change module permissions")
 
     prev_user_type = resolve_user_type(target)
     prev_designation = target.get("designation")
@@ -459,13 +483,13 @@ async def get_user(user_id: str, user: dict = Depends(get_current_user)):
 
 @router.post("/{user_id}/deactivate")
 async def deactivate_user(user_id: str, user: dict = Depends(get_current_user)):
-    if not is_super_admin(user):
-        raise HTTPException(403, "Super Admin only")
     if user_id == user["id"]:
         raise HTTPException(400, "Cannot deactivate yourself")
     target = await db.users.find_one({"id": user_id})
     if not target:
         raise HTTPException(404, "User not found")
+    if not _can_toggle_account_status(user, target):
+        raise HTTPException(403, "Not permitted to deactivate this account")
     if target.get("role") == "super_admin":
         raise HTTPException(400, "Cannot deactivate Super Admin")
     await db.users.update_one({"id": user_id}, {"$set": {"status": "deactivated"}})
@@ -475,11 +499,11 @@ async def deactivate_user(user_id: str, user: dict = Depends(get_current_user)):
 
 @router.post("/{user_id}/activate")
 async def activate_user(user_id: str, user: dict = Depends(get_current_user)):
-    if not is_super_admin(user):
-        raise HTTPException(403, "Super Admin only")
     target = await db.users.find_one({"id": user_id})
     if not target:
         raise HTTPException(404, "User not found")
+    if not _can_toggle_account_status(user, target):
+        raise HTTPException(403, "Not permitted to activate this account")
     if target.get("requires_user_type_review"):
         raise HTTPException(409, "Assign an approved user type before activating this account")
     await db.users.update_one({"id": user_id}, {"$set": {"status": "active"}})
@@ -524,3 +548,52 @@ async def delete_user(user_id: str, user: dict = Depends(get_current_user)):
     await db.users.delete_one({"id": user_id})
     await _log_user_type_audit(action="deleted", target=target, actor=user)
     return {"ok": True}
+
+
+def _section_letter(label: str) -> str:
+    import re
+    m = re.search(r"-([A-G])$", (label or "").strip(), re.I)
+    return m.group(1).upper() if m else ""
+
+
+async def _teacher_class_rows_for_pdf(teacher_id: str) -> list:
+    open_year = await db.academic_years.find_one({"status": "open"}, {"_id": 0})
+    q: dict = {"teacher_user_id": teacher_id}
+    if open_year:
+        q["academic_year_id"] = open_year["id"]
+    rows = await db.teacher_class_assignments.find(q, {"_id": 0}).to_list(500)
+    grouped: dict = {}
+    for r in rows:
+        grade = await db.grades.find_one({"id": r["grade_id"]}, {"_id": 0, "name": 1})
+        section = await db.sections.find_one({"id": r["section_id"]}, {"_id": 0, "label": 1})
+        subject = await db.subjects.find_one({"id": r["subject_id"]}, {"_id": 0, "name": 1})
+        class_name = (grade or {}).get("name") or "—"
+        sec = _section_letter((section or {}).get("label") or "")
+        key = f"{class_name}:{sec}"
+        if key not in grouped:
+            grouped[key] = {"class_name": class_name, "section": sec, "subjects": []}
+        subj_name = (subject or {}).get("name")
+        if subj_name and subj_name not in grouped[key]["subjects"]:
+            grouped[key]["subjects"].append(subj_name)
+    return list(grouped.values())
+
+
+@router.get("/{user_id}/profile-pdf")
+async def teacher_profile_pdf(user_id: str, user: dict = Depends(get_current_user)):
+    target = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
+    if not target:
+        raise HTTPException(404, "User not found")
+    if not _can_manage_teacher_account(user, target):
+        raise HTTPException(403, "Not permitted")
+    class_rows = await _teacher_class_rows_for_pdf(user_id)
+    pdf_bytes = render_teacher_profile_pdf(
+        target,
+        class_rows=class_rows,
+        format_date=format_date_display,
+    )
+    safe_name = (target.get("name") or "teacher").replace(" ", "_")
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{safe_name}_profile.pdf"'},
+    )
