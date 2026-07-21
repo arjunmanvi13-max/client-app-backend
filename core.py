@@ -114,7 +114,49 @@ def directory_user(u: dict) -> dict:
         "role": u["role"],
         "organization": u.get("organization", "PWS"),
         "department": u.get("department"),
+        "status": u.get("status", "active"),
     }
+
+
+DEACTIVATED_USER_STATUS = "deactivated"
+
+
+def active_status_filter(include_deactivated: bool = False) -> dict:
+    """Mongo filter: active login/roster records only (omit when include_deactivated)."""
+    if include_deactivated:
+        return {}
+    return {"status": {"$ne": DEACTIVATED_USER_STATUS}}
+
+
+def merge_mongo_query(*clauses: dict) -> dict:
+    parts = [c for c in clauses if c]
+    if not parts:
+        return {}
+    if len(parts) == 1:
+        return parts[0]
+    return {"$and": list(parts)}
+
+
+def is_login_user_active(u: dict) -> bool:
+    return (
+        u.get("status", "active") != DEACTIVATED_USER_STATUS
+        and u.get("is_active", True) is not False
+    )
+
+
+async def assert_assignable_user_ids(user_ids: list) -> None:
+    """Reject task/assignment targets that are deactivated login accounts."""
+    ids = list(dict.fromkeys(i for i in user_ids if i))
+    if not ids:
+        return
+    inactive = await db.users.find(
+        {"id": {"$in": ids}, "status": DEACTIVATED_USER_STATUS},
+        {"_id": 0, "id": 1, "name": 1},
+    ).to_list(len(ids))
+    if inactive:
+        names = ", ".join(u.get("name") or u["id"] for u in inactive)
+        raise HTTPException(400, f"Cannot assign to inactive account(s): {names}")
+
 
 async def get_current_user(request: Request) -> dict:
     auth = request.headers.get("Authorization", "")

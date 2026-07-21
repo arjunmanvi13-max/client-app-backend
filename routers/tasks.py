@@ -12,6 +12,7 @@ from core import (
     get_perm,
     is_super_admin,
     now_utc,
+    assert_assignable_user_ids,
 )
 from notifications_service import send_notification
 
@@ -95,6 +96,7 @@ def _task_out(doc: dict) -> dict:
 @router.post("")
 async def create_task(payload: TaskCreate, user: dict = Depends(get_current_user)):
     assignee_id, assignee_ids = await _resolve_assignees(payload)
+    await assert_assignable_user_ids(assignee_ids)
     due_date = _resolve_due_date(payload)
     assignee_name = None
     if assignee_id:
@@ -205,6 +207,7 @@ async def update_task(task_id: str, payload: TaskUpdate, user: dict = Depends(ge
 
     if "assignee_id" in upd or "assignee_ids" in upd:
         assignee_id, assignee_ids = await _resolve_assignees(payload, existing)
+        await assert_assignable_user_ids(assignee_ids)
         upd["assignee_id"] = assignee_id
         upd["assignee_ids"] = assignee_ids
         if assignee_id:

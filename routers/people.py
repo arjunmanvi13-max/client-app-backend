@@ -232,7 +232,7 @@ async def list_people(
         query["gender"] = gender
     if status:
         query["status"] = status
-    elif kind in ("player", "student") and not include_deactivated:
+    elif kind in ("player", "student", "staff", "teacher") and not include_deactivated:
         query["status"] = {"$ne": "deactivated"}
     if q:
         query.update(_search_filter(q))

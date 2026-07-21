@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta
 from collections import defaultdict
 from fastapi import APIRouter, Depends, HTTPException
-from core import db, get_current_user, is_admin, now_utc
+from core import db, get_current_user, is_admin, now_utc, active_status_filter, merge_mongo_query
 
 router = APIRouter(tags=["command"])
 
@@ -190,7 +190,10 @@ async def dept_school(user: dict = Depends(get_current_user)):
     by_class: dict = defaultdict(lambda: {"present": 0, "absent": 0, "late": 0, "leave": 0})
     for r in rows:
         by_class[r["_id"]["group"] or "Unassigned"][r["_id"]["status"]] = r["count"]
-    teachers = await db.users.find({"role": "teacher"}, {"_id": 0, "password_hash": 0}).to_list(500)
+    teachers = await db.users.find(
+        merge_mongo_query({"role": "teacher"}, active_status_filter()),
+        {"_id": 0, "password_hash": 0},
+    ).to_list(500)
     students = await db.people.count_documents({"kind": "student"})
     return {
         "date": today,
@@ -212,7 +215,10 @@ async def dept_sports(user: dict = Depends(get_current_user)):
     by_slot: dict = defaultdict(lambda: {"present": 0, "absent": 0})
     for r in rows:
         by_slot[r["_id"]["slot"] or "Unassigned"][r["_id"]["status"]] = r["count"]
-    coaches = await db.users.find({"role": "coach"}, {"_id": 0, "password_hash": 0}).to_list(500)
+    coaches = await db.users.find(
+        merge_mongo_query({"role": "coach"}, active_status_filter()),
+        {"_id": 0, "password_hash": 0},
+    ).to_list(500)
     pipeline2 = [
         {"$match": {"kind": "player"}},
         {"$group": {"_id": "$sport", "count": {"$sum": 1}}},

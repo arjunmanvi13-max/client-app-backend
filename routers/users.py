@@ -8,6 +8,7 @@ from core import (
     is_admin, is_sports_admin, is_super_admin, has_any_manage_rights, assert_can_manage, MANAGE_KINDS,
     hash_password, public_user, directory_user, now_utc,
     validate_domain_email, default_permissions, PERMISSION_KEYS, format_date_display,
+    active_status_filter, merge_mongo_query,
 )
 from coach_scope import normalize_coach_assignments, ERR_MULTI_SPORT
 from user_classification import (
@@ -171,6 +172,7 @@ APPROVED_LEGACY_ROLES = (
 async def list_users(
     user_type: Optional[str] = None,
     role: Optional[str] = None,
+    include_deactivated: bool = False,
     user: dict = Depends(get_current_user),
 ):
     """Login account listing — Super Admin, or PWS teacher provisioning when permitted."""
@@ -189,17 +191,22 @@ async def list_users(
                 {"user_type": {"$exists": False}, "role": {"$in": list(APPROVED_LEGACY_ROLES)}},
             ]
         }
+    q = merge_mongo_query(q, active_status_filter(include_deactivated))
     docs = await db.users.find(q, {"_id": 0, "password_hash": 0}).sort("name", 1).to_list(1000)
     return docs
 
 
 @router.get("/directory")
-async def directory(role: Optional[str] = None, user: dict = Depends(get_current_user)):
+async def directory(
+    role: Optional[str] = None,
+    include_deactivated: bool = False,
+    user: dict = Depends(get_current_user),
+):
     """Lightweight directory — any authenticated user. No emails/phones."""
     ut = resolve_user_type(user)
     if ut == UserRole.ALPHA_COACH.value or user.get("role") == "coach":
         raise HTTPException(403, "Directory is not available for coach accounts")
-    q = {}
+    q: dict = {}
     if role:
         q["role"] = role
     if is_sports_admin(user):
@@ -207,6 +214,7 @@ async def directory(role: Optional[str] = None, user: dict = Depends(get_current
             return []
         q["role"] = {"$nin": ["principal", "vice_principal", "teacher"]} if not role else q.get("role")
         q["organization"] = {"$in": ["ALPHA", "BOTH"]}
+    q = merge_mongo_query(q, active_status_filter(include_deactivated))
     docs = await db.users.find(q, {"_id": 0}).to_list(1000)
     return [directory_user(u) for u in docs]
 

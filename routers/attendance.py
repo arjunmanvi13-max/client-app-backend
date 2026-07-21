@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from core import (
     db, AttendanceBatch, AttendanceCorrectionIn, get_current_user, now_utc, is_admin,
     assert_perm, get_perm, resolve_user_institution, attendance_entity_filter,
-    attendance_entity_for_kind,
+    attendance_entity_for_kind, active_status_filter, merge_mongo_query,
 )
 
 router = APIRouter(prefix="/attendance", tags=["attendance"])
@@ -198,7 +198,7 @@ async def staff_list(
     centre: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
-    q = await _staff_query_for_user(user, centre=centre, organization=organization)
+    q = merge_mongo_query(await _staff_query_for_user(user, centre=centre, organization=organization), active_status_filter())
     return await db.people.find(q, {"_id": 0}).sort("name", 1).to_list(500)
 
 

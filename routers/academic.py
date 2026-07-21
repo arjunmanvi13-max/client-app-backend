@@ -5,7 +5,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from core import (
     db, get_current_user, is_admin, is_super_admin, get_perm, now_utc,
+    is_login_user_active,
 )
+
+def _assert_teacher_assignable(teacher: dict) -> None:
+    if not is_login_user_active(teacher):
+        raise HTTPException(400, "Cannot assign classes to an inactive teacher account")
+
 
 router = APIRouter(prefix="/academic", tags=["academic"])
 
@@ -422,7 +428,7 @@ async def list_class_assignments(
         section = await db.sections.find_one({"id": r["section_id"]}, {"_id": 0, "label": 1, "grade_name": 1})
         grade = await db.grades.find_one({"id": r["grade_id"]}, {"_id": 0, "name": 1})
         subject = await db.subjects.find_one({"id": r["subject_id"]}, {"_id": 0, "name": 1, "code": 1})
-        teacher = await db.users.find_one({"id": r["teacher_user_id"]}, {"_id": 0, "name": 1, "email": 1})
+        teacher = await db.users.find_one({"id": r["teacher_user_id"]}, {"_id": 0, "name": 1, "email": 1, "status": 1})
         out.append({**r, "section": section, "grade": grade, "subject": subject, "teacher": teacher})
     return out
 
@@ -453,6 +459,7 @@ async def create_class_assignment(payload: ClassAssignmentIn, user: dict = Depen
     teacher = await db.users.find_one({"id": payload.teacher_user_id, "role": "teacher"})
     if not teacher:
         raise HTTPException(404, "Teacher user not found")
+    _assert_teacher_assignable(teacher)
     section = await db.sections.find_one({"id": payload.section_id, "academic_year_id": payload.academic_year_id})
     if not section:
         raise HTTPException(404, "Section not found")
@@ -517,7 +524,7 @@ async def list_teacher_assignments(
     out = []
     for r in rows:
         section = await db.sections.find_one({"id": r["section_id"]}, {"_id": 0, "label": 1, "grade_name": 1})
-        teacher = await db.users.find_one({"id": r["teacher_user_id"]}, {"_id": 0, "name": 1, "email": 1})
+        teacher = await db.users.find_one({"id": r["teacher_user_id"]}, {"_id": 0, "name": 1, "email": 1, "status": 1})
         out.append({**r, "section": section, "teacher": teacher})
     return out
 
@@ -528,6 +535,7 @@ async def create_teacher_assignment(payload: TeacherAssignmentIn, user: dict = D
     teacher = await db.users.find_one({"id": payload.teacher_user_id, "role": "teacher"})
     if not teacher:
         raise HTTPException(404, "Teacher user not found")
+    _assert_teacher_assignable(teacher)
     section = await db.sections.find_one({"id": payload.section_id})
     if not section:
         raise HTTPException(404, "Section not found")
