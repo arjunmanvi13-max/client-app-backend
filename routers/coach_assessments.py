@@ -323,7 +323,7 @@ async def assessment_metadata(user: dict = Depends(get_current_user)):
 # ------------------ Coach entry grid ------------------
 class AssessmentEntryIn(BaseModel):
     player_id: str
-    technical_detail: Optional[Dict[str, Dict[str, int]]] = None
+    technical_detail: Optional[Dict[str, Dict[str, Optional[int]]]] = None
     technical_sub: Optional[Dict[str, int]] = None  # legacy v3 flat scores
     strength_conditioning: Optional[int] = Field(None, ge=0, le=10)
     game_awareness: Optional[int] = Field(None, ge=0, le=10)
