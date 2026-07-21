@@ -9,7 +9,6 @@ from core import (
 )
 from rbac.bridge import RBAC_PERMISSION_GROUPS, RBAC_PERMISSION_LABELS
 from rbac.enums import Permission
-from rbac.guards import assert_manage_access, can_manage_access
 from user_classification import APPROVED_LOGIN_USER_TYPES
 from category_permissions_service import (
     get_category_modules,
@@ -21,7 +20,7 @@ router = APIRouter(tags=["permissions"])
 
 
 def _require_super_admin(user: dict):
-    if not can_manage_access(user):
+    if not is_super_admin(user):
         raise HTTPException(403, "Super Admin only")
 
 
