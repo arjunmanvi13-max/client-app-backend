@@ -76,3 +76,16 @@ def test_add_new_teacher_module_in_catalog():
     teachers = next(m for m in directory["modules"] if m["id"] == "teachers")
     child_ids = [c["id"] for c in teachers.get("children") or []]
     assert "add-new-teacher" in child_ids
+
+
+def test_manage_users_rosters_module_in_system_settings():
+    ids = all_module_ids()
+    assert "manage-users-rosters" in ids
+    catalog = filter_catalog_for_user_type(UserRole.PWS_ADMIN.value)
+    system = next(g for g in catalog if g["id"] == "system")
+    module_ids = [m["id"] for m in system["modules"]]
+    assert "manage-users-rosters" in module_ids
+    defaults = default_enabled_map(UserRole.PWS_ADMIN.value)
+    assert defaults.get("manage-users-rosters") is False
+    super_defaults = default_enabled_map(UserRole.SUPER_ADMIN.value)
+    assert super_defaults.get("manage-users-rosters") is True

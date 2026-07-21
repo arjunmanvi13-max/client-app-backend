@@ -170,7 +170,7 @@ PERMISSION_KEYS = [
     "add_players", "edit_players", "toggle_player_status",
     "add_students", "edit_students",
     # Admin
-    "access_reports", "dashboard_access", "lifecycle_dashboard", "manage_users", "manage_academic_structure",
+    "access_reports", "dashboard_access", "lifecycle_dashboard", "manage_users", "manage_users_rosters", "manage_academic_structure",
     "enter_academic_marks", "view_academic_marks",
     "enter_coach_assessments", "manage_coach_assessments", "view_coach_assessments",
     "enter_coach_assessments", "manage_coach_assessments", "view_coach_assessments",

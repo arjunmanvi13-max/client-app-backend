@@ -10,6 +10,7 @@ ROLE_PERMISSIONS: dict[UserRole, frozenset[Permission]] = {
         Permission.TOGGLE_USER_STATUS,
         Permission.ADD_COACHES,
         Permission.ADD_NEW_TEACHER,
+        Permission.MANAGE_USERS_ROSTERS,
         Permission.MANAGE_COACH_ASSESSMENTS_ADMIN,
         Permission.APPROVE_REQUESTS,
         Permission.CORRECT_ATTENDANCE,

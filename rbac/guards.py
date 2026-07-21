@@ -38,8 +38,15 @@ def can_add_new_teacher(user: dict) -> bool:
     return has_permission(user, Permission.ADD_NEW_TEACHER, entity=BusinessEntity.PWS)
 
 
+def can_manage_users_rosters(user: dict) -> bool:
+    return (
+        has_permission(user, Permission.MANAGE_USERS_ROSTERS)
+        or has_permission(user, Permission.CREATE_USERS)
+    )
+
+
 def assert_can_create_login_user(actor: dict, user_type: str) -> None:
-    if can_create_users(actor):
+    if can_manage_users_rosters(actor):
         return
     if user_type == UserRole.PWS_TEACHER.value and can_add_new_teacher(actor):
         return
@@ -47,7 +54,7 @@ def assert_can_create_login_user(actor: dict, user_type: str) -> None:
 
 
 def assert_can_list_login_users(actor: dict, user_type: Optional[str] = None) -> None:
-    if can_create_users(actor):
+    if can_manage_users_rosters(actor):
         return
     if user_type == UserRole.PWS_TEACHER.value and can_add_new_teacher(actor):
         return

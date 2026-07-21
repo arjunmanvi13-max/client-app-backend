@@ -57,6 +57,7 @@ RBAC_PERMISSION_GROUPS: dict[str, list[str]] = {
         Permission.TOGGLE_USER_STATUS.value,
         Permission.ADD_COACHES.value,
         Permission.ADD_NEW_TEACHER.value,
+        Permission.MANAGE_USERS_ROSTERS.value,
     ],
     "PWS Admin": [
         Permission.MARK_PWS_ATTENDANCE.value,
@@ -110,6 +111,7 @@ RBAC_PERMISSION_LABELS: dict[str, str] = {
     Permission.TOGGLE_USER_STATUS.value: "Activate / deactivate users",
     Permission.ADD_COACHES.value: "Add coaches",
     Permission.ADD_NEW_TEACHER.value: "Add new teacher",
+    Permission.MANAGE_USERS_ROSTERS.value: "Manage users & rosters",
     Permission.MARK_PWS_ATTENDANCE.value: "Mark PWS attendance",
     Permission.MANAGE_TEACHERS_MAP_SUBJECTS.value: "Map teachers to subjects",
     Permission.CREATE_TEACHER_TASKS.value: "Create teacher tasks",

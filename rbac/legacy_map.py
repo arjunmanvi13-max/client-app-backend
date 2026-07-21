@@ -10,6 +10,7 @@ PERMISSION_TO_LEGACY: dict[Permission, tuple[str, ...]] = {
     Permission.TOGGLE_USER_STATUS: ("toggle_player_status", "approve_deactivation"),
     Permission.ADD_COACHES: ("manage_users",),
     Permission.ADD_NEW_TEACHER: ("manage_users",),
+    Permission.MANAGE_USERS_ROSTERS: ("manage_users_rosters", "manage_users"),
 
     Permission.MARK_PWS_ATTENDANCE: (
         "mark_student_attendance",
