@@ -34,6 +34,26 @@ def can_create_users(user: dict) -> bool:
     return has_permission(user, Permission.CREATE_USERS)
 
 
+def can_add_new_teacher(user: dict) -> bool:
+    return has_permission(user, Permission.ADD_NEW_TEACHER, entity=BusinessEntity.PWS)
+
+
+def assert_can_create_login_user(actor: dict, user_type: str) -> None:
+    if can_create_users(actor):
+        return
+    if user_type == UserRole.PWS_TEACHER.value and can_add_new_teacher(actor):
+        return
+    raise HTTPException(403, "Only Super Admin can create login user accounts")
+
+
+def assert_can_list_login_users(actor: dict, user_type: Optional[str] = None) -> None:
+    if can_create_users(actor):
+        return
+    if user_type == UserRole.PWS_TEACHER.value and can_add_new_teacher(actor):
+        return
+    raise HTTPException(403, "Super Admin only")
+
+
 def can_bulk_upload(user: dict) -> bool:
     return has_permission(user, Permission.BULK_UPLOAD_USERS)
 

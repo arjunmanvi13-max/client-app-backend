@@ -21,7 +21,7 @@ from user_classification import (
     CATALOG_BY_CODE,
 )
 from rbac.enums import UserRole
-from rbac.guards import can_manage_academic
+from rbac.guards import can_manage_academic, assert_can_create_login_user, assert_can_list_login_users
 from teacher_profile_pdf import render_teacher_profile_pdf
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -173,9 +173,8 @@ async def list_users(
     role: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
-    """Login account listing — Super Admin only (Settings > Manage)."""
-    if not is_super_admin(user):
-        raise HTTPException(403, "Super Admin only")
+    """Login account listing — Super Admin, or PWS teacher provisioning when permitted."""
+    assert_can_list_login_users(user, user_type)
     if user_type:
         if user_type not in APPROVED_LOGIN_USER_TYPES:
             raise HTTPException(400, f"Invalid user type: {user_type}")
@@ -214,8 +213,7 @@ async def directory(role: Optional[str] = None, user: dict = Depends(get_current
 
 @router.post("")
 async def create_user(payload: UserCreate, user: dict = Depends(get_current_user)):
-    if not is_super_admin(user):
-        raise HTTPException(403, "Only Super Admin can create login user accounts")
+    assert_can_create_login_user(user, payload.user_type)
     if payload.user_type == UserRole.SUPER_ADMIN.value:
         raise HTTPException(403, "Super Admin accounts are seed-managed and cannot be created via API")
 

@@ -82,8 +82,13 @@ MODULE_GROUPS: List[Dict[str, Any]] = [
                 _mod("coaches", "Coaches", permission_keys=["manage_users"], rbac=[Permission.MANAGE_COACHES.value, Permission.CREATE_USERS.value],
                       user_types=[UserRole.SUPER_ADMIN.value, UserRole.ALPHA_ADMIN.value]),
             ]),
-            _mod("teachers", "Teachers", permission_keys=["manage_users", "view_students"], rbac=[Permission.MANAGE_TEACHERS_MAP_SUBJECTS.value, Permission.CREATE_USERS.value],
-                  pws_only=True, user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value]),
+            _mod("teachers", "Teachers", children=[
+                _mod("teachers-directory", "Teachers", permission_keys=["manage_users", "view_students"],
+                      rbac=[Permission.MANAGE_TEACHERS_MAP_SUBJECTS.value, Permission.CREATE_USERS.value],
+                      pws_only=True, user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value]),
+                _mod("add-new-teacher", "Add New Teacher", rbac=[Permission.ADD_NEW_TEACHER.value],
+                      pws_only=True, user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value]),
+            ], pws_only=True, user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value]),
             _mod("students-players", "Students & Players", children=[
                 _mod("students", "Students", permission_keys=["view_students", "add_students", "edit_students"], rbac=[Permission.ADD_PWS_STUDENTS.value],
                       pws_only=True, user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value, UserRole.PWS_ACCOUNTS.value]),
@@ -217,7 +222,7 @@ DEFAULT_ENABLED_MODULES: Dict[str, Set[str]] = {
     UserRole.SUPER_ADMIN.value: set(all_module_ids()),
     UserRole.PWS_ADMIN.value: {
         "dashboard", "reports", "approvals", "tasks",
-        "directory-master", "staff", "teachers", "students",
+        "directory-master", "staff", "teachers-directory", "students",
         "attendance-take", "attendance-reports", "hostel",
         "academic-structure", "marks-entry", "marks-setup", "report-cards", "coach-assessments",
         "settings", "notifications",
