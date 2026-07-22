@@ -55,3 +55,13 @@ async def dashboard_mvp(
     if entity and not is_super_admin(user):
         entity = None
     return await build_mvp_dashboard(user, entity)
+
+
+@router.get("/dashboard/super-admin-metrics")
+async def dashboard_super_admin_metrics(
+    user: dict = Depends(get_current_user),
+    entity: Optional[str] = Query(None, description="pws | alpha | both"),
+):
+    from academy_structure import assert_super_admin, build_super_admin_metrics
+    assert_super_admin(user)
+    return await build_super_admin_metrics(entity)
