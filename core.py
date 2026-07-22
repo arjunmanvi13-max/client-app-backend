@@ -211,11 +211,15 @@ def is_principal_user(user: dict) -> bool:
     return designation == "PRINCIPAL"
 
 
+def normalize_aadhaar_number(raw: Optional[str]) -> str:
+    return "".join(ch for ch in (raw or "") if ch.isalnum()).upper()
+
+
 def mask_aadhaar_number(raw: Optional[str]) -> Optional[str]:
-    digits = "".join(ch for ch in (raw or "") if ch.isdigit())
-    if len(digits) != 12:
+    normalized = normalize_aadhaar_number(raw)
+    if len(normalized) != 12:
         return None
-    return f"XXXX-XXXX-{digits[-4:]}"
+    return f"XXXX-XXXX-{normalized[-4:]}"
 
 
 TEACHER_QUALIFICATIONS = frozenset({"B.Ed", "Bachelor's Degree", "Master's Degree", "Other"})
@@ -780,10 +784,10 @@ class DirectoryTeacherCreate(BaseModel):
     @field_validator("aadhaar_number")
     @classmethod
     def _validate_aadhaar(cls, v: str) -> str:
-        digits = "".join(ch for ch in (v or "") if ch.isdigit())
-        if len(digits) != 12:
-            raise ValueError("Aadhaar number must be exactly 12 digits")
-        return digits
+        normalized = normalize_aadhaar_number(v)
+        if len(normalized) != 12:
+            raise ValueError("Aadhaar number must be exactly 12 alphanumeric characters")
+        return normalized
 
     @field_validator("date_of_birth")
     @classmethod

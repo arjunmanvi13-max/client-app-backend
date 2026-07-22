@@ -8,7 +8,7 @@ from core import (
     is_admin, is_sports_admin, is_super_admin, has_any_manage_rights, assert_can_manage, MANAGE_KINDS,
     hash_password, public_user, directory_user, now_utc,
     validate_domain_email, default_permissions, PERMISSION_KEYS, format_date_display,
-    active_status_filter, merge_mongo_query,
+    active_status_filter, merge_mongo_query, normalize_aadhaar_number,
 )
 from coach_scope import normalize_coach_assignments, ERR_MULTI_SPORT
 from user_classification import (
@@ -77,10 +77,10 @@ def _apply_teacher_profile_fields(doc: dict, fields: dict, *, user_type: Optiona
     if "personal_email" in fields and fields["personal_email"] is not None:
         doc["personal_email"] = str(fields["personal_email"]).strip().lower()
     if "aadhaar_number" in fields and fields["aadhaar_number"] is not None:
-        digits = "".join(ch for ch in str(fields["aadhaar_number"]) if ch.isdigit())
-        if len(digits) != 12:
-            raise HTTPException(400, "Aadhaar number must be exactly 12 digits")
-        doc["aadhaar_number"] = digits
+        normalized = normalize_aadhaar_number(str(fields["aadhaar_number"]))
+        if len(normalized) != 12:
+            raise HTTPException(400, "Aadhaar number must be exactly 12 alphanumeric characters")
+        doc["aadhaar_number"] = normalized
     if "qualification" in fields and fields["qualification"] is not None:
         doc["qualification"] = fields["qualification"]
     if "qualification_other" in fields:
