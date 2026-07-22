@@ -13,6 +13,10 @@ from core import (
 
 ACADEMY_CATEGORIES = ["Day Boarding", "Boarding", "Hostel", "Daily Players"]
 
+PWS_REVENUE_CATEGORIES = ["Day Students", "Boarding Students"]
+
+ALPHA_REVENUE_CATEGORIES = ACADEMY_CATEGORIES
+
 PWS_CLASS_KEYS = [
     "nursery", "lkg", "ukg",
     "std1", "std2", "std3", "std4", "std5",
@@ -104,6 +108,27 @@ def map_enrollment_category(kind: str, raw: Optional[str]) -> Optional[str]:
 
 def map_fee_category(raw: Optional[str]) -> Optional[str]:
     return map_enrollment_category("", raw)
+
+
+def map_pws_revenue_bucket(fee: dict, person: Optional[dict]) -> str:
+    """Bucket PWS fee rows into school student categories for dashboard display."""
+    if person and person.get("kind") == "student":
+        st = (person.get("pws_student_type") or "").strip()
+        if st == "Boarding":
+            return "Boarding Students"
+        if st in ("Day School", "Day Boarding"):
+            return "Day Students"
+        if person.get("is_resident"):
+            return "Boarding Students"
+    cat = (fee.get("category") or "").strip()
+    if cat in ("Hostel", "Boarding"):
+        return "Boarding Students"
+    if cat in ("Day Scholar", "Day School", "Day Boarding", "Students", "Tuition"):
+        return "Day Students"
+    fee_type = (fee.get("fee_type") or "").strip()
+    if fee_type == "Hostel":
+        return "Boarding Students"
+    return "Day Students"
 
 
 async def get_pws_baselines() -> Dict[str, int]:
@@ -266,10 +291,95 @@ async def _fee_base_match(inst: str) -> dict:
 
 async def _revenue_metrics(inst: str, this_month: str) -> dict:
     base = await _fee_base_match(inst)
+    if inst == "PWS":
+        return await _revenue_metrics_pws(base, this_month)
+    if inst == "ALPHA":
+        return await _revenue_metrics_alpha(base, this_month)
+    return await _revenue_metrics_combined(base, this_month)
+
+
+async def _revenue_metrics_pws(base: dict, this_month: str) -> dict:
+    by_category: Dict[str, dict] = {
+        cat: {"expected": 0, "collected": 0, "gap": 0} for cat in PWS_REVENUE_CATEGORIES
+    }
+    rows = await db.fees.find(
+        {**base, "period_month": this_month},
+        {"_id": 0, "category": 1, "amount_due": 1, "status": 1, "player_id": 1, "fee_type": 1},
+    ).to_list(10000)
+
+    player_ids = list({r["player_id"] for r in rows if r.get("player_id")})
+    people: Dict[str, dict] = {}
+    if player_ids:
+        for person in await db.people.find(
+            {"id": {"$in": player_ids}},
+            {"_id": 0, "id": 1, "kind": 1, "pws_student_type": 1, "is_resident": 1},
+        ).to_list(len(player_ids)):
+            people[person["id"]] = person
+
+    expected_total = 0
+    collected_total = 0
+    for row in rows:
+        amount = int(row.get("amount_due") or 0)
+        bucket = map_pws_revenue_bucket(row, people.get(row.get("player_id")))
+        by_category[bucket]["expected"] += amount
+        expected_total += amount
+        if row.get("status") == "paid":
+            by_category[bucket]["collected"] += amount
+            collected_total += amount
+
+    for cat in PWS_REVENUE_CATEGORIES:
+        by_category[cat]["gap"] = by_category[cat]["expected"] - by_category[cat]["collected"]
+
+    return {
+        "expected_monthly": expected_total,
+        "collected_monthly": collected_total,
+        "collection_gap": expected_total - collected_total,
+        "by_category": [
+            {"category": cat, **by_category[cat]} for cat in PWS_REVENUE_CATEGORIES
+        ],
+    }
+
+
+async def _revenue_metrics_alpha(base: dict, this_month: str) -> dict:
+    by_category: Dict[str, dict] = {
+        cat: {"expected": 0, "collected": 0, "gap": 0} for cat in ALPHA_REVENUE_CATEGORIES
+    }
+    rows = await db.fees.find(
+        {**base, "period_month": this_month},
+        {"_id": 0, "category": 1, "amount_due": 1, "status": 1},
+    ).to_list(10000)
+
+    expected_total = 0
+    collected_total = 0
+    for row in rows:
+        amount = int(row.get("amount_due") or 0)
+        cat = map_fee_category(row.get("category")) or "Daily Players"
+        if cat not in by_category:
+            by_category[cat] = {"expected": 0, "collected": 0, "gap": 0}
+        by_category[cat]["expected"] += amount
+        expected_total += amount
+        if row.get("status") == "paid":
+            by_category[cat]["collected"] += amount
+            collected_total += amount
+
+    for cat in ALPHA_REVENUE_CATEGORIES:
+        vals = by_category[cat]
+        vals["gap"] = vals["expected"] - vals["collected"]
+
+    return {
+        "expected_monthly": expected_total,
+        "collected_monthly": collected_total,
+        "collection_gap": expected_total - collected_total,
+        "by_category": [
+            {"category": cat, **by_category[cat]} for cat in ALPHA_REVENUE_CATEGORIES
+        ],
+    }
+
+
+async def _revenue_metrics_combined(base: dict, this_month: str) -> dict:
     by_category: Dict[str, dict] = {
         cat: {"expected": 0, "collected": 0, "gap": 0} for cat in ACADEMY_CATEGORIES
     }
-
     rows = await db.fees.find(
         {**base, "period_month": this_month},
         {"_id": 0, "category": 1, "amount_due": 1, "status": 1},
