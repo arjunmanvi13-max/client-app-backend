@@ -45,6 +45,12 @@ api.include_router(fee_catalog.router)
 async def root():
     return {"app": "PWS & ALPHA Tracker", "status": "ok"}
 
+
+@api.get("/health")
+async def health():
+    """Lightweight liveness probe — no DB access."""
+    return {"status": "ok"}
+
 app.include_router(api)
 
 app.add_middleware(

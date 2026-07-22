@@ -6,6 +6,9 @@ from fastapi import HTTPException
 from rbac.authorization import assert_permission, has_permission, normalize_role
 from rbac.enums import BusinessEntity, Permission, UserRole
 
+# Imported after core is initialised by router modules (users imports core before guards).
+from core import is_principal_user, is_super_admin
+
 
 def _entity(org: Optional[str]) -> Optional[BusinessEntity]:
     if not org:
@@ -59,14 +62,12 @@ def assert_can_list_login_users(actor: dict, user_type: Optional[str] = None, *,
     if user_type == UserRole.PWS_TEACHER.value and can_add_new_teacher(actor):
         return
     if role == "teacher":
-        from core import is_super_admin, is_principal_user
         if is_super_admin(actor) or is_principal_user(actor) or can_manage_academic(actor):
             return
     raise HTTPException(403, "Super Admin only")
 
 
 def assert_can_create_directory_teacher(actor: dict) -> None:
-    from core import is_super_admin, is_principal_user
     if is_super_admin(actor) or is_principal_user(actor):
         return
     raise HTTPException(403, "Only Super Admin or Principal can add directory teachers")
