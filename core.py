@@ -15,7 +15,7 @@ import bcrypt
 import jwt
 from fastapi import Depends, HTTPException, Request
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator, model_validator
 
 # ------------------ DB ------------------
 mongo_url = os.environ["MONGO_URL"]
@@ -200,6 +200,25 @@ def is_super_admin(user: dict) -> bool:
         return resolve_user_type(user) == UserRole.SUPER_ADMIN.value
     except Exception:
         return False
+
+
+def is_principal_user(user: dict) -> bool:
+    """PWS Principal — not Vice Principal or generic PWS Admin without designation."""
+    legacy = (user.get("role") or "").strip().lower()
+    if legacy == "principal":
+        return True
+    designation = (user.get("designation") or "").strip().upper()
+    return designation == "PRINCIPAL"
+
+
+def mask_aadhaar_number(raw: Optional[str]) -> Optional[str]:
+    digits = "".join(ch for ch in (raw or "") if ch.isdigit())
+    if len(digits) != 12:
+        return None
+    return f"XXXX-XXXX-{digits[-4:]}"
+
+
+TEACHER_QUALIFICATIONS = frozenset({"B.Ed", "Bachelor's Degree", "Master's Degree", "Other"})
 
 # ------------------ Permission System ------------------
 PERMISSION_KEYS = [
@@ -662,7 +681,18 @@ def public_user(u: dict) -> dict:
         "designation": u.get("designation"),
         "teacher_designation": u.get("teacher_designation"),
         "date_of_joining": u.get("date_of_joining"),
+        "date_of_birth": u.get("date_of_birth"),
         "address": u.get("address"),
+        "personal_email": u.get("personal_email"),
+        "qualification": u.get("qualification"),
+        "qualification_other": u.get("qualification_other"),
+        "last_job": u.get("last_job"),
+        "guardian_name": u.get("guardian_name"),
+        "guardian_mobile": u.get("guardian_mobile"),
+        "reference_name": u.get("reference_name"),
+        "reference_mobile": u.get("reference_mobile"),
+        "has_login_account": bool(u.get("has_login_account", u.get("email"))),
+        "aadhaar_number_masked": mask_aadhaar_number(u.get("aadhaar_number")),
         "entity_scope": u.get("entity_scope"),
         "legacy_role": u.get("legacy_role"),
         "requires_user_type_review": bool(u.get("requires_user_type_review")),
@@ -724,6 +754,62 @@ class UserCreate(BaseModel):
     address: Optional[str] = None
     teacher_designation: Optional[Literal["CLASS_TEACHER", "TEACHER"]] = None
 
+class DirectoryTeacherCreate(BaseModel):
+    name: str
+    date_of_birth: str
+    address: str
+    mobile: str
+    personal_email: EmailStr
+    aadhaar_number: str
+    qualification: Literal["B.Ed", "Bachelor's Degree", "Master's Degree", "Other"]
+    qualification_other: Optional[str] = None
+    last_job: str
+    guardian_name: str
+    guardian_mobile: str
+    reference_name: str
+    reference_mobile: str
+
+    @field_validator("name", "address", "last_job", "guardian_name", "reference_name")
+    @classmethod
+    def _strip_required_text(cls, v: str) -> str:
+        s = (v or "").strip()
+        if not s:
+            raise ValueError("This field is required")
+        return s
+
+    @field_validator("aadhaar_number")
+    @classmethod
+    def _validate_aadhaar(cls, v: str) -> str:
+        digits = "".join(ch for ch in (v or "") if ch.isdigit())
+        if len(digits) != 12:
+            raise ValueError("Aadhaar number must be exactly 12 digits")
+        return digits
+
+    @field_validator("date_of_birth")
+    @classmethod
+    def _validate_dob(cls, v: str) -> str:
+        s = (v or "").strip()
+        if not s:
+            raise ValueError("Date of birth is required")
+        if len(s) == 10 and s[4] == "-" and s[7] == "-":
+            return s
+        import re
+        m = re.match(r"^(\d{2})/(\d{2})/(\d{4})$", s)
+        if not m:
+            raise ValueError("Date of birth must be YYYY-MM-DD or DD/MM/YYYY")
+        return f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
+
+    @model_validator(mode="after")
+    def _validate_qualification_other(self):
+        if self.qualification == "Other":
+            other = (self.qualification_other or "").strip()
+            if not other:
+                raise ValueError("Specify qualification when Other is selected")
+            self.qualification_other = other
+        else:
+            self.qualification_other = None
+        return self
+
 class UserUpdate(BaseModel):
     name: Optional[str] = None
     email: Optional[EmailStr] = None
@@ -747,7 +833,17 @@ class UserUpdate(BaseModel):
     linked_person_ids: Optional[List[str]] = None
     permissions: Optional[dict] = None
     date_of_joining: Optional[str] = None
+    date_of_birth: Optional[str] = None
     address: Optional[str] = None
+    personal_email: Optional[EmailStr] = None
+    aadhaar_number: Optional[str] = None
+    qualification: Optional[Literal["B.Ed", "Bachelor's Degree", "Master's Degree", "Other"]] = None
+    qualification_other: Optional[str] = None
+    last_job: Optional[str] = None
+    guardian_name: Optional[str] = None
+    guardian_mobile: Optional[str] = None
+    reference_name: Optional[str] = None
+    reference_mobile: Optional[str] = None
     teacher_designation: Optional[Literal["CLASS_TEACHER", "TEACHER"]] = None
 
 class PersonCreate(BaseModel):

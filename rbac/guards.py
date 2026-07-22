@@ -53,12 +53,23 @@ def assert_can_create_login_user(actor: dict, user_type: str) -> None:
     raise HTTPException(403, "Only Super Admin can create login user accounts")
 
 
-def assert_can_list_login_users(actor: dict, user_type: Optional[str] = None) -> None:
+def assert_can_list_login_users(actor: dict, user_type: Optional[str] = None, *, role: Optional[str] = None) -> None:
     if can_manage_users_rosters(actor):
         return
     if user_type == UserRole.PWS_TEACHER.value and can_add_new_teacher(actor):
         return
+    if role == "teacher":
+        from core import is_super_admin, is_principal_user
+        if is_super_admin(actor) or is_principal_user(actor) or can_manage_academic(actor):
+            return
     raise HTTPException(403, "Super Admin only")
+
+
+def assert_can_create_directory_teacher(actor: dict) -> None:
+    from core import is_super_admin, is_principal_user
+    if is_super_admin(actor) or is_principal_user(actor):
+        return
+    raise HTTPException(403, "Only Super Admin or Principal can add directory teachers")
 
 
 def can_bulk_upload(user: dict) -> bool:

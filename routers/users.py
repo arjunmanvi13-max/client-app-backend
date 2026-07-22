@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel
 from core import (
-    db, UserCreate, UserUpdate, get_current_user,
+    db, UserCreate, UserUpdate, DirectoryTeacherCreate, get_current_user,
     is_admin, is_sports_admin, is_super_admin, has_any_manage_rights, assert_can_manage, MANAGE_KINDS,
     hash_password, public_user, directory_user, now_utc,
     validate_domain_email, default_permissions, PERMISSION_KEYS, format_date_display,
@@ -22,7 +22,12 @@ from user_classification import (
     CATALOG_BY_CODE,
 )
 from rbac.enums import UserRole
-from rbac.guards import can_manage_academic, assert_can_create_login_user, assert_can_list_login_users
+from rbac.guards import (
+    can_manage_academic,
+    assert_can_create_login_user,
+    assert_can_create_directory_teacher,
+    assert_can_list_login_users,
+)
 from teacher_profile_pdf import render_teacher_profile_pdf
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -64,9 +69,33 @@ def _apply_teacher_profile_fields(doc: dict, fields: dict, *, user_type: Optiona
     ut = user_type or doc.get("user_type") or resolve_user_type(doc)
     if "date_of_joining" in fields and fields["date_of_joining"] is not None:
         doc["date_of_joining"] = fields["date_of_joining"]
+    if "date_of_birth" in fields and fields["date_of_birth"] is not None:
+        doc["date_of_birth"] = fields["date_of_birth"]
     if "address" in fields:
         addr = (fields.get("address") or "").strip()
         doc["address"] = addr or None
+    if "personal_email" in fields and fields["personal_email"] is not None:
+        doc["personal_email"] = str(fields["personal_email"]).strip().lower()
+    if "aadhaar_number" in fields and fields["aadhaar_number"] is not None:
+        digits = "".join(ch for ch in str(fields["aadhaar_number"]) if ch.isdigit())
+        if len(digits) != 12:
+            raise HTTPException(400, "Aadhaar number must be exactly 12 digits")
+        doc["aadhaar_number"] = digits
+    if "qualification" in fields and fields["qualification"] is not None:
+        doc["qualification"] = fields["qualification"]
+    if "qualification_other" in fields:
+        other = (fields.get("qualification_other") or "").strip()
+        doc["qualification_other"] = other or None
+    if "last_job" in fields and fields["last_job"] is not None:
+        doc["last_job"] = (fields["last_job"] or "").strip() or None
+    if "guardian_name" in fields and fields["guardian_name"] is not None:
+        doc["guardian_name"] = (fields["guardian_name"] or "").strip() or None
+    if "guardian_mobile" in fields and fields["guardian_mobile"] is not None:
+        doc["guardian_mobile"] = _normalize_mobile(fields["guardian_mobile"])
+    if "reference_name" in fields and fields["reference_name"] is not None:
+        doc["reference_name"] = (fields["reference_name"] or "").strip() or None
+    if "reference_mobile" in fields and fields["reference_mobile"] is not None:
+        doc["reference_mobile"] = _normalize_mobile(fields["reference_mobile"])
     if "teacher_designation" in fields:
         td = fields.get("teacher_designation")
         if td:
@@ -176,7 +205,7 @@ async def list_users(
     user: dict = Depends(get_current_user),
 ):
     """Login account listing — Super Admin, or PWS teacher provisioning when permitted."""
-    assert_can_list_login_users(user, user_type)
+    assert_can_list_login_users(user, user_type, role=role)
     if user_type:
         if user_type not in APPROVED_LOGIN_USER_TYPES:
             raise HTTPException(400, f"Invalid user type: {user_type}")
@@ -193,7 +222,15 @@ async def list_users(
         }
     q = merge_mongo_query(q, active_status_filter(include_deactivated))
     docs = await db.users.find(q, {"_id": 0, "password_hash": 0}).sort("name", 1).to_list(1000)
-    return docs
+    from core import mask_aadhaar_number
+    rows = []
+    for doc in docs:
+        row = dict(doc)
+        if row.get("aadhaar_number"):
+            row["aadhaar_number_masked"] = mask_aadhaar_number(row["aadhaar_number"])
+            row.pop("aadhaar_number", None)
+        rows.append(row)
+    return rows
 
 
 @router.get("/directory")
@@ -311,6 +348,66 @@ async def create_user(payload: UserCreate, user: dict = Depends(get_current_user
     return public_user(doc)
 
 
+@router.post("/directory-teachers")
+async def create_directory_teacher(payload: DirectoryTeacherCreate, user: dict = Depends(get_current_user)):
+    """Create a PWS teacher profile for the Directory roster (no login account yet)."""
+    assert_can_create_directory_teacher(user)
+
+    mobile = _normalize_mobile(payload.mobile)
+    guardian_mobile = _normalize_mobile(payload.guardian_mobile)
+    reference_mobile = _normalize_mobile(payload.reference_mobile)
+    personal_email = str(payload.personal_email).strip().lower()
+
+    if await db.users.find_one({"mobile": mobile}):
+        raise HTTPException(400, "Mobile already exists")
+    if await db.users.find_one({"personal_email": personal_email}):
+        raise HTTPException(400, "Personal email already exists")
+    if await db.users.find_one({"aadhaar_number": payload.aadhaar_number}):
+        raise HTTPException(400, "Aadhaar number already exists")
+
+    legacy_role = "teacher"
+    perms = default_permissions(legacy_role)
+
+    doc = {
+        "id": str(uuid.uuid4()),
+        "name": payload.name.strip(),
+        "role": legacy_role,
+        "legacy_role": legacy_role,
+        "organization": "PWS",
+        "entity_scope": "PWS",
+        "can_manage": [],
+        "permissions": perms,
+        "permissions_rbac": {},
+        "status": "active",
+        "is_active": True,
+        "has_login_account": False,
+        "personal_email": personal_email,
+        "mobile": mobile,
+        "date_of_birth": payload.date_of_birth,
+        "address": payload.address.strip(),
+        "aadhaar_number": payload.aadhaar_number,
+        "qualification": payload.qualification,
+        "qualification_other": payload.qualification_other,
+        "last_job": payload.last_job.strip(),
+        "guardian_name": payload.guardian_name.strip(),
+        "guardian_mobile": guardian_mobile,
+        "reference_name": payload.reference_name.strip(),
+        "reference_mobile": reference_mobile,
+        "teacher_designation": "TEACHER",
+        "created_at": now_utc().isoformat(),
+    }
+    apply_user_type_fields(doc, user_type=UserRole.PWS_TEACHER.value)
+    await db.users.insert_one(doc)
+    await _log_user_type_audit(
+        action="directory_teacher_created",
+        target=doc,
+        actor=user,
+        new_user_type=doc.get("user_type"),
+        new_designation=doc.get("designation"),
+    )
+    return public_user(doc)
+
+
 @router.patch("/{user_id}")
 async def update_user(user_id: str, payload: UserUpdate, user: dict = Depends(get_current_user)):
     target = await db.users.find_one({"id": user_id})
@@ -373,7 +470,11 @@ async def update_user(user_id: str, payload: UserUpdate, user: dict = Depends(ge
     merged = {**target, **upd, **body}
     new_user_type = body.get("user_type") or prev_user_type
     new_designation = body.get("designation", target.get("designation"))
-    teacher_field_keys = ("date_of_joining", "address", "teacher_designation")
+    teacher_field_keys = (
+        "date_of_joining", "date_of_birth", "address", "teacher_designation",
+        "personal_email", "aadhaar_number", "qualification", "qualification_other",
+        "last_job", "guardian_name", "guardian_mobile", "reference_name", "reference_mobile",
+    )
     if any(k in body for k in teacher_field_keys):
         _apply_teacher_profile_fields(merged, body, user_type=new_user_type)
         for k in teacher_field_keys:
