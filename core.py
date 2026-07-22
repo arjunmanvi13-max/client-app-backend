@@ -957,7 +957,9 @@ class TaskCreate(BaseModel):
     assignee_id: Optional[str] = None
     assignee_ids: List[str] = []
     department: Optional[str] = None
+    category: Optional[str] = None
     follow_up_required: bool = False
+    proof_url: Optional[str] = None
 
 class TaskUpdate(BaseModel):
     title: Optional[str] = None
@@ -968,6 +970,8 @@ class TaskUpdate(BaseModel):
     deadline: Optional[datetime] = None
     assignee_id: Optional[str] = None
     assignee_ids: Optional[List[str]] = None
+    department: Optional[str] = None
+    category: Optional[str] = None
     status: Optional[Literal["open", "in_progress", "blocked", "completed", "cancelled", "assigned", "delayed", "reviewed"]] = None
     completion_remark: Optional[str] = None
     proof_url: Optional[str] = None

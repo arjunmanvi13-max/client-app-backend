@@ -99,9 +99,13 @@ async def create_task(payload: TaskCreate, user: dict = Depends(get_current_user
     await assert_assignable_user_ids(assignee_ids)
     due_date = _resolve_due_date(payload)
     assignee_name = None
+    assignee_role = None
     if assignee_id:
-        assignee = await db.users.find_one({"id": assignee_id}, {"_id": 0, "name": 1})
-        assignee_name = assignee["name"] if assignee else None
+        assignee = await db.users.find_one({"id": assignee_id}, {"_id": 0, "name": 1, "role": 1})
+        if assignee:
+            assignee_name = assignee.get("name")
+            assignee_role = assignee.get("role")
+    category = (payload.category or payload.department or "").strip() or None
     doc = {
         "id": str(uuid.uuid4()),
         "title": payload.title.strip(),
@@ -112,12 +116,16 @@ async def create_task(payload: TaskCreate, user: dict = Depends(get_current_user
         "deadline": due_date,
         "assignee_id": assignee_id,
         "assignee_name": assignee_name,
+        "assignee_role": assignee_role,
         "assignee_ids": assignee_ids,
-        "department": payload.department,
+        "department": category or payload.department,
+        "category": category or payload.department,
         "follow_up_required": payload.follow_up_required,
+        "proof_url": payload.proof_url,
         "status": "open",
         "created_by": user["id"],
         "created_by_name": user["name"],
+        "created_by_role": user.get("role"),
         "created_at": now_utc().isoformat(),
         "updated_at": now_utc().isoformat(),
         "completed_at": None,
@@ -144,15 +152,20 @@ async def create_task(payload: TaskCreate, user: dict = Depends(get_current_user
 @router.get("")
 async def list_tasks(
     mine: bool = False,
+    assigned_to_me: bool = False,
+    created_by_me: bool = False,
     status: Optional[str] = None,
     priority: Optional[str] = None,
     entity_id: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
     q = _task_visibility_filter(user)
-    if mine:
+    if mine or assigned_to_me:
         mine_q = {"$or": [{"assignee_id": user["id"]}, {"assignee_ids": user["id"]}]}
         q = {"$and": [q, mine_q]} if q else mine_q
+    if created_by_me:
+        created_q = {"created_by": user["id"]}
+        q = {"$and": [q, created_q]} if q else created_q
     if status:
         normalized = _normalize_status(status)
         legacy = [status] if status != normalized else []
@@ -211,13 +224,47 @@ async def update_task(task_id: str, payload: TaskUpdate, user: dict = Depends(ge
         upd["assignee_id"] = assignee_id
         upd["assignee_ids"] = assignee_ids
         if assignee_id:
-            assignee = await db.users.find_one({"id": assignee_id}, {"_id": 0, "name": 1})
-            upd["assignee_name"] = assignee["name"] if assignee else None
+            assignee = await db.users.find_one({"id": assignee_id}, {"_id": 0, "name": 1, "role": 1})
+            upd["assignee_name"] = assignee.get("name") if assignee else None
+            upd["assignee_role"] = assignee.get("role") if assignee else None
+
+    if "category" in upd or "department" in upd:
+        category = (upd.get("category") or upd.get("department") or "").strip() or None
+        if category:
+            upd["category"] = category
+            upd["department"] = category
 
     upd["updated_at"] = now_utc().isoformat()
     await db.tasks.update_one({"id": task_id}, {"$set": upd})
     doc = await db.tasks.find_one({"id": task_id}, {"_id": 0})
     return _task_out(doc)
+
+
+@router.post("/{task_id}/nudge")
+async def nudge_task(task_id: str, user: dict = Depends(get_current_user)):
+    existing = await db.tasks.find_one({"id": task_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Task not found")
+    _assert_task_access(user, existing)
+    if existing.get("created_by") != user["id"] and not _can_supervise_tasks(user):
+        raise HTTPException(403, "Only the task creator can send reminders")
+    assignee_ids = list(dict.fromkeys(existing.get("assignee_ids") or []))
+    if existing.get("assignee_id") and existing["assignee_id"] not in assignee_ids:
+        assignee_ids.insert(0, existing["assignee_id"])
+    assignee_ids = [aid for aid in assignee_ids if aid and aid != user["id"]]
+    if not assignee_ids:
+        raise HTTPException(400, "No assignees to remind")
+    for aid in assignee_ids:
+        await send_notification(
+            aid,
+            ntype="task_reminder",
+            title="Task reminder",
+            message=existing.get("title") or "You have a pending task",
+            ref_id=existing["id"],
+            ref_type="task",
+            entity_id=existing.get("entity_id"),
+        )
+    return {"ok": True, "nudged": len(assignee_ids)}
 
 
 @router.post("/{task_id}/comments")
