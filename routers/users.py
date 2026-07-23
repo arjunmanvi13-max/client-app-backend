@@ -599,6 +599,31 @@ async def deactivate_user(user_id: str, user: dict = Depends(get_current_user)):
         raise HTTPException(403, "Not permitted to deactivate this account")
     if target.get("role") == "super_admin":
         raise HTTPException(400, "Cannot deactivate Super Admin")
+
+    from routers.approvals import _can_approve, _approval_out, _insert_deactivation_approval
+    from approval_types import entity_from_user, role_label_from_user
+
+    if not _can_approve(user):
+        entity = entity_from_user(target)
+        entity_id = entity.lower() if entity != "BOTH" else "pws"
+        doc = await _insert_deactivation_approval(
+            subject_id=user_id,
+            subject_label=target.get("name") or user_id,
+            entity_id=entity_id,
+            entity=entity,
+            target_role=role_label_from_user(target),
+            reason="Account deactivation requested",
+            user=user,
+            payload={
+                "user_id": user_id,
+                "target_kind": "user",
+                "legacy_role": target.get("role"),
+                "user_type": target.get("user_type"),
+                "designation": target.get("designation"),
+            },
+        )
+        return {"approval_required": True, "approval": _approval_out(doc)}
+
     await db.users.update_one({"id": user_id}, {"$set": {"status": "deactivated"}})
     await _log_user_type_audit(action="deactivated", target=target, actor=user)
     return await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})

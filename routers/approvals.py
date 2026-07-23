@@ -13,12 +13,23 @@ from core import (
     CommentIn,
 )
 from notifications_service import send_notification, send_to_role
+from approval_types import (
+    enrich_approval,
+    types_for_category,
+    role_label_from_person,
+    role_label_from_user,
+    entity_from_person,
+    entity_from_user,
+    LEGACY_DEACTIVATION_TYPES,
+)
 
 router = APIRouter(prefix="/approval-requests", tags=["approvals"])
 
 APPROVAL_TYPES = (
     "student_deactivation",
     "player_deactivation",
+    "user_deactivation",
+    "fee_edit",
     "fee_concession",
     "refund",
 )
@@ -51,14 +62,74 @@ def _history_entry(action: str, user: dict, note: Optional[str] = None) -> dict:
 
 
 def _approval_out(doc: dict) -> dict:
-    out = {k: v for k, v in doc.items() if k != "_id"}
-    out.setdefault("history", [])
-    out.setdefault("comments", [])
-    return out
+    return enrich_approval(doc)
+
+
+async def _insert_deactivation_approval(
+    *,
+    subject_id: str,
+    subject_label: str,
+    entity_id: str,
+    entity: str,
+    target_role: str,
+    reason: str,
+    user: dict,
+    payload: dict,
+) -> dict:
+    existing = await db.approval_requests.find_one({
+        "type": {"$in": list(LEGACY_DEACTIVATION_TYPES)},
+        "subject_id": subject_id,
+        "status": "pending",
+    })
+    if existing:
+        raise HTTPException(400, "A pending deactivation approval already exists for this subject")
+
+    norm_payload = {
+        **payload,
+        "target_role": target_role,
+    }
+    doc = {
+        "id": str(uuid.uuid4()),
+        "type": "user_deactivation",
+        "status": "pending",
+        "entity_id": entity_id.lower() if entity_id else "pws",
+        "organization": entity,
+        "subject_id": subject_id,
+        "subject_label": subject_label,
+        "reason": reason.strip() or "Deactivation requested",
+        "payload": norm_payload,
+        "requested_by_id": user["id"],
+        "requested_by_name": user["name"],
+        "requested_at": now_utc().isoformat(),
+        "decided_by_id": None,
+        "decided_by_name": None,
+        "decided_at": None,
+        "decision_note": None,
+        "history": [_history_entry("submitted", user, reason.strip() or "Deactivation requested")],
+        "comments": [],
+    }
+    await db.approval_requests.insert_one(doc)
+    await send_to_role(
+        "super_admin",
+        ntype="approval_requested",
+        title="User deactivation request",
+        message=f"{user['name']} requested deactivation of {subject_label} ({target_role})",
+        ref_id=doc["id"],
+        ref_type="approval",
+        entity_id=doc["entity_id"],
+    )
+    return doc
 
 
 class ApprovalCreate(BaseModel):
-    type: Literal["student_deactivation", "player_deactivation", "fee_concession", "refund"]
+    type: Literal[
+        "student_deactivation",
+        "player_deactivation",
+        "user_deactivation",
+        "fee_edit",
+        "fee_concession",
+        "refund",
+    ]
     subject_id: str
     reason: str = Field(min_length=3)
     payload: dict = Field(default_factory=dict)
@@ -105,6 +176,69 @@ async def _validate_create(payload: ApprovalCreate, user: dict) -> tuple[dict, s
         })
         return person, label, entity_id, p
 
+    if payload.type == "user_deactivation":
+        user_id = p.get("user_id")
+        person_id = p.get("person_id") or payload.subject_id
+        if user_id:
+            target_user = await db.users.find_one({"id": user_id}, {"_id": 0})
+            if not target_user:
+                raise HTTPException(404, "User not found")
+            if target_user.get("status") == "deactivated":
+                raise HTTPException(400, "User already deactivated")
+            if target_user.get("role") == "super_admin":
+                raise HTTPException(400, "Cannot deactivate Super Admin")
+            entity = entity_from_user(target_user)
+            entity_id = entity.lower()
+            role = role_label_from_user(target_user)
+            label = target_user["name"]
+            p.update({"user_id": user_id, "target_kind": "user", "target_role": role})
+            return target_user, label, entity_id, p
+
+        person = await db.people.find_one({"id": person_id}, {"_id": 0})
+        if not person:
+            raise HTTPException(404, "Person not found")
+        if person.get("status") == "deactivated":
+            raise HTTPException(400, "Person already deactivated")
+        entity = entity_from_person(person)
+        entity_id = "pws" if entity == "PWS" else "alpha" if entity == "ALPHA" else "pws"
+        role = role_label_from_person(person)
+        label = person["name"]
+        p.update({
+            "person_id": person_id,
+            "target_kind": person.get("kind"),
+            "target_role": role,
+            "centre": person.get("centre"),
+            "sport": person.get("sport"),
+            "category": person.get("player_type") or person.get("pws_student_type"),
+        })
+        return person, label, entity_id, p
+
+    if payload.type == "fee_edit":
+        if not (get_perm(user, "edit_fees") or is_super_admin(user)):
+            raise HTTPException(403, "Permission required to request fee edit")
+        fee = await db.fees.find_one({"id": payload.subject_id}, {"_id": 0})
+        if not fee:
+            raise HTTPException(404, "Fee not found")
+        new_amount = p.get("new_amount_due")
+        if new_amount is None:
+            raise HTTPException(400, "new_amount_due required in payload")
+        new_amount = int(new_amount)
+        if new_amount < 0:
+            raise HTTPException(400, "new_amount_due must be non-negative")
+        prev = int(fee.get("amount_due") or 0)
+        entity_id = fee.get("entity_id") or ("pws" if fee.get("organization") == "PWS" else "alpha")
+        person_name = fee.get("player_name") or fee.get("person_name") or "Fee"
+        label = f"{person_name} · fee edit ₹{prev} → ₹{new_amount}"
+        p.update({
+            "fee_id": fee["id"],
+            "previous_amount_due": prev,
+            "new_amount_due": new_amount,
+            "person_name": person_name,
+            "fee_type": fee.get("fee_type"),
+            "period_month": fee.get("period_month"),
+        })
+        return fee, label, entity_id, p
+
     if payload.type == "fee_concession":
         if not (get_perm(user, "edit_fees") or get_perm(user, "collect_fees")):
             raise HTTPException(403, "Permission required to request fee concession")
@@ -117,9 +251,14 @@ async def _validate_create(payload: ApprovalCreate, user: dict) -> tuple[dict, s
         if discount_amount <= 0:
             raise HTTPException(400, "discount_amount required in payload")
         entity_id = fee.get("entity_id") or ("pws" if fee.get("organization") == "PWS" else "alpha")
-        label = f"{fee.get('person_name', 'Fee')} · ₹{discount_amount} off"
+        person_name = fee.get("player_name") or fee.get("person_name") or "Fee"
+        label = f"{person_name} · ₹{discount_amount} off"
         p.setdefault("fee_id", fee["id"])
         p.setdefault("discount_amount", discount_amount)
+        p.setdefault("person_name", person_name)
+        p.setdefault("original_amount_due", int(fee.get("amount_due") or 0))
+        if p.get("discount_percent"):
+            p["discount_percent"] = float(p["discount_percent"])
         return fee, label, entity_id, p
 
     if payload.type == "refund":
@@ -148,13 +287,32 @@ async def _apply_approval(req: dict) -> None:
     t = req["type"]
     p = req.get("payload") or {}
 
-    if t in ("student_deactivation", "player_deactivation"):
+    if t in LEGACY_DEACTIVATION_TYPES:
+        p = req.get("payload") or {}
+        if p.get("user_id"):
+            await db.users.update_one({"id": p["user_id"]}, {"$set": {"status": "deactivated"}})
+            return
         pid = p.get("person_id") or req["subject_id"]
         await db.people.update_one({"id": pid}, {"$set": {"status": "deactivated"}})
         person = await db.people.find_one({"id": pid}, {"_id": 0})
         if person and person.get("kind") == "staff":
             from routers.people import ensure_staff_user_account
             await ensure_staff_user_account(person)
+        return
+
+    if t == "fee_edit":
+        fee_id = p.get("fee_id") or req["subject_id"]
+        fee = await db.fees.find_one({"id": fee_id})
+        if not fee:
+            raise HTTPException(404, "Fee not found")
+        new_amt = int(p.get("new_amount_due") if p.get("new_amount_due") is not None else fee.get("amount_due") or 0)
+        await db.fees.update_one({"id": fee_id}, {"$set": {
+            "amount_due": new_amt,
+            "fee_edit_reason": req.get("reason"),
+            "fee_edit_by_id": req.get("decided_by_id"),
+            "fee_edit_by_name": req.get("decided_by_name"),
+            "fee_edit_at": now_utc().isoformat(),
+        }})
         return
 
     if t == "fee_concession":
@@ -238,6 +396,7 @@ async def create_approval(payload: ApprovalCreate, user: dict = Depends(get_curr
 async def list_approvals(
     status: Optional[str] = None,
     type: Optional[str] = None,
+    category: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
     if not _can_view_approvals(user):
@@ -245,7 +404,11 @@ async def list_approvals(
     q = _visibility_filter(user)
     if status:
         q["status"] = status
-    if type:
+    if category:
+        cat_types = types_for_category(category)
+        if cat_types:
+            q["type"] = {"$in": list(cat_types)}
+    elif type:
         q["type"] = type
     rows = await db.approval_requests.find(q, {"_id": 0}).sort("requested_at", -1).to_list(500)
     return [_approval_out(r) for r in rows]

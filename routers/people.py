@@ -18,6 +18,7 @@ from coach_scope import (
 )
 from routers.coach import _coach_visibility_filter, _coach_assignment_lists
 from people_enrollment import assign_enrollment_ids
+from approval_types import entity_from_person, role_label_from_person
 
 router = APIRouter(prefix="/people", tags=["people"])
 
@@ -555,48 +556,25 @@ async def deactivate_person(person_id: str, user: dict = Depends(get_current_use
         raise HTTPException(403, "Not allowed to deactivate this person")
 
     kind = target.get("kind", "")
-    from routers.approvals import _can_approve, _history_entry, _approval_out
-    if kind in ("student", "player") and not _can_approve(user):
-        approval_type = "student_deactivation" if kind == "student" else "player_deactivation"
-        existing = await db.approval_requests.find_one({
-            "type": approval_type,
-            "subject_id": person_id,
-            "status": "pending",
-        })
-        if existing:
-            raise HTTPException(400, "A pending deactivation approval already exists")
-        doc = {
-            "id": str(uuid.uuid4()),
-            "type": approval_type,
-            "status": "pending",
-            "entity_id": "pws" if kind == "student" else "alpha",
-            "subject_id": person_id,
-            "subject_label": target.get("name"),
-            "reason": "Deactivation requested",
-            "payload": {
+    from routers.approvals import _can_approve, _approval_out, _insert_deactivation_approval
+    if not _can_approve(user):
+        entity = entity_from_person(target)
+        entity_id = "pws" if entity == "PWS" else "alpha" if entity == "ALPHA" else "pws"
+        doc = await _insert_deactivation_approval(
+            subject_id=person_id,
+            subject_label=target.get("name") or person_id,
+            entity_id=entity_id,
+            entity=entity,
+            target_role=role_label_from_person(target),
+            reason="Deactivation requested",
+            user=user,
+            payload={
                 "person_id": person_id,
+                "target_kind": kind,
                 "centre": target.get("centre"),
                 "sport": target.get("sport"),
-                "category": target.get("player_type"),
+                "category": target.get("player_type") or target.get("pws_student_type"),
             },
-            "requested_by_id": user["id"],
-            "requested_by_name": user["name"],
-            "requested_at": now_utc().isoformat(),
-            "decided_by_id": None,
-            "decided_by_name": None,
-            "decided_at": None,
-            "decision_note": None,
-            "history": [_history_entry("submitted", user, "Deactivation requested")],
-            "comments": [],
-        }
-        await db.approval_requests.insert_one(doc)
-        from core import notify_role
-        await notify_role(
-            "super_admin",
-            ntype="approval_request",
-            title=f"{kind.title()} deactivation request",
-            message=f"{user['name']} requested deactivation of {target.get('name')}",
-            ref_id=doc["id"],
         )
         return {"approval_required": True, "approval": _approval_out(doc)}
 

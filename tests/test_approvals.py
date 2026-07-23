@@ -107,7 +107,7 @@ class TestApprovals:
         assert d.status_code == 200, d.text
         body = d.json()
         if body.get("approval_required"):
-            assert body["approval"]["type"] == "student_deactivation"
+            assert body["approval"]["category"] == "user_deactivation"
             # reject to leave student active
             aid = body["approval"]["id"]
             requests.post(f"{API}/approval-requests/{aid}/reject", headers=_hdr("super_admin"), json={"note": "test"}, timeout=15)
