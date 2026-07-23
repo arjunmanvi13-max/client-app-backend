@@ -89,16 +89,14 @@ MODULE_GROUPS: List[Dict[str, Any]] = [
                 _mod("add-new-teacher", "Add New Teacher", rbac=[Permission.ADD_NEW_TEACHER.value],
                       pws_only=True, user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value]),
             ], pws_only=True, user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value]),
-            _mod("students-players", "Students & Players", children=[
-                _mod("students-section", "Students", children=[
-                    _mod("students", "Students", permission_keys=["view_students", "add_students", "edit_students"], rbac=[Permission.ADD_PWS_STUDENTS.value],
-                          pws_only=True, user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value, UserRole.PWS_ACCOUNTS.value]),
-                ], pws_only=True, user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value, UserRole.PWS_ACCOUNTS.value]),
-                _mod("players-section", "Players", children=[
-                    _mod("players", "Players", permission_keys=["view_players", "add_players", "edit_players"], rbac=[Permission.MANAGE_PLAYERS.value, Permission.ADD_ALPHA_PLAYERS.value],
-                          user_types=[UserRole.SUPER_ADMIN.value, UserRole.ALPHA_ADMIN.value, UserRole.ALPHA_ACCOUNTS.value]),
-                ], user_types=[UserRole.SUPER_ADMIN.value, UserRole.ALPHA_ADMIN.value, UserRole.ALPHA_ACCOUNTS.value]),
-            ]),
+            _mod("students-section", "Students", children=[
+                _mod("students", "Students", permission_keys=["view_students", "add_students", "edit_students"], rbac=[Permission.ADD_PWS_STUDENTS.value],
+                      pws_only=True, user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value, UserRole.PWS_ACCOUNTS.value]),
+            ], pws_only=True, user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value, UserRole.PWS_ACCOUNTS.value]),
+            _mod("players-section", "Players", children=[
+                _mod("players", "Players", permission_keys=["view_players", "add_players", "edit_players"], rbac=[Permission.MANAGE_PLAYERS.value, Permission.ADD_ALPHA_PLAYERS.value],
+                      user_types=[UserRole.SUPER_ADMIN.value, UserRole.ALPHA_ADMIN.value, UserRole.ALPHA_ACCOUNTS.value]),
+            ], user_types=[UserRole.SUPER_ADMIN.value, UserRole.ALPHA_ADMIN.value, UserRole.ALPHA_ACCOUNTS.value]),
         ],
     },
     {
