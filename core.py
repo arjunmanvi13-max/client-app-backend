@@ -741,7 +741,7 @@ class UserCreate(BaseModel):
         "super_admin", "pws_admin", "alpha_admin",
         "pws_accounts", "alpha_accounts", "pws_teacher", "alpha_coach",
     ]
-    designation: Optional[Literal["PRINCIPAL", "VICE_PRINCIPAL"]] = None
+    designation: Optional[Literal["PRINCIPAL", "VICE_PRINCIPAL", "ACADEMIC_HEAD", "EVENT_COORDINATOR"]] = None
     role: Optional[str] = None  # ignored — derived from user_type
     organization: Optional[Literal["PWS", "ALPHA", "BOTH"]] = None
     department: Optional[str] = None
@@ -822,7 +822,7 @@ class UserUpdate(BaseModel):
         "super_admin", "pws_admin", "alpha_admin",
         "pws_accounts", "alpha_accounts", "pws_teacher", "alpha_coach",
     ]] = None
-    designation: Optional[Literal["PRINCIPAL", "VICE_PRINCIPAL"]] = None
+    designation: Optional[Literal["PRINCIPAL", "VICE_PRINCIPAL", "ACADEMIC_HEAD", "EVENT_COORDINATOR"]] = None
     role: Optional[str] = None  # ignored when user_type supplied
     organization: Optional[Literal["PWS", "ALPHA", "BOTH"]] = None
     department: Optional[str] = None

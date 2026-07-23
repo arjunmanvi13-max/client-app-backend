@@ -16,7 +16,7 @@ APPROVED_LOGIN_USER_TYPES: Tuple[str, ...] = (
     UserRole.ALPHA_COACH.value,
 )
 
-PWS_ADMIN_DESIGNATIONS = ("PRINCIPAL", "VICE_PRINCIPAL")
+PWS_ADMIN_DESIGNATIONS = ("PRINCIPAL", "VICE_PRINCIPAL", "ACADEMIC_HEAD", "EVENT_COORDINATOR")
 
 USER_TYPE_CATALOG: List[Dict[str, Any]] = [
     {
@@ -35,8 +35,8 @@ USER_TYPE_CATALOG: List[Dict[str, Any]] = [
         "displayName": "PWS Admin",
         "entityScope": BusinessEntity.PWS.value,
         "category": "Administration",
-        "description": "PWS administration — Principal and Vice Principal",
-        "manageDescription": "PWS administration — Principal and Vice Principal",
+        "description": "PWS administration — Principal, Vice Principal, Academic Head, Event Coordinator",
+        "manageDescription": "PWS administration — Principal, Vice Principal, Academic Head, Event Coordinator",
         "allowedDesignations": list(PWS_ADMIN_DESIGNATIONS),
         "requiresAssignedSport": False,
         "requiresAssignedVenue": False,
@@ -135,6 +135,8 @@ USER_TYPE_TO_LEGACY_ROLE: Dict[str, str] = {
 DESIGNATION_TO_LEGACY_ROLE: Dict[str, str] = {
     "PRINCIPAL": "principal",
     "VICE_PRINCIPAL": "vice_principal",
+    "ACADEMIC_HEAD": "pws_admin",
+    "EVENT_COORDINATOR": "pws_admin",
 }
 
 
@@ -207,7 +209,10 @@ def apply_user_type_fields(doc: dict, *, user_type: str, designation: Optional[s
     if user_type == UserRole.PWS_ADMIN.value:
         doc["designation"] = (designation or "PRINCIPAL").upper()
         if doc["designation"] not in PWS_ADMIN_DESIGNATIONS:
-            raise ValueError("PWS Admin designation must be PRINCIPAL or VICE_PRINCIPAL")
+            raise ValueError(
+                "PWS Admin designation must be one of: "
+                + ", ".join(PWS_ADMIN_DESIGNATIONS)
+            )
         doc["role"] = legacy_role_for_user_type(user_type, doc["designation"])
     else:
         doc.pop("designation", None)

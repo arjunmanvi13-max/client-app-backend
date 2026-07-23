@@ -66,6 +66,12 @@ def test_apply_user_type_pws_admin_designation():
     assert doc["designation"] == "VICE_PRINCIPAL"
 
 
+def test_apply_user_type_pws_admin_academic_head():
+    doc = apply_user_type_fields({}, user_type=UserRole.PWS_ADMIN.value, designation="ACADEMIC_HEAD")
+    assert doc["role"] == "pws_admin"
+    assert doc["designation"] == "ACADEMIC_HEAD"
+
+
 def test_validate_rejects_wrong_organization():
     with pytest.raises(ValueError, match="requires organization"):
         validate_user_type_payload(UserRole.PWS_ADMIN.value, organization="ALPHA")
