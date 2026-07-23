@@ -10,6 +10,7 @@ from category_module_catalog import (
     default_enabled_map,
     derive_permissions_from_modules,
     filter_catalog_for_user_type,
+    leaf_module_ids,
 )
 from core import db, now_utc
 from user_classification import APPROVED_LOGIN_USER_TYPES, LEGACY_ROLE_TO_USER_TYPE, CATALOG_BY_CODE
@@ -39,15 +40,19 @@ async def get_category_modules(user_type: str) -> Dict[str, Any]:
     stored = await db.category_module_access.find_one({"user_type": user_type}, {"_id": 0})
     catalog = filter_catalog_for_user_type(user_type)
     locked = user_type in LOCKED_USER_TYPES
+    leaves = leaf_module_ids(catalog)
 
     if stored and stored.get("modules"):
         modules = {k: bool(v) for k, v in stored["modules"].items()}
     else:
         modules = default_enabled_map(user_type)
 
-    # Ensure all catalog modules have a value
-    for mid, val in default_enabled_map(user_type).items():
-        modules.setdefault(mid, val)
+    # Ensure all leaf modules have a value
+    defaults = default_enabled_map(user_type)
+    for mid in leaves:
+        modules.setdefault(mid, defaults.get(mid, False))
+
+    modules = {mid: bool(modules.get(mid)) for mid in leaves}
 
     if locked:
         modules = {k: True for k in modules}
@@ -88,14 +93,16 @@ async def list_category_permissions() -> List[Dict[str, Any]]:
     rows = []
     for ut in APPROVED_LOGIN_USER_TYPES:
         doc = await get_category_modules(ut)
-        enabled_count = sum(1 for v in doc["modules"].values() if v)
+        leaf_ids = leaf_module_ids(doc["catalog"])
+        modules = doc["modules"]
+        enabled_count = sum(1 for mid in leaf_ids if modules.get(mid))
         rows.append({
             "user_type": ut,
             "display_name": doc["display_name"],
             "entity_scope": doc["entity_scope"],
             "locked": doc["locked"],
             "enabled_count": enabled_count,
-            "total_count": len(doc["modules"]),
+            "total_count": len(leaf_ids),
             "active_user_count": user_counts.get(ut, 0),
         })
     return rows
@@ -112,7 +119,7 @@ async def save_category_modules(
         raise PermissionError("Super Admin category access cannot be modified")
 
     catalog = filter_catalog_for_user_type(user_type)
-    valid_ids = {m["id"] for _, m in _walk_modules(catalog)}
+    valid_ids = set(leaf_module_ids(catalog))
     normalized = {mid: bool(modules.get(mid)) for mid in valid_ids}
 
     legacy, rbac = derive_permissions_from_modules(user_type, normalized)

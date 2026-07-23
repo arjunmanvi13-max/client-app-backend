@@ -107,6 +107,10 @@ MODULE_GROUPS: List[Dict[str, Any]] = [
                   user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value, UserRole.ALPHA_ADMIN.value, UserRole.PWS_ACCOUNTS.value, UserRole.ALPHA_ACCOUNTS.value]),
             _mod("defaulters", "Defaulters", permission_keys=["collect_fees", "view_fees"], rbac=[Permission.COLLECT_PWS_FEES.value, Permission.COLLECT_ALPHA_FEES.value],
                   user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value, UserRole.ALPHA_ADMIN.value, UserRole.PWS_ACCOUNTS.value, UserRole.ALPHA_ACCOUNTS.value]),
+            _mod("finance-reports", "Finance Reports", permission_keys=["collect_fees", "view_fees", "access_reports"], rbac=[
+                Permission.COLLECT_PWS_FEES.value, Permission.COLLECT_ALPHA_FEES.value,
+                Permission.RUN_PWS_REPORTS.value, Permission.RUN_ALPHA_REPORTS.value,
+            ], user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value, UserRole.ALPHA_ADMIN.value, UserRole.PWS_ACCOUNTS.value, UserRole.ALPHA_ACCOUNTS.value]),
             _mod("invoice-engine", "Invoice Engine", permission_keys=["collect_fees", "view_fees"], rbac=[Permission.COLLECT_PWS_FEES.value], pws_only=True,
                   user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value, UserRole.PWS_ACCOUNTS.value]),
         ],
@@ -137,8 +141,6 @@ MODULE_GROUPS: List[Dict[str, Any]] = [
         "id": "academics",
         "label": "Academics & Assessments",
         "modules": [
-            _mod("academic-structure", "Academic Structure", permission_keys=["manage_academic_structure"],
-                  rbac=[Permission.MANAGE_TEACHERS_MAP_SUBJECTS.value, Permission.MANAGE_TEACHERS_MAP_SECTIONS.value], pws_only=True),
             _mod("marks-entry", "Marks Entry", permission_keys=["enter_academic_marks", "view_academic_marks"],
                   rbac=[Permission.MANAGE_MARKS_ASSESSMENT.value], pws_only=True),
             _mod("marks-setup", "Marks Setup", permission_keys=["manage_academic_structure"],
@@ -159,12 +161,18 @@ MODULE_GROUPS: List[Dict[str, Any]] = [
         "id": "system",
         "label": "System & Settings",
         "modules": [
-            _mod("permissions", "Permissions", permission_keys=["manage_users"], rbac=[Permission.MANAGE_ACCESS.value],
+            _mod("access-control", "Access Control", children=[
+                _mod("permissions", "Permissions", permission_keys=["manage_users"], rbac=[Permission.MANAGE_ACCESS.value],
+                      user_types=[UserRole.SUPER_ADMIN.value]),
+                _mod("manage-users-rosters", "Manage Users & Rosters", permission_keys=["manage_users_rosters"],
+                      rbac=[Permission.MANAGE_USERS_ROSTERS.value, Permission.CREATE_USERS.value],
+                      user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value, UserRole.ALPHA_ADMIN.value,
+                                  UserRole.PWS_ACCOUNTS.value, UserRole.ALPHA_ACCOUNTS.value]),
+            ]),
+            _mod("academic-structure", "Academic Structure", permission_keys=["manage_academic_structure"],
+                  rbac=[Permission.MANAGE_TEACHERS_MAP_SUBJECTS.value, Permission.MANAGE_TEACHERS_MAP_SECTIONS.value], pws_only=True),
+            _mod("academy-structure", "ALPHA/PWS Structure", permission_keys=["manage_users"], rbac=[Permission.MANAGE_ACCESS.value],
                   user_types=[UserRole.SUPER_ADMIN.value]),
-            _mod("manage-users-rosters", "Manage Users & Rosters", permission_keys=["manage_users_rosters"],
-                  rbac=[Permission.MANAGE_USERS_ROSTERS.value, Permission.CREATE_USERS.value],
-                  user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value, UserRole.ALPHA_ADMIN.value,
-                              UserRole.PWS_ACCOUNTS.value, UserRole.ALPHA_ACCOUNTS.value]),
             _mod("settings", "Settings", permission_keys=["dashboard_access"], rbac=[Permission.DASHBOARD_ACCESS.value],
                   user_types=[t for t in APPROVED_LOGIN_USER_TYPES if t != UserRole.ALPHA_COACH.value]),
             _mod("notifications", "Notifications", permission_keys=["dashboard_access"], rbac=[Permission.DASHBOARD_ACCESS.value],
@@ -185,6 +193,25 @@ def _walk_modules(groups: Optional[List[Dict[str, Any]]] = None):
 
 def all_module_ids() -> List[str]:
     return [m["id"] for _, m in _walk_modules()]
+
+
+def leaf_module_ids(catalog: Optional[List[Dict[str, Any]]] = None) -> List[str]:
+    """Return only leaf module ids (nodes without children) from a catalog."""
+    catalog = catalog or MODULE_GROUPS
+    out: List[str] = []
+
+    def walk(mod: ModuleDef) -> None:
+        children = mod.get("children")
+        if children:
+            for child in children:
+                walk(child)
+            return
+        out.append(mod["id"])
+
+    for group in catalog:
+        for mod in group.get("modules", []):
+            walk(mod)
+    return out
 
 
 def module_applicable(mod: ModuleDef, user_type: str) -> bool:
@@ -241,13 +268,13 @@ DEFAULT_ENABLED_MODULES: Dict[str, Set[str]] = {
     UserRole.PWS_ACCOUNTS.value: {
         "dashboard", "reports", "tasks",
         "directory-master", "students",
-        "fee-catalog", "collect-fees", "defaulters", "invoice-engine",
+        "fee-catalog", "collect-fees", "defaulters", "finance-reports", "invoice-engine",
         "settings", "notifications",
     },
     UserRole.ALPHA_ACCOUNTS.value: {
         "dashboard", "reports", "tasks",
         "directory-master", "players",
-        "fee-catalog", "collect-fees", "defaulters",
+        "fee-catalog", "collect-fees", "defaulters", "finance-reports",
         "settings", "notifications",
     },
     UserRole.PWS_TEACHER.value: {
