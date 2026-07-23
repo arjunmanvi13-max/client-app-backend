@@ -219,6 +219,11 @@ def module_applicable(mod: ModuleDef, user_type: str) -> bool:
     return True
 
 
+def permissions_catalog() -> List[Dict[str, Any]]:
+    """Full module tree for User Category Permissions — identical for every role."""
+    return MODULE_GROUPS
+
+
 def filter_catalog_for_user_type(user_type: str) -> List[Dict[str, Any]]:
     """Return module groups with only applicable modules for the user type."""
     out: List[Dict[str, Any]] = []
@@ -282,13 +287,12 @@ DEFAULT_ENABLED_MODULES: Dict[str, Set[str]] = {
 
 
 def default_enabled_map(user_type: str) -> Dict[str, bool]:
-    """Module id → enabled for a user type (catalog-filtered)."""
-    catalog = filter_catalog_for_user_type(user_type)
+    """Module id → enabled for a user type against the full permissions catalog."""
+    leaves = leaf_module_ids()
+    if user_type in LOCKED_USER_TYPES:
+        return {mid: True for mid in leaves}
     defaults = DEFAULT_ENABLED_MODULES.get(user_type, set())
-    enabled: Dict[str, bool] = {}
-    for _, mod in _walk_modules(catalog):
-        enabled[mod["id"]] = mod["id"] in defaults
-    return enabled
+    return {mid: mid in defaults for mid in leaves}
 
 
 def derive_permissions_from_modules(
@@ -311,7 +315,7 @@ def derive_permissions_from_modules(
     legacy = {k: False for k in permission_keys}
     rbac: Dict[str, bool] = {}
 
-    catalog = filter_catalog_for_user_type(user_type)
+    catalog = permissions_catalog()
     for _, mod in _walk_modules(catalog):
         if not modules.get(mod["id"]):
             continue

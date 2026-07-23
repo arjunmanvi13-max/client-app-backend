@@ -6,11 +6,10 @@ from typing import Any, Dict, List, Optional
 
 from category_module_catalog import (
     LOCKED_USER_TYPES,
-    _walk_modules,
     default_enabled_map,
     derive_permissions_from_modules,
-    filter_catalog_for_user_type,
     leaf_module_ids,
+    permissions_catalog,
 )
 from core import db, now_utc
 from user_classification import APPROVED_LOGIN_USER_TYPES, LEGACY_ROLE_TO_USER_TYPE, CATALOG_BY_CODE
@@ -38,7 +37,7 @@ async def get_category_modules(user_type: str) -> Dict[str, Any]:
         raise ValueError(f"Unknown user type: {user_type}")
 
     stored = await db.category_module_access.find_one({"user_type": user_type}, {"_id": 0})
-    catalog = filter_catalog_for_user_type(user_type)
+    catalog = permissions_catalog()
     locked = user_type in LOCKED_USER_TYPES
     leaves = leaf_module_ids(catalog)
 
@@ -124,7 +123,7 @@ async def save_category_modules(
     if user_type in LOCKED_USER_TYPES:
         raise PermissionError("Super Admin category access cannot be modified")
 
-    catalog = filter_catalog_for_user_type(user_type)
+    catalog = permissions_catalog()
     valid_ids = set(leaf_module_ids(catalog))
     normalized = {mid: bool(modules.get(mid)) for mid in valid_ids}
 
