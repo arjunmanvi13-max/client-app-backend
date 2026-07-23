@@ -25,10 +25,11 @@ def _rs(n: int) -> str:
     return f"Rs. {int(n or 0):,}"
 
 
-def _page_height(fee_rows: int, detail_rows: int = 4, has_address: bool = False) -> float:
+def _page_height(fee_rows: int, detail_rows: int = 4, has_address: bool = False, has_affiliation: bool = False) -> float:
     extra = max(0, fee_rows - 3) * ROW_H
     addr = 4 * mm if has_address else 0
-    return BASE_H + extra + max(0, detail_rows - 4) * 5 * mm + addr
+    affil = 4 * mm if has_affiliation else 0
+    return BASE_H + extra + max(0, detail_rows - 4) * 5 * mm + addr + affil
 
 
 def _draw_logo(c: pdfcanvas.Canvas, logo_path: Optional[str], x: float, y: float, size: float) -> None:
@@ -66,8 +67,10 @@ def render_batch_receipt_pdf(
     entity_id = branding.get("entity_id") or "alpha"
     total = sum(int(f.get("amount_due") or 0) for f in fees)
     address_lines = branding.get("address_lines") or []
+    affiliation_line = (branding.get("affiliation_line") or "").strip()
     has_address = bool(address_lines)
-    H = _page_height(len(fees), has_address=has_address)
+    has_affiliation = bool(affiliation_line)
+    H = _page_height(len(fees), has_address=has_address, has_affiliation=has_affiliation)
     W = PAGE_W
     margin = 10 * mm
     inner_w = W - 2 * margin
@@ -82,7 +85,7 @@ def render_batch_receipt_pdf(
     c.roundRect(margin - 2 * mm, margin - 2 * mm, inner_w + 4 * mm, H - 2 * margin + 4 * mm, 4 * mm, stroke=1, fill=0)
 
     # Header — white card style matching modal
-    header_h = 24 * mm + (4 * mm if has_address else 0)
+    header_h = 24 * mm + (4 * mm if has_address else 0) + (4 * mm if has_affiliation else 0)
     header_top = y - header_h
     text_x = margin + logo_size + 4 * mm
     _draw_logo(c, branding.get("logo_path"), margin + 1 * mm, header_top + header_h - logo_size - 2 * mm, logo_size)
@@ -91,6 +94,11 @@ def render_batch_receipt_pdf(
     c.setFont("Helvetica-Bold", 11)
     c.drawString(text_x, header_top + header_h - 8 * mm, str(branding.get("display_name", ""))[:42])
     line_y = header_top + header_h - 13 * mm
+    if has_affiliation:
+        c.setFont("Helvetica", 7.5)
+        c.setFillColorRGB(*SLATE_500)
+        c.drawString(text_x, line_y, affiliation_line[:72])
+        line_y -= 4.5 * mm
     if has_address:
         c.setFont("Helvetica", 7.5)
         c.setFillColorRGB(*SLATE_500)

@@ -18,7 +18,8 @@ from entity_receipt_branding import (
 def test_pws_branding_config():
     branding = resolve_entity_branding("pws")
     assert branding["display_name"] == "Prarambhika World School"
-    assert branding["address_lines"] == ["Balua Ahmedpur", "Patna 801113"]
+    assert branding["address_lines"] == ["Balua, Ahmedpur", "Patna 801113"]
+    assert branding["affiliation_line"] == "Affiliated to CBSE, New Delhi. Affiliation No. 330564"
     assert branding["entity_code"] == "PWS"
     assert branding["logo_filename"] == "prarambhika-world-school-logo.png"
     assert Path(branding["logo_path"]).name == "prarambhika-world-school-logo.png"
@@ -37,7 +38,8 @@ def test_branding_response_payload():
     payload = branding_for_receipt_response("pws")
     assert payload["entityCode"] == "PWS"
     assert payload["displayName"] == "Prarambhika World School"
-    assert payload["addressLines"] == ["Balua Ahmedpur", "Patna 801113"]
+    assert payload["addressLines"] == ["Balua, Ahmedpur", "Patna 801113"]
+    assert payload["affiliationLine"] == "Affiliated to CBSE, New Delhi. Affiliation No. 330564"
     assert payload["receiptPrefix"] == "PWS"
 
 
