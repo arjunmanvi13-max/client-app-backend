@@ -47,6 +47,12 @@ async def get_category_modules(user_type: str) -> Dict[str, Any]:
     else:
         modules = default_enabled_map(user_type)
 
+    # Legacy module ids from nested directory groups
+    if modules.get("add-new-teacher") and "teachers-directory" not in modules:
+        modules["teachers-directory"] = True
+    elif modules.get("add-new-teacher"):
+        modules["teachers-directory"] = modules.get("teachers-directory") or modules["add-new-teacher"]
+
     # Ensure all leaf modules have a value
     defaults = default_enabled_map(user_type)
     for mid in leaves:

@@ -6,7 +6,7 @@ from category_module_catalog import (
     filter_catalog_for_user_type,
     all_module_ids,
 )
-from rbac.enums import UserRole
+from rbac.enums import Permission, UserRole
 
 
 def test_seven_user_types_have_defaults():
@@ -67,15 +67,18 @@ def test_super_admin_in_locked_set():
     assert UserRole.SUPER_ADMIN.value in LOCKED_USER_TYPES
 
 
-def test_add_new_teacher_module_in_catalog():
+def test_teachers_module_in_flat_directory_catalog():
     ids = all_module_ids()
-    assert "add-new-teacher" in ids
     assert "teachers-directory" in ids
+    assert "add-new-teacher" not in ids
+    assert "staff-coaches" not in ids
+    assert "students-players" not in ids
     catalog = filter_catalog_for_user_type(UserRole.PWS_ADMIN.value)
     directory = next(g for g in catalog if g["id"] == "directory")
-    teachers = next(m for m in directory["modules"] if m["id"] == "teachers")
-    child_ids = [c["id"] for c in teachers.get("children") or []]
-    assert "add-new-teacher" in child_ids
+    module_ids = [m["id"] for m in directory["modules"]]
+    assert module_ids == ["directory-master", "staff", "teachers-directory", "students"]
+    teachers = next(m for m in directory["modules"] if m["id"] == "teachers-directory")
+    assert Permission.ADD_NEW_TEACHER.value in (teachers.get("rbac_permissions") or [])
 
 
 def test_manage_users_rosters_module_in_system_settings():
