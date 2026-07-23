@@ -229,7 +229,7 @@ PERMISSION_KEYS = [
     # Data Access
     "view_students", "view_players", "view_staff",
     # Attendance
-    "mark_student_attendance", "mark_player_attendance", "mark_staff_attendance", "mark_coach_attendance",
+    "mark_student_attendance", "mark_player_attendance", "mark_staff_attendance", "mark_coach_attendance", "mark_teacher_attendance",
     "mark_hostel_attendance", "view_attendance", "correct_attendance",
     # Management
     "add_players", "edit_players", "toggle_player_status",

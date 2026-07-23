@@ -129,6 +129,21 @@ def can_mark_alpha_attendance(user: dict) -> bool:
     return has_permission(user, Permission.MARK_ALPHA_ATTENDANCE, entity=BusinessEntity.ALPHA)
 
 
+def can_mark_teacher_attendance(user: dict) -> bool:
+    if is_super_admin(user):
+        return True
+    if not has_permission(user, Permission.MARK_TEACHER_ATTENDANCE, entity=BusinessEntity.PWS):
+        return False
+    role = normalize_role(user.get("role", ""))
+    ut = user.get("user_type") or role
+    if ut == UserRole.PWS_ADMIN.value or role in (UserRole.PWS_ADMIN.value, "principal", "vice_principal"):
+        designation = (user.get("designation") or "").upper()
+        if designation in ("PRINCIPAL", "VICE_PRINCIPAL", "ACADEMIC_HEAD", ""):
+            return True
+        return designation in ("PRINCIPAL", "VICE_PRINCIPAL", "ACADEMIC_HEAD")
+    return False
+
+
 def can_manage_players(user: dict) -> bool:
     return has_permission(user, Permission.MANAGE_PLAYERS, entity=BusinessEntity.ALPHA)
 

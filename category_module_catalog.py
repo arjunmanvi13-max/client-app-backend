@@ -123,6 +123,12 @@ MODULE_GROUPS: List[Dict[str, Any]] = [
                 _mod("attendance-reports", "Attendance Reports", permission_keys=["view_attendance"], rbac=[
                     Permission.VIEW_ATTENDANCE.value, Permission.RUN_PWS_REPORTS.value, Permission.RUN_ALPHA_REPORTS.value,
                 ]),
+                _mod("teacher-attendance", "Teacher Attendance", permission_keys=["mark_teacher_attendance"],
+                      rbac=[Permission.MARK_TEACHER_ATTENDANCE.value],
+                      user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value]),
+                _mod("coach-attendance-admin", "Coach Attendance", permission_keys=["mark_coach_attendance"],
+                      rbac=[Permission.MARK_ALPHA_ATTENDANCE.value],
+                      user_types=[UserRole.SUPER_ADMIN.value, UserRole.ALPHA_ADMIN.value]),
             ]),
             _mod("hostel", "Hostel", permission_keys=["mark_hostel_attendance"], rbac=[Permission.MARK_HOSTEL_ATTENDANCE.value]),
             _mod("bulk-upload", "Bulk Upload", permission_keys=["bulk_upload"], rbac=[Permission.BULK_UPLOAD_USERS.value],
@@ -251,14 +257,14 @@ DEFAULT_ENABLED_MODULES: Dict[str, Set[str]] = {
     UserRole.PWS_ADMIN.value: {
         "dashboard", "reports", "approvals", "tasks",
         "directory-master", "staff", "teachers-directory", "students",
-        "attendance-take", "attendance-reports", "hostel",
+        "attendance-take", "attendance-reports", "teacher-attendance", "hostel",
         "academic-structure", "marks-entry", "marks-setup", "report-cards", "coach-assessments",
         "settings", "notifications",
     },
     UserRole.ALPHA_ADMIN.value: {
         "dashboard", "reports", "approvals", "tasks",
         "directory-master", "staff", "coaches", "players",
-        "attendance-take", "attendance-reports",
+        "attendance-take", "attendance-reports", "coach-attendance-admin",
         "player-assessments", "coach-assessments",
         "settings", "notifications",
     },
@@ -302,7 +308,7 @@ def derive_permissions_from_modules(
     """Build legacy permissions + RBAC overrides from enabled module ids."""
     permission_keys = [
         "view_students", "view_players", "view_staff",
-        "mark_student_attendance", "mark_player_attendance", "mark_staff_attendance", "mark_coach_attendance",
+        "mark_student_attendance", "mark_player_attendance", "mark_staff_attendance", "mark_coach_attendance", "mark_teacher_attendance",
         "mark_hostel_attendance", "view_attendance", "correct_attendance",
         "add_players", "edit_players", "toggle_player_status",
         "add_students", "edit_students",

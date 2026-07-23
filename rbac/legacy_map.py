@@ -15,6 +15,7 @@ PERMISSION_TO_LEGACY: dict[Permission, tuple[str, ...]] = {
     Permission.MARK_PWS_ATTENDANCE: (
         "mark_student_attendance",
         "mark_staff_attendance",
+        "mark_teacher_attendance",
         "view_attendance",
     ),
     Permission.MANAGE_TEACHERS_MAP_SUBJECTS: ("manage_academic_structure",),
@@ -42,6 +43,7 @@ PERMISSION_TO_LEGACY: dict[Permission, tuple[str, ...]] = {
     Permission.RUN_ALPHA_REPORTS: ("access_reports",),
 
     Permission.MARK_STUDENT_ATTENDANCE: ("mark_student_attendance", "view_attendance"),
+    Permission.MARK_TEACHER_ATTENDANCE: ("mark_teacher_attendance", "view_attendance"),
     Permission.MANAGE_MARKS_ASSESSMENT: (
         "enter_academic_marks",
         "view_academic_marks",

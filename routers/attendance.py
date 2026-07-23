@@ -11,6 +11,9 @@ from core import (
     assert_perm, get_perm, resolve_user_institution, attendance_entity_filter,
     attendance_entity_for_kind, active_status_filter, merge_mongo_query,
 )
+from academic_calendar import calendar_day_info, is_holiday_for_kind
+from rbac.authorization import normalize_role
+from rbac.enums import UserRole
 
 router = APIRouter(prefix="/attendance", tags=["attendance"])
 
@@ -19,7 +22,7 @@ _MARK_PERM_BY_KIND = {
     "player": "mark_player_attendance",
     "staff": "mark_staff_attendance",
     "coach": "mark_coach_attendance",
-    "teacher": "mark_student_attendance",
+    "teacher": "mark_teacher_attendance",
     "hostel": "mark_hostel_attendance",
 }
 
@@ -140,6 +143,17 @@ def _can_correct_attendance(user: dict) -> bool:
     return can_correct_attendance(user)
 
 
+def _can_mark_teacher_attendance(user: dict) -> bool:
+    from rbac.guards import can_mark_teacher_attendance
+    return can_mark_teacher_attendance(user)
+
+
+@router.get("/calendar-day")
+async def attendance_calendar_day(date: str, user: dict = Depends(get_current_user)):
+    """Calendar metadata for attendance — Sundays are holidays for students/teachers."""
+    return calendar_day_info(date)
+
+
 # -------- Staff Attendance (default-present workflow) --------
 def _can_mark_pws_staff(user: dict) -> bool:
     from rbac.guards import can_mark_pws_attendance
@@ -159,17 +173,25 @@ def _can_mark_alpha_staff(user: dict, centre: Optional[str]) -> bool:
 
 async def _staff_query_for_user(user: dict, centre: Optional[str] = None, organization: Optional[str] = None) -> dict:
     q: dict = {"kind": "staff"}
-    if is_admin(user):
-        if user.get("role") == "admin":
-            q["organization"] = "ALPHA"
+    role = user.get("role")
+    ut = user.get("user_type") or normalize_role(role or "")
+    if is_admin(user) or role == UserRole.SUPER_ADMIN.value:
+        if role == "admin" or ut == UserRole.ALPHA_ADMIN.value:
+            q["organization"] = organization or "ALPHA"
         elif organization:
             q["organization"] = organization
+        elif ut == UserRole.PWS_ADMIN.value or role in ("principal", "vice_principal"):
+            q["organization"] = "PWS"
         if centre:
             q["centre"] = centre
         return q
-    role = user.get("role")
-    if role in ("principal", "vice_principal"):
+    if ut == UserRole.PWS_ADMIN.value or role in ("principal", "vice_principal"):
         q["organization"] = "PWS"
+        return q
+    if ut == UserRole.ALPHA_ADMIN.value or role == "admin":
+        q["organization"] = "ALPHA"
+        if centre:
+            q["centre"] = centre
         return q
     if role == "coach" and user.get("coach_type") == "head":
         q["organization"] = "ALPHA"
@@ -206,9 +228,12 @@ async def staff_list(
 async def mark_staff_attendance(payload: StaffAttendanceIn, user: dict = Depends(get_current_user)):
     org = payload.organization
     role = user.get("role")
+    ut = user.get("user_type") or normalize_role(role or "")
     if not is_admin(user):
-        if role in ("principal", "vice_principal"):
+        if ut == UserRole.PWS_ADMIN.value or role in ("principal", "vice_principal"):
             org = "PWS"
+        elif ut == UserRole.ALPHA_ADMIN.value or role == "admin":
+            org = "ALPHA"
         elif role == "coach" and user.get("coach_type") == "head":
             org = "ALPHA"
         else:
@@ -273,7 +298,10 @@ async def list_staff_attendance(
 
 # -------- Coach Attendance (default-present workflow) --------
 def _can_mark_coach_attendance(user: dict) -> bool:
+    from rbac.guards import can_mark_alpha_attendance
     if is_admin(user):
+        return True
+    if can_mark_alpha_attendance(user):
         return True
     if user.get("role") == "coach" and user.get("coach_type") == "head":
         return True
@@ -378,6 +406,56 @@ async def list_coach_attendance(
     return await db.attendance.find(q, {"_id": 0}).sort("date", -1).to_list(2000)
 
 
+# -------- Teacher Attendance (default-present workflow) --------
+class TeacherAttendanceIn(BaseModel):
+    date: str
+    absent_teacher_ids: List[str] = []
+    session: Optional[str] = "morning"
+
+
+@router.get("/teachers-list")
+async def teachers_list(user: dict = Depends(get_current_user)):
+    if not _can_mark_teacher_attendance(user):
+        raise HTTPException(403, "Principal / Vice Principal / Academic Head permission required")
+    q = merge_mongo_query({"kind": "teacher"}, active_status_filter())
+    q["organization"] = "PWS"
+    teachers = await db.people.find(q, {"_id": 0}).sort("name", 1).to_list(500)
+    return teachers
+
+
+@router.post("/teachers")
+async def mark_teacher_attendance(payload: TeacherAttendanceIn, user: dict = Depends(get_current_user)):
+    if not _can_mark_teacher_attendance(user):
+        raise HTTPException(403, "Principal / Vice Principal / Academic Head permission required")
+    if is_holiday_for_kind(payload.date, "teacher"):
+        raise HTTPException(400, "Sunday is a holiday for teachers — attendance is not required")
+    q = merge_mongo_query({"kind": "teacher", "organization": "PWS"}, active_status_filter())
+    teachers = await db.people.find(q, {"_id": 0}).to_list(500)
+    if not teachers:
+        raise HTTPException(400, "No teachers found")
+    absent_set = set(payload.absent_teacher_ids or [])
+    records = []
+    for t in teachers:
+        status = "absent" if t["id"] in absent_set else "present"
+        rec = await upsert_attendance(
+            user,
+            kind="teacher",
+            person_id=t["id"],
+            date=payload.date,
+            status=status,
+            session=payload.session,
+            entity_id="pws",
+            organization=t.get("organization"),
+            source="teacher_default_present",
+        )
+        records.append(rec)
+    return {
+        "count": len(records),
+        "present": len(teachers) - len(absent_set),
+        "absent": len(absent_set),
+    }
+
+
 async def _validate_batch_marks(
     user: dict,
     *,
@@ -437,6 +515,8 @@ async def mark_attendance_batch(payload: AttendanceBatch, user: dict = Depends(g
         raise HTTPException(400, "Invalid attendance kind")
     if not is_admin(user):
         assert_perm(user, perm)
+    if is_holiday_for_kind(payload.date, payload.kind):
+        raise HTTPException(400, f"Sunday is a holiday for {payload.kind}s — attendance is not required")
     group = payload.group
     section_id = payload.section_id
     if payload.kind == "student" and section_id:
