@@ -31,6 +31,7 @@ APPROVAL_TYPES = (
     "user_deactivation",
     "fee_edit",
     "fee_concession",
+    "fee_override_admission",
     "refund",
 )
 APPROVAL_STATUSES = ("pending", "approved", "rejected", "cancelled")
@@ -128,6 +129,7 @@ class ApprovalCreate(BaseModel):
         "user_deactivation",
         "fee_edit",
         "fee_concession",
+        "fee_override_admission",
         "refund",
     ]
     subject_id: str
@@ -137,6 +139,7 @@ class ApprovalCreate(BaseModel):
 
 class DecisionIn(BaseModel):
     note: Optional[str] = None
+    modified_custom_fees: Optional[dict] = None
 
 
 async def _load_person(subject_id: str, kind: str) -> dict:
@@ -346,6 +349,12 @@ async def _apply_approval(req: dict) -> None:
         )
         return
 
+    if t == "fee_override_admission":
+        from fee_override_approval import apply_approved_fee_override
+        modified = req.get("modified_custom_fees")
+        await apply_approved_fee_override(req, modified_custom_fees=modified)
+        return
+
     raise HTTPException(400, "Cannot apply this approval type")
 
 
@@ -436,6 +445,8 @@ async def approve(req_id: str, payload: DecisionIn, user: dict = Depends(get_cur
 
     req["decided_by_id"] = user["id"]
     req["decided_by_name"] = user["name"]
+    if payload.modified_custom_fees is not None:
+        req["modified_custom_fees"] = payload.modified_custom_fees
     await _apply_approval(req)
 
     entry = _history_entry("approved", user, payload.note)
@@ -469,6 +480,10 @@ async def reject(req_id: str, payload: DecisionIn, user: dict = Depends(get_curr
         raise HTTPException(404, "Approval request not found")
     if req["status"] != "pending":
         raise HTTPException(400, f"Request already {req['status']}")
+
+    if req.get("type") == "fee_override_admission":
+        from fee_override_approval import apply_rejected_fee_override
+        await apply_rejected_fee_override(req)
 
     entry = _history_entry("rejected", user, payload.note)
     await db.approval_requests.update_one({"id": req_id}, {"$set": {

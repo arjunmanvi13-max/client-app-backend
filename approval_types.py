@@ -7,6 +7,7 @@ APPROVAL_CATEGORIES = (
     "user_deactivation",
     "fee_edit",
     "fee_concession",
+    "fee_override_admission",
     "refund",
 )
 
@@ -18,6 +19,7 @@ TYPE_TO_CATEGORY: Dict[str, str] = {
     "user_deactivation": "user_deactivation",
     "fee_edit": "fee_edit",
     "fee_concession": "fee_concession",
+    "fee_override_admission": "fee_override_admission",
     "refund": "refund",
 }
 
@@ -25,6 +27,7 @@ CATEGORY_TYPES: Dict[str, tuple] = {
     "user_deactivation": LEGACY_DEACTIVATION_TYPES,
     "fee_edit": ("fee_edit",),
     "fee_concession": ("fee_concession",),
+    "fee_override_admission": ("fee_override_admission",),
     "refund": ("refund",),
 }
 
@@ -158,6 +161,12 @@ def build_details(doc: dict) -> Dict[str, Any]:
         details.setdefault("previous_amount_due", payload.get("previous_amount_due"))
         details.setdefault("new_amount_due", payload.get("new_amount_due"))
         details.setdefault("subject_name", payload.get("person_name") or doc.get("subject_label"))
+    if cat == "fee_override_admission":
+        details.setdefault("entity_type", payload.get("entity_type"))
+        details.setdefault("default_fees", payload.get("default_fees"))
+        details.setdefault("custom_fees", payload.get("custom_fees"))
+        details.setdefault("override_fields", payload.get("override_fields"))
+        details.setdefault("person_id", payload.get("person_id"))
     if cat == "refund":
         details.setdefault("amount", payload.get("amount"))
         details.setdefault("invoice_id", payload.get("invoice_id"))

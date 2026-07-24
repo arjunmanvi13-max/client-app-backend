@@ -419,19 +419,66 @@ async def create_person(payload: PersonCreate, user: dict = Depends(get_current_
         derived = _age_from_dob(doc["dob"])
         if derived is not None:
             doc["age"] = derived
-    # Only Super Admin / Principal can set fee overrides at admission
-    if not is_super_admin(user) and user.get("role") not in ("principal", "vice_principal"):
-        doc.pop("monthly_fee_override", None)
-        doc.pop("registration_fee_override", None)
-        doc.pop("pws_fee_overrides", None)
+    fee_pending_approval = False
+    pending_override_fields: dict = {}
+    if payload.kind in ("player", "student"):
+        from fee_override_approval import (
+            analyze_fee_overrides,
+            can_bypass_fee_approval,
+            create_fee_override_approval_request,
+            extract_override_fields,
+            strip_fee_overrides_from_person,
+            approval_out,
+        )
+        can_override_pws = is_super_admin(user) or user.get("role") in ("principal", "vice_principal")
+        differs, default_fees, custom_fees = await analyze_fee_overrides(doc)
+        if differs and not can_bypass_fee_approval(user):
+            pending_override_fields = extract_override_fields(doc)
+            doc = strip_fee_overrides_from_person(doc)
+            doc["status"] = "pending_fee_approval"
+            doc["pending_fee_defaults"] = default_fees
+            doc["pending_fee_custom"] = custom_fees
+            fee_pending_approval = True
+        else:
+            if not can_override_pws:
+                doc.pop("pws_fee_overrides", None)
+            if not is_super_admin(user):
+                doc.pop("monthly_fee_override", None)
+                doc.pop("registration_fee_override", None)
+
     if payload.kind == "player":
         # Players default to ALPHA; super admin may set entities for dual participation
         if not payload.entities and payload.organization != "BOTH":
             doc["organization"] = "ALPHA"
         doc["entities"] = derive_person_entities(doc)
         doc["assigned_coach_id"] = None
+        if not fee_pending_approval:
+            doc.setdefault("status", "active")
+    elif payload.kind == "student" and not fee_pending_approval:
         doc.setdefault("status", "active")
+
     await db.people.insert_one(doc)
+
+    if fee_pending_approval:
+        try:
+            approval_doc = await create_fee_override_approval_request(
+                person=doc,
+                user=user,
+                default_fees=doc["pending_fee_defaults"],
+                custom_fees=doc["pending_fee_custom"],
+                override_fields=pending_override_fields,
+                is_create=True,
+            )
+        except ValueError as e:
+            await db.people.delete_one({"id": doc["id"]})
+            raise HTTPException(400, str(e)) from e
+        doc.pop("_id", None)
+        return {
+            "approval_required": True,
+            "person": doc,
+            "approval": approval_out(approval_doc),
+        }
+
     # Auto-create fees for ALPHA player or PWS student
     if payload.kind == "player":
         try:
@@ -486,12 +533,6 @@ async def update_person(person_id: str, payload: PersonUpdate, user: dict = Depe
         sid, label = await resolve_section_group(upd["section_id"])
         upd["section_id"] = sid
         upd["group"] = label
-    can_override_pws = is_super_admin(user) or user.get("role") in ("principal", "vice_principal")
-    if not can_override_pws:
-        upd.pop("pws_fee_overrides", None)
-    if not is_super_admin(user):
-        upd.pop("monthly_fee_override", None)
-        upd.pop("registration_fee_override", None)
     if target["kind"] == "student":
         merged_norm = _normalize_pws_student({**target, **upd})
         upd["is_resident"] = merged_norm.get("is_resident", target.get("is_resident"))
@@ -501,8 +542,42 @@ async def update_person(person_id: str, payload: PersonUpdate, user: dict = Depe
         derived = _age_from_dob(upd["dob"])
         if derived is not None:
             upd["age"] = derived
-    # Block status change via PATCH — must use dedicated activate/deactivate endpoints (admin-only)
-    upd.pop("status", None)
+
+    fee_pending_approval = False
+    pending_override_fields: dict = {}
+    merged_preview = {**target, **upd}
+    can_override_pws = is_super_admin(user) or user.get("role") in ("principal", "vice_principal")
+    if target["kind"] in ("player", "student"):
+        from fee_override_approval import (
+            analyze_fee_overrides,
+            approval_out,
+            can_bypass_fee_approval,
+            create_fee_override_approval_request,
+            extract_override_fields,
+            strip_fee_overrides_from_person,
+        )
+        differs, default_fees, custom_fees = await analyze_fee_overrides(merged_preview)
+        if differs and not can_bypass_fee_approval(user):
+            pending_override_fields = extract_override_fields(merged_preview)
+            for key in ("registration_fee_override", "monthly_fee_override", "hostel_fee_override", "pws_fee_overrides"):
+                upd.pop(key, None)
+            if "transport_fee_monthly" in upd:
+                upd["transport_fee_monthly"] = 0
+            upd["status"] = "pending_fee_approval"
+            upd["pending_fee_defaults"] = default_fees
+            upd["pending_fee_custom"] = custom_fees
+            fee_pending_approval = True
+        else:
+            if not can_override_pws:
+                upd.pop("pws_fee_overrides", None)
+            if not is_super_admin(user):
+                upd.pop("monthly_fee_override", None)
+                upd.pop("registration_fee_override", None)
+    else:
+        upd.pop("status", None)
+
+    if not fee_pending_approval:
+        upd.pop("status", None)
     if not upd:
         raise HTTPException(400, "No fields to update")
     merged = {**target, **upd}
@@ -511,10 +586,29 @@ async def update_person(person_id: str, payload: PersonUpdate, user: dict = Depe
     merged = {**target, **upd}
     if merged.get("kind") == "player":
         _validate_player_centre_type(merged.get("centre"), merged.get("player_type"))
-        # ignore assigned_coach_id changes — players are centre-based now
         upd.pop("assigned_coach_id", None)
     await db.people.update_one({"id": person_id}, {"$set": upd})
     fresh = await db.people.find_one({"id": person_id}, {"_id": 0})
+
+    if fee_pending_approval:
+        try:
+            approval_doc = await create_fee_override_approval_request(
+                person=fresh,
+                user=user,
+                default_fees=fresh.get("pending_fee_defaults") or {},
+                custom_fees=fresh.get("pending_fee_custom") or {},
+                override_fields=pending_override_fields,
+                is_create=False,
+                reason="Custom fee override requested on profile update",
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        return {
+            "approval_required": True,
+            "person": fresh,
+            "approval": approval_out(approval_doc),
+        }
+
     if fresh.get("kind") == "student" and fresh.get("pws_class"):
         try:
             from routers.pws_fees import sync_pws_fees_for_student
