@@ -58,6 +58,11 @@ def _assert_manage(user: dict) -> None:
         raise HTTPException(403, "manage_fee_catalog permission required")
 
 
+def _assert_super_admin_catalogue_edit(user: dict) -> None:
+    if not is_super_admin(user):
+        raise HTTPException(403, "Super Admin required to edit or delete catalogue items")
+
+
 def _assert_view(user: dict) -> None:
     if not _can_view(user):
         raise HTTPException(403, "view_fees permission required")
@@ -89,6 +94,10 @@ class CatalogueItemIn(BaseModel):
 
 class CatalogueItemPatch(BaseModel):
     name: Optional[str] = None
+    fee_type: Optional[Literal[
+        "tuition", "transport", "hostel", "examination", "coaching",
+        "registration", "uniform", "kit", "tournament",
+    ]] = None
     amount: Optional[float] = None
     billing_frequency: Optional[Literal["monthly", "quarterly", "term_wise", "annual", "one_time"]] = None
     academic_year_id: Optional[str] = None
@@ -225,6 +234,14 @@ async def find_plan_for_person(person: dict, academic_year_id: Optional[str] = N
     return None
 
 
+async def _catalogue_item_plan_name(item_id: str) -> Optional[str]:
+    plan = await db.fee_plans.find_one(
+        {"items.catalogue_item_id": item_id},
+        {"_id": 0, "name": 1},
+    )
+    return (plan or {}).get("name")
+
+
 async def resolve_rates_for_person(person: dict, academic_year_id: Optional[str] = None) -> dict:
     """Return legacy-shaped rate dict from assigned/default fee plan."""
     plan = await find_plan_for_person(person, academic_year_id)
@@ -296,17 +313,33 @@ async def get_catalogue_item(item_id: str, user: dict = Depends(get_current_user
 
 @router.patch("/items/{item_id}")
 async def patch_catalogue_item(item_id: str, payload: CatalogueItemPatch, user: dict = Depends(get_current_user)):
-    _assert_manage(user)
+    _assert_super_admin_catalogue_edit(user)
     doc = await db.fee_catalogue.find_one({"id": item_id}, {"_id": 0})
     if not doc:
         raise HTTPException(404, "Catalogue item not found")
-    patch = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+    patch = payload.model_dump(exclude_unset=True)
     if "fee_type" in patch:
         patch["legacy_fee_type"] = LEGACY_FEE_TYPE.get(patch["fee_type"])
     patch["updated_at"] = now_utc().isoformat()
     patch["updated_by"] = user["id"]
     await db.fee_catalogue.update_one({"id": item_id}, {"$set": patch})
     return await db.fee_catalogue.find_one({"id": item_id}, {"_id": 0})
+
+
+@router.delete("/items/{item_id}")
+async def delete_catalogue_item(item_id: str, user: dict = Depends(get_current_user)):
+    _assert_super_admin_catalogue_edit(user)
+    doc = await db.fee_catalogue.find_one({"id": item_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Catalogue item not found")
+    plan_name = await _catalogue_item_plan_name(item_id)
+    if plan_name:
+        raise HTTPException(
+            409,
+            f"Cannot delete '{doc.get('name')}': it is linked to fee plan '{plan_name}'. Remove it from the plan first or deactivate the item instead.",
+        )
+    await db.fee_catalogue.delete_one({"id": item_id})
+    return {"deleted": True, "id": item_id, "name": doc.get("name")}
 
 
 @router.get("/plans")
