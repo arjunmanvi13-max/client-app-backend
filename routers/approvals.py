@@ -433,6 +433,30 @@ async def get_approval(req_id: str, user: dict = Depends(get_current_user)):
     return _approval_out(doc)
 
 
+def _completion_notification(req: dict, *, approved: bool, decider_name: str) -> tuple[str, str]:
+    """Return (title, message) for requester notification after approve/reject."""
+    raw_type = req.get("type") or ""
+    subject = req.get("subject_label") or "Your request"
+    person_name = subject.split(" · ")[0].strip() if " · " in subject else subject.strip()
+
+    if raw_type == "fee_override_admission":
+        payload = req.get("payload") or {}
+        entity_type = (payload.get("entity_type") or "RECORD").replace("_", " ").title()
+        if approved:
+            return (
+                "Custom fee override approved",
+                f"Your custom fee override for {person_name} ({entity_type}) has been approved by {decider_name}.",
+            )
+        return (
+            "Custom fee override rejected",
+            f"Your custom fee override for {person_name} ({entity_type}) was rejected by {decider_name}.",
+        )
+
+    if approved:
+        return ("Request approved", f"{subject} — approved by {decider_name}")
+    return ("Request rejected", f"{subject} — rejected by {decider_name}")
+
+
 @router.post("/{req_id}/approve")
 async def approve(req_id: str, payload: DecisionIn, user: dict = Depends(get_current_user)):
     if not _can_approve(user):
@@ -458,11 +482,12 @@ async def approve(req_id: str, payload: DecisionIn, user: dict = Depends(get_cur
         "decision_note": payload.note,
     }, "$push": {"history": entry}})
 
+    notify_title, notify_message = _completion_notification(req, approved=True, decider_name=user["name"])
     await send_notification(
         req["requested_by_id"],
         ntype="approval_completed",
-        title="Request approved",
-        message=f"{req['subject_label']} — approved by {user['name']}",
+        title=notify_title,
+        message=notify_message,
         ref_id=req_id,
         ref_type="approval",
         entity_id=req.get("entity_id"),
@@ -494,11 +519,12 @@ async def reject(req_id: str, payload: DecisionIn, user: dict = Depends(get_curr
         "decision_note": payload.note,
     }, "$push": {"history": entry}})
 
+    notify_title, notify_message = _completion_notification(req, approved=False, decider_name=user["name"])
     await send_notification(
         req["requested_by_id"],
         ntype="approval_completed",
-        title="Request rejected",
-        message=f"{req['subject_label']} — rejected by {user['name']}",
+        title=notify_title,
+        message=notify_message,
         ref_id=req_id,
         ref_type="approval",
         entity_id=req.get("entity_id"),
