@@ -352,7 +352,10 @@ async def _apply_approval(req: dict) -> None:
     if t == "fee_override_admission":
         from fee_override_approval import apply_approved_fee_override
         modified = req.get("modified_custom_fees")
-        await apply_approved_fee_override(req, modified_custom_fees=modified)
+        try:
+            await apply_approved_fee_override(req, modified_custom_fees=modified)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
         return
 
     raise HTTPException(400, "Cannot apply this approval type")
@@ -467,20 +470,38 @@ async def approve(req_id: str, payload: DecisionIn, user: dict = Depends(get_cur
     if req["status"] != "pending":
         raise HTTPException(400, f"Request already {req['status']}")
 
-    req["decided_by_id"] = user["id"]
-    req["decided_by_name"] = user["name"]
-    if payload.modified_custom_fees is not None:
-        req["modified_custom_fees"] = payload.modified_custom_fees
-    await _apply_approval(req)
-
+    decided_at = now_utc().isoformat()
     entry = _history_entry("approved", user, payload.note)
     await db.approval_requests.update_one({"id": req_id}, {"$set": {
         "status": "approved",
         "decided_by_id": user["id"],
         "decided_by_name": user["name"],
-        "decided_at": now_utc().isoformat(),
+        "decided_at": decided_at,
         "decision_note": payload.note,
     }, "$push": {"history": entry}})
+
+    req["status"] = "approved"
+    req["decided_by_id"] = user["id"]
+    req["decided_by_name"] = user["name"]
+    req["decided_at"] = decided_at
+    req["decision_note"] = payload.note
+    if payload.modified_custom_fees is not None:
+        req["modified_custom_fees"] = payload.modified_custom_fees
+
+    try:
+        await _apply_approval(req)
+    except HTTPException:
+        await db.approval_requests.update_one({"id": req_id}, {"$set": {
+            "status": "pending",
+            "decided_by_id": None,
+            "decided_by_name": None,
+            "decided_at": None,
+            "decision_note": None,
+        }})
+        raise
+    except Exception:
+        import logging
+        logging.getLogger("approvals").exception("Side-effect failed for approved request %s", req_id)
 
     notify_title, notify_message = _completion_notification(req, approved=True, decider_name=user["name"])
     await send_notification(

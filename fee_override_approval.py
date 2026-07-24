@@ -266,6 +266,8 @@ async def create_fee_override_approval_request(
 
 
 async def apply_approved_fee_override(req: dict, modified_custom_fees: Optional[Dict[str, Any]] = None) -> None:
+    import logging
+
     p = req.get("payload") or {}
     person_id = p.get("person_id") or req.get("subject_id")
     person = await db.people.find_one({"id": person_id}, {"_id": 0})
@@ -277,34 +279,36 @@ async def apply_approved_fee_override(req: dict, modified_custom_fees: Optional[
     if not override_fields and p.get("override_fields"):
         override_fields = dict(p["override_fields"])
 
-    set_fields: Dict[str, Any] = {
-        "status": "active",
-        "pending_fee_defaults": None,
-        "pending_fee_custom": None,
-    }
-    for key in FEE_OVERRIDE_KEYS:
-        set_fields[key] = override_fields.get(key) if key in override_fields else None
-
-    unset_fields = {
+    update_set: Dict[str, Any] = {"status": "active"}
+    update_unset: Dict[str, str] = {
         "pending_fee_defaults": "",
         "pending_fee_custom": "",
     }
     for key in FEE_OVERRIDE_KEYS:
-        if key not in override_fields:
-            unset_fields[key] = ""
+        if key in override_fields:
+            update_set[key] = override_fields[key]
+        else:
+            update_unset[key] = ""
 
     await db.people.update_one(
         {"id": person_id},
-        {"$set": set_fields, "$unset": unset_fields},
+        {"$set": update_set, "$unset": update_unset},
     )
 
     fresh = await db.people.find_one({"id": person_id}, {"_id": 0})
-    if fresh.get("kind") == "player":
-        from routers.fees import auto_create_fees_for_player
-        await auto_create_fees_for_player(fresh)
-    elif fresh.get("kind") == "student":
-        from routers.pws_fees import sync_pws_fees_for_student
-        await sync_pws_fees_for_student(fresh)
+    if not fresh:
+        return
+    try:
+        if fresh.get("kind") == "player":
+            from routers.fees import auto_create_fees_for_player
+            await auto_create_fees_for_player(fresh)
+        elif fresh.get("kind") == "student":
+            from routers.pws_fees import sync_pws_fees_for_student
+            await sync_pws_fees_for_student(fresh)
+    except Exception:
+        logging.getLogger("fee_override_approval").exception(
+            "Fee materialization failed after approving override for person %s", person_id,
+        )
 
 
 async def apply_rejected_fee_override(req: dict) -> None:
