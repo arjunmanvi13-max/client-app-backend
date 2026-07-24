@@ -74,23 +74,55 @@ async def _assert_unique_ids(doc: dict, exclude_id: Optional[str] = None) -> Non
             raise HTTPException(409, f"{label} already exists")
 
 
-def _search_filter(qtext: str) -> dict:
-    rx = re.escape(qtext.strip())
-    if not rx:
+def _flex_id_regex(qtext: str) -> str:
+    """Build a regex that matches IDs with optional spaces/dashes (e.g. APL 204 → APL-204)."""
+    parts = [re.escape(p) for p in re.split(r"[\s\-]+", qtext.strip()) if p]
+    if not parts:
+        return ""
+    return r"[\s\-]*".join(parts)
+
+
+def _merge_mongo_filters(*filters: dict) -> dict:
+    parts = [f for f in filters if f]
+    if not parts:
         return {}
-    return {
-        "$or": [
-            {"name": {"$regex": rx, "$options": "i"}},
-            {"admission_number": {"$regex": rx, "$options": "i"}},
-            {"roll_number": {"$regex": rx, "$options": "i"}},
-            {"employee_id": {"$regex": rx, "$options": "i"}},
-            {"player_id": {"$regex": rx, "$options": "i"}},
-            {"mobile": {"$regex": rx, "$options": "i"}},
-            {"guardian_name": {"$regex": rx, "$options": "i"}},
-            {"father_name": {"$regex": rx, "$options": "i"}},
-            {"mother_name": {"$regex": rx, "$options": "i"}},
-        ]
-    }
+    if len(parts) == 1:
+        return parts[0]
+    return {"$and": parts}
+
+
+def _search_filter(qtext: str) -> dict:
+    raw = qtext.strip()
+    if not raw:
+        return {}
+    rx = re.escape(raw)
+    id_rx = _flex_id_regex(raw) or rx
+    or_clauses: list = [
+        {"name": {"$regex": rx, "$options": "i"}},
+        {"admission_number": {"$regex": id_rx, "$options": "i"}},
+        {"employee_id": {"$regex": id_rx, "$options": "i"}},
+        {"player_id": {"$regex": id_rx, "$options": "i"}},
+        {"mobile": {"$regex": rx, "$options": "i"}},
+        {"guardian_name": {"$regex": rx, "$options": "i"}},
+        {"father_name": {"$regex": rx, "$options": "i"}},
+        {"mother_name": {"$regex": rx, "$options": "i"}},
+        {"sport": {"$regex": rx, "$options": "i"}},
+        {"centre": {"$regex": rx, "$options": "i"}},
+        {"player_type": {"$regex": rx, "$options": "i"}},
+        {"group": {"$regex": rx, "$options": "i"}},
+        {"pws_class": {"$regex": rx, "$options": "i"}},
+        {"email": {"$regex": rx, "$options": "i"}},
+        {
+            "$expr": {
+                "$regexMatch": {
+                    "input": {"$toString": {"$ifNull": ["$roll_number", ""]}},
+                    "regex": rx,
+                    "options": "i",
+                }
+            }
+        },
+    ]
+    return {"$or": or_clauses}
 
 
 def _can_list_kind(user: dict, kind: str) -> bool:
@@ -186,7 +218,7 @@ async def list_people(
         if kind:
             filt["kind"] = kind
         if q:
-            filt.update(_search_filter(q))
+            filt = _merge_mongo_filters(filt, _search_filter(q))
         return await db.people.find(filt, {"_id": 0}).sort("name", 1).to_list(100)
     if user.get("role") == "teacher" and not kind:
         raise HTTPException(400, "kind is required (e.g. kind=student)")
@@ -236,19 +268,21 @@ async def list_people(
     elif kind in ("player", "student", "staff", "teacher") and not include_deactivated:
         query["status"] = {"$ne": "deactivated"}
     if q:
-        query.update(_search_filter(q))
+        query = _merge_mongo_filters(query, _search_filter(q))
     if is_coach_user(user) and kind == "player":
         try:
             assert_coach_sport_assigned(user)
         except ValueError as e:
             raise HTTPException(403, str(e)) from e
         coach_q = _coach_visibility_filter(user, include_deactivated=include_deactivated)
-        query = {"$and": [query, coach_q]} if query else coach_q
+        query = _merge_mongo_filters(query, coach_q)
     elif is_coach_user(user):
         # Coach may only list players
         return []
     inst = resolve_user_institution(user, institution)
-    query.update(person_entity_filter(inst))
+    entity_f = person_entity_filter(inst)
+    if entity_f:
+        query = _merge_mongo_filters(query, entity_f)
     if is_sports_admin(user):
         if kind in ("student", "teacher"):
             return []
