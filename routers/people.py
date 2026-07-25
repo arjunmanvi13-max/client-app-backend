@@ -19,6 +19,7 @@ from coach_scope import (
 from routers.coach import _coach_visibility_filter, _coach_assignment_lists
 from people_enrollment import assign_enrollment_ids
 from approval_types import entity_from_person, role_label_from_person
+from student_academic import enrich_students_for_list, sync_student_academic_fields
 
 router = APIRouter(prefix="/people", tags=["people"])
 
@@ -219,7 +220,10 @@ async def list_people(
             filt["kind"] = kind
         if q:
             filt = _merge_mongo_filters(filt, _search_filter(q))
-        return await db.people.find(filt, {"_id": 0}).sort("name", 1).to_list(100)
+        rows = await db.people.find(filt, {"_id": 0}).sort("name", 1).to_list(100)
+        if kind == "student" or not kind:
+            rows = await enrich_students_for_list(rows)
+        return rows
     if user.get("role") == "teacher" and not kind:
         raise HTTPException(400, "kind is required (e.g. kind=student)")
     if is_coach_user(user) and not kind:
@@ -287,6 +291,8 @@ async def list_people(
         if kind in ("student", "teacher"):
             return []
     rows = await db.people.find(query, {"_id": 0}).sort("name", 1).to_list(1000)
+    if kind == "student":
+        rows = await enrich_students_for_list(rows)
     if is_coach_user(user) and kind == "player":
         return {"data": rows, "scope": coach_scope_metadata(user)}
     return rows
@@ -310,6 +316,9 @@ async def get_person(person_id: str, user: dict = Depends(get_current_user)):
     _assert_can_view_person(user, person)
     if person.get("kind") == "student" and user.get("role") == "teacher":
         await assert_teacher_section_access(user, person.get("section_id") or "")
+    if person.get("kind") == "student":
+        enriched = await enrich_students_for_list([person])
+        return enriched[0] if enriched else person
     return person
 
 def _validate_player_centre_type(centre: Optional[str], ptype: Optional[str]):
@@ -441,6 +450,8 @@ async def create_person(payload: PersonCreate, user: dict = Depends(get_current_
         sid, label = await resolve_section_group(payload.section_id)
         doc["section_id"] = sid
         doc["group"] = label
+    if payload.kind == "student":
+        doc = await sync_student_academic_fields(doc)
     if payload.kind == "staff":
         if payload.department:
             doc["department"] = payload.department
@@ -563,10 +574,18 @@ async def update_person(person_id: str, payload: PersonUpdate, user: dict = Depe
             if centres and upd["centre"] not in centres:
                 raise HTTPException(403, ERR_SPORT_ACCESS)
     upd = _normalize_guardian_fields(upd)
-    if target["kind"] == "student" and upd.get("section_id"):
-        sid, label = await resolve_section_group(upd["section_id"])
-        upd["section_id"] = sid
-        upd["group"] = label
+    if target["kind"] == "student":
+        if upd.get("section_id") == "":
+            upd["section_id"] = None
+            upd["group"] = None
+        elif upd.get("section_id"):
+            sid, label = await resolve_section_group(upd["section_id"])
+            upd["section_id"] = sid
+            upd["group"] = label
+        merged = {**target, **upd}
+        synced = await sync_student_academic_fields(merged)
+        upd["section_id"] = synced.get("section_id")
+        upd["group"] = synced.get("group")
     if target["kind"] == "student":
         merged_norm = _normalize_pws_student({**target, **upd})
         upd["is_resident"] = merged_norm.get("is_resident", target.get("is_resident"))
