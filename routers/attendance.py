@@ -579,6 +579,7 @@ async def mark_attendance_batch(payload: AttendanceBatch, user: dict = Depends(g
             group=group,
             section_id=section_id,
             sport=payload.sport,
+            centre=payload.centre,
             source="batch",
         )
         records.append(rec)

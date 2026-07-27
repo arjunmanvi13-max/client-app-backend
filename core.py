@@ -990,6 +990,7 @@ class AttendanceBatch(BaseModel):
     group: Optional[str] = None
     section_id: Optional[str] = None
     sport: Optional[str] = None
+    centre: Optional[str] = None
     session: Optional[str] = "morning"
     marks: List[AttendanceMark]
 

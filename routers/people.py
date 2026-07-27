@@ -402,6 +402,14 @@ def _age_from_dob(dob: Optional[str]) -> Optional[int]:
     except Exception:
         return None
 
+def _normalize_alpha_player(doc: dict) -> dict:
+    if doc.get("kind") != "player":
+        return doc
+    ptype = (doc.get("player_type") or "").strip()
+    doc["is_resident"] = ptype in ("Hostel", "Hostel Only", "Boarding")
+    return doc
+
+
 def _normalize_pws_student(doc: dict) -> dict:
     if doc.get("kind") != "student":
         return doc
@@ -442,6 +450,7 @@ async def create_person(payload: PersonCreate, user: dict = Depends(get_current_
         doc["sport"] = assert_coach_sport_assigned(user)
     doc = _normalize_guardian_fields(doc)
     doc = _normalize_pws_student(doc)
+    doc = _normalize_alpha_player(doc)
     doc["entities"] = derive_person_entities(doc)
     if payload.kind in ("player", "student"):
         doc = await assign_enrollment_ids(doc)
@@ -593,6 +602,9 @@ async def update_person(person_id: str, payload: PersonUpdate, user: dict = Depe
         merged_norm = _normalize_pws_student({**target, **upd})
         upd["is_resident"] = merged_norm.get("is_resident", target.get("is_resident"))
         upd["transport_fee_monthly"] = merged_norm.get("transport_fee_monthly", target.get("transport_fee_monthly"))
+    if target["kind"] == "player" and "player_type" in upd:
+        merged_norm = _normalize_alpha_player({**target, **upd})
+        upd["is_resident"] = merged_norm.get("is_resident", target.get("is_resident"))
     # Auto-compute age from DOB when DOB is being changed
     if upd.get("dob"):
         derived = _age_from_dob(upd["dob"])
