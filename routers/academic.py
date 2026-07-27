@@ -26,6 +26,11 @@ def _assert_manage_academic(user: dict) -> None:
     assert_manage_academic(user)
 
 
+def _assert_super_admin_structure_mutation(user: dict) -> None:
+    if not is_super_admin(user):
+        raise HTTPException(403, "Only Super Admin can edit or delete standards and sections")
+
+
 async def get_open_academic_year(entity_id: str = ENTITY_PWS) -> Optional[dict]:
     return await db.academic_years.find_one(
         {"entity_id": entity_id, "status": "open"},
@@ -165,6 +170,16 @@ class SectionIn(BaseModel):
     entity_id: Literal["pws", "alpha", "both"] = ENTITY_PWS
 
 
+class GradeUpdateIn(BaseModel):
+    name: Optional[str] = None
+    sort_order: Optional[int] = None
+
+
+class SectionUpdateIn(BaseModel):
+    name: Optional[str] = None
+    grade_id: Optional[str] = None
+
+
 class SubjectIn(BaseModel):
     academic_year_id: str
     name: str
@@ -276,6 +291,94 @@ async def create_grade(payload: GradeIn, user: dict = Depends(get_current_user))
     return doc
 
 
+async def _grade_delete_blockers(grade_id: str, academic_year_id: str) -> Optional[str]:
+    section_count = await db.sections.count_documents({"grade_id": grade_id, "academic_year_id": academic_year_id})
+    if section_count:
+        return f"Cannot delete standard: {section_count} section(s) still exist. Delete sections first."
+    if await db.teacher_class_assignments.count_documents({"grade_id": grade_id, "academic_year_id": academic_year_id}):
+        return "Cannot delete standard: teacher class assignments still reference it."
+    subject = await db.subjects.find_one(
+        {"academic_year_id": academic_year_id, "grade_ids": grade_id},
+        {"_id": 0, "name": 1},
+    )
+    if subject:
+        return f"Cannot delete standard: subject \"{subject.get('name', 'Unknown')}\" is scoped to it."
+    return None
+
+
+@router.patch("/grades/{grade_id}")
+async def update_grade(grade_id: str, payload: GradeUpdateIn, user: dict = Depends(get_current_user)):
+    _assert_super_admin_structure_mutation(user)
+    grade = await db.grades.find_one({"id": grade_id}, {"_id": 0})
+    if not grade:
+        raise HTTPException(404, "Standard not found")
+    year = await _year_by_id(grade["academic_year_id"])
+    _assert_year_writable(year)
+
+    updates: dict = {}
+    if payload.name is not None:
+        new_name = payload.name.strip()
+        if not new_name:
+            raise HTTPException(400, "Standard name cannot be empty")
+        dup = await db.grades.find_one({
+            "academic_year_id": grade["academic_year_id"],
+            "name": new_name,
+            "id": {"$ne": grade_id},
+        })
+        if dup:
+            raise HTTPException(400, f"Standard {new_name} already exists")
+        updates["name"] = new_name
+    if payload.sort_order is not None:
+        updates["sort_order"] = payload.sort_order
+    if not updates:
+        return grade
+
+    if "name" in updates:
+        sections = await db.sections.find({"grade_id": grade_id}, {"_id": 0}).to_list(200)
+        for sec in sections:
+            new_label = f"{updates['name']}-{sec['name']}"
+            conflict = await db.sections.find_one({
+                "academic_year_id": grade["academic_year_id"],
+                "label": new_label,
+                "id": {"$ne": sec["id"]},
+            })
+            if conflict:
+                raise HTTPException(400, f"Renaming standard would conflict with existing section {new_label}")
+
+    updates["updated_at"] = now_utc().isoformat()
+    await db.grades.update_one({"id": grade_id}, {"$set": updates})
+
+    if "name" in updates:
+        sections = await db.sections.find({"grade_id": grade_id}, {"_id": 0}).to_list(200)
+        for sec in sections:
+            new_label = f"{updates['name']}-{sec['name']}"
+            await db.sections.update_one(
+                {"id": sec["id"]},
+                {"$set": {"grade_name": updates["name"], "label": new_label, "updated_at": now_utc().isoformat()}},
+            )
+            await db.people.update_many(
+                {"section_id": sec["id"], "kind": "student"},
+                {"$set": {"group": new_label}},
+            )
+
+    return await db.grades.find_one({"id": grade_id}, {"_id": 0})
+
+
+@router.delete("/grades/{grade_id}")
+async def delete_grade(grade_id: str, user: dict = Depends(get_current_user)):
+    _assert_super_admin_structure_mutation(user)
+    grade = await db.grades.find_one({"id": grade_id}, {"_id": 0})
+    if not grade:
+        raise HTTPException(404, "Standard not found")
+    year = await _year_by_id(grade["academic_year_id"])
+    _assert_year_writable(year)
+    blocker = await _grade_delete_blockers(grade_id, grade["academic_year_id"])
+    if blocker:
+        raise HTTPException(409, blocker)
+    await db.grades.delete_one({"id": grade_id})
+    return {"ok": True}
+
+
 # ------------------ Sections ------------------
 @router.get("/sections")
 async def list_sections(
@@ -321,6 +424,91 @@ async def create_section(payload: SectionIn, user: dict = Depends(get_current_us
     await db.sections.insert_one(doc)
     doc.pop("_id", None)
     return doc
+
+
+async def _section_delete_blockers(section_id: str, academic_year_id: str) -> Optional[str]:
+    student_count = await db.people.count_documents({"kind": "student", "section_id": section_id, "status": {"$ne": "deactivated"}})
+    if student_count:
+        return f"Cannot delete section: {student_count} active student(s) are assigned to it."
+    if await db.teacher_class_assignments.count_documents({"section_id": section_id, "academic_year_id": academic_year_id}):
+        return "Cannot delete section: teacher class assignments still reference it."
+    if await db.teacher_section_assignments.count_documents({"section_id": section_id, "academic_year_id": academic_year_id}):
+        return "Cannot delete section: teacher section assignments still reference it."
+    subject = await db.subjects.find_one(
+        {"academic_year_id": academic_year_id, "section_ids": section_id},
+        {"_id": 0, "name": 1},
+    )
+    if subject:
+        return f"Cannot delete section: subject \"{subject.get('name', 'Unknown')}\" is scoped to it."
+    if await db.assessments.count_documents({"section_id": section_id, "academic_year_id": academic_year_id}):
+        return "Cannot delete section: marks assessments still reference it."
+    return None
+
+
+@router.patch("/sections/{section_id}")
+async def update_section(section_id: str, payload: SectionUpdateIn, user: dict = Depends(get_current_user)):
+    _assert_super_admin_structure_mutation(user)
+    section = await db.sections.find_one({"id": section_id}, {"_id": 0})
+    if not section:
+        raise HTTPException(404, "Section not found")
+    year = await _year_by_id(section["academic_year_id"])
+    _assert_year_writable(year)
+
+    new_name = payload.name.strip() if payload.name is not None else section["name"]
+    new_grade_id = payload.grade_id if payload.grade_id is not None else section["grade_id"]
+    if not new_name:
+        raise HTTPException(400, "Section name cannot be empty")
+
+    grade = await db.grades.find_one({"id": new_grade_id, "academic_year_id": section["academic_year_id"]})
+    if not grade:
+        raise HTTPException(404, "Standard not found for this academic year")
+
+    new_label = f"{grade['name']}-{new_name}"
+    if new_label != section["label"]:
+        conflict = await db.sections.find_one({
+            "academic_year_id": section["academic_year_id"],
+            "label": new_label,
+            "id": {"$ne": section_id},
+        })
+        if conflict:
+            raise HTTPException(400, f"Section {new_label} already exists")
+
+    patch = {
+        "name": new_name,
+        "grade_id": new_grade_id,
+        "grade_name": grade["name"],
+        "label": new_label,
+        "updated_at": now_utc().isoformat(),
+    }
+    await db.sections.update_one({"id": section_id}, {"$set": patch})
+
+    if new_label != section.get("label"):
+        await db.people.update_many(
+            {"section_id": section_id, "kind": "student"},
+            {"$set": {"group": new_label}},
+        )
+    if new_grade_id != section.get("grade_id"):
+        await db.teacher_class_assignments.update_many(
+            {"section_id": section_id, "academic_year_id": section["academic_year_id"]},
+            {"$set": {"grade_id": new_grade_id}},
+        )
+
+    return await db.sections.find_one({"id": section_id}, {"_id": 0})
+
+
+@router.delete("/sections/{section_id}")
+async def delete_section(section_id: str, user: dict = Depends(get_current_user)):
+    _assert_super_admin_structure_mutation(user)
+    section = await db.sections.find_one({"id": section_id}, {"_id": 0})
+    if not section:
+        raise HTTPException(404, "Section not found")
+    year = await _year_by_id(section["academic_year_id"])
+    _assert_year_writable(year)
+    blocker = await _section_delete_blockers(section_id, section["academic_year_id"])
+    if blocker:
+        raise HTTPException(409, blocker)
+    await db.sections.delete_one({"id": section_id})
+    return {"ok": True}
 
 
 @router.get("/sections/for-attendance")
