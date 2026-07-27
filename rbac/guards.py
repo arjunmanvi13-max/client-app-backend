@@ -132,6 +132,8 @@ def can_mark_alpha_attendance(user: dict) -> bool:
 def can_mark_teacher_attendance(user: dict) -> bool:
     if is_super_admin(user):
         return True
+    if can_mark_pws_attendance(user):
+        return True
     if not has_permission(user, Permission.MARK_TEACHER_ATTENDANCE, entity=BusinessEntity.PWS):
         return False
     role = normalize_role(user.get("role", ""))

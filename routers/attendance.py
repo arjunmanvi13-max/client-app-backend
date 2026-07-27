@@ -413,24 +413,51 @@ class TeacherAttendanceIn(BaseModel):
     session: Optional[str] = "morning"
 
 
+def _pws_teacher_users_query() -> dict:
+    """Active PWS teacher login accounts and directory profiles live in users."""
+    return merge_mongo_query(
+        {
+            "$or": [
+                {"role": "teacher", "organization": {"$in": ["PWS", "BOTH"]}},
+                {"role": "teacher", "organization": {"$exists": False}},
+                {"user_type": UserRole.PWS_TEACHER.value},
+            ],
+        },
+        active_status_filter(),
+    )
+
+
+def _teacher_directory_row(doc: dict) -> dict:
+    return {
+        "id": doc["id"],
+        "name": doc.get("name") or "Teacher",
+        "organization": doc.get("organization") or "PWS",
+        "department": doc.get("department"),
+        "group": doc.get("department") or "teacher",
+    }
+
+
 @router.get("/teachers-list")
 async def teachers_list(user: dict = Depends(get_current_user)):
     if not _can_mark_teacher_attendance(user):
-        raise HTTPException(403, "Principal / Vice Principal / Academic Head permission required")
-    q = merge_mongo_query({"kind": "teacher"}, active_status_filter())
-    q["organization"] = "PWS"
-    teachers = await db.people.find(q, {"_id": 0}).sort("name", 1).to_list(500)
-    return teachers
+        raise HTTPException(403, "Not allowed to view teacher attendance roster")
+    teachers = await db.users.find(
+        _pws_teacher_users_query(),
+        {"_id": 0, "password_hash": 0},
+    ).sort("name", 1).to_list(500)
+    return [_teacher_directory_row(t) for t in teachers]
 
 
 @router.post("/teachers")
 async def mark_teacher_attendance(payload: TeacherAttendanceIn, user: dict = Depends(get_current_user)):
     if not _can_mark_teacher_attendance(user):
-        raise HTTPException(403, "Principal / Vice Principal / Academic Head permission required")
+        raise HTTPException(403, "Not allowed to mark teacher attendance")
     if is_holiday_for_kind(payload.date, "teacher"):
         raise HTTPException(400, "Sunday is a holiday for teachers — attendance is not required")
-    q = merge_mongo_query({"kind": "teacher", "organization": "PWS"}, active_status_filter())
-    teachers = await db.people.find(q, {"_id": 0}).to_list(500)
+    teachers = await db.users.find(
+        _pws_teacher_users_query(),
+        {"_id": 0, "password_hash": 0},
+    ).to_list(500)
     if not teachers:
         raise HTTPException(400, "No teachers found")
     absent_set = set(payload.absent_teacher_ids or [])
@@ -445,8 +472,13 @@ async def mark_teacher_attendance(payload: TeacherAttendanceIn, user: dict = Dep
             status=status,
             session=payload.session,
             entity_id="pws",
-            organization=t.get("organization"),
+            organization=t.get("organization") or "PWS",
             source="teacher_default_present",
+            extra={
+                "user_id": t["id"],
+                "name": t.get("name"),
+                "department": t.get("department"),
+            },
         )
         records.append(rec)
     return {
