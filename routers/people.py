@@ -3,7 +3,7 @@ import uuid
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pymongo.errors import DuplicateKeyError
-from core import db, PersonCreate, PersonUpdate, get_current_user, assert_can_manage, assert_player_action, assert_perm, get_perm, is_admin, is_sports_admin, is_super_admin, now_utc, resolve_user_institution, person_entity_filter, derive_person_entities, assert_person_entity_access, coach_can, logger
+from core import db, PersonCreate, PersonUpdate, get_current_user, assert_can_manage, assert_player_action, assert_perm, get_perm, is_admin, is_sports_admin, is_super_admin, now_utc, resolve_user_institution, person_entity_filter, derive_person_entities, assert_person_entity_access, coach_can, logger, merge_mongo_query, active_status_filter
 from routers.academic import (
     resolve_section_group,
     assert_teacher_section_access,
@@ -302,7 +302,10 @@ async def list_people(
 async def list_groups(kind: str, institution: Optional[str] = None, user: dict = Depends(get_current_user)):
     _assert_can_list_kind(user, kind)
     inst = resolve_user_institution(user, institution)
-    filt = {"kind": kind, **person_entity_filter(inst)}
+    filt = merge_mongo_query(
+        {"kind": kind, **person_entity_filter(inst)},
+        active_status_filter(),
+    )
     groups = await db.people.distinct("group", filt)
     return {"kind": kind, "groups": sorted([g for g in groups if g])}
 
