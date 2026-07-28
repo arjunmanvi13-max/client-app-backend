@@ -24,6 +24,7 @@ DEMO_USERS = [
 SUPER_ADMIN_SEEDS = [
     {"email": "superadmin@prarambhika.com", "password": "Super@123", "name": "Super Admin 1", "organization": "BOTH", "department": "Trustee"},
     {"email": "superadmin2@prarambhika.com", "password": "Super@123", "name": "Super Admin 2", "organization": "BOTH", "department": "Trustee"},
+    {"email": "sumit.prakash@prarambhika.com", "password": "Super@123", "name": "Sumit Prakash", "organization": "BOTH", "department": "Trustee"},
 ]
 
 DEFAULT_PWS_SUBJECTS = [
