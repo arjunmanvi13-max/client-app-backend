@@ -468,75 +468,82 @@ def _finance_export_pdf(org: str, title: str, subtitle: str, columns: List[str],
     from reportlab.lib.units import mm
     from reportlab.pdfgen import canvas as pdfcanvas
 
-    buf = BytesIO()
     page_size = landscape(A4)
-    c = pdfcanvas.Canvas(buf, pagesize=page_size)
     W, H = page_size
     margin = 20 * mm
     line_h = 5 * mm
-    page_num = 1
-
-    def draw_footer():
-        c.setFont("Helvetica", 7)
-        c.drawString(margin, 10 * mm, subtitle[:160])
-        c.drawRightString(W - margin, 10 * mm, f"Page {page_num}")
-
-    def new_page():
-        nonlocal page_num, y
-        c.showPage()
-        page_num += 1
-        y = H - margin
-        c.setFont("Helvetica", 7)
-
-    y = H - margin
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(margin, y, org)
-    y -= line_h
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(margin, y, title)
-    y -= line_h
-    c.setFont("Helvetica", 8)
-    c.drawString(margin, y, subtitle[:160])
-    y -= line_h * 2
-
     col_w = (W - 2 * margin) / max(len(columns), 1)
-    c.setFont("Helvetica-Bold", 8)
-    for i, col in enumerate(columns):
-        c.drawString(margin + i * col_w, y, str(col)[:20])
-    y -= line_h
-    c.setFont("Helvetica", 7)
 
-    for row in rows:
-        if y < 18 * mm:
-            draw_footer()
-            new_page()
+    def render_pages(c, footer_fn):
+        page_num = 1
+        y = H - margin
+
+        def new_page():
+            nonlocal page_num, y
+            footer_fn(page_num)
+            c.showPage()
+            page_num += 1
+            y = H - margin
+            c.setFont("Helvetica", 7)
+
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(margin, y, org)
+        y -= line_h
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(margin, y, title)
+        y -= line_h
+        c.setFont("Helvetica", 8)
+        c.drawString(margin, y, subtitle[:160])
+        y -= line_h * 2
+        c.setFont("Helvetica-Bold", 8)
+        for i, col in enumerate(columns):
+            c.drawString(margin + i * col_w, y, str(col)[:20])
+        y -= line_h
+        c.setFont("Helvetica", 7)
+
+        for row in rows:
+            if y < 18 * mm:
+                new_page()
+                c.setFont("Helvetica-Bold", 8)
+                for i, col in enumerate(columns):
+                    c.drawString(margin + i * col_w, y, str(col)[:20])
+                y -= line_h
+                c.setFont("Helvetica", 7)
+            for i, val in enumerate(row):
+                c.drawString(margin + i * col_w, y, str(val)[:24] if val is not None else "")
+            y -= line_h
+
+        if summary_rows:
+            y -= line_h
             c.setFont("Helvetica-Bold", 8)
-            for i, col in enumerate(columns):
-                c.drawString(margin + i * col_w, y, str(col)[:20])
+            c.drawString(margin, y, "Summary")
             y -= line_h
             c.setFont("Helvetica", 7)
-        for i, val in enumerate(row):
-            c.drawString(margin + i * col_w, y, str(val)[:24] if val is not None else "")
-        y -= line_h
+            for srow in summary_rows:
+                if y < 18 * mm:
+                    new_page()
+                c.drawString(margin, y, " · ".join(str(x) for x in srow))
+                y -= line_h
 
-    if summary_rows:
-        y -= line_h
-        c.setFont("Helvetica-Bold", 8)
-        c.drawString(margin, y, "Summary")
-        y -= line_h
-        c.setFont("Helvetica", 7)
-        for srow in summary_rows:
-            if y < 18 * mm:
-                draw_footer()
-                new_page()
-            c.drawString(margin, y, " · ".join(str(x) for x in srow))
-            y -= line_h
+        footer_fn(page_num)
+        return page_num
 
-    draw_footer()
-    c.save()
-    buf.seek(0)
+    count_buf = BytesIO()
+    total_pages = render_pages(pdfcanvas.Canvas(count_buf, pagesize=page_size), lambda _p: None)
+
+    out_buf = BytesIO()
+    out_canvas = pdfcanvas.Canvas(out_buf, pagesize=page_size)
+
+    def draw_footer(page_num: int):
+        out_canvas.setFont("Helvetica", 7)
+        out_canvas.drawString(margin, 10 * mm, subtitle[:160])
+        out_canvas.drawRightString(W - margin, 10 * mm, f"Page {page_num} of {total_pages}")
+
+    render_pages(out_canvas, draw_footer)
+    out_canvas.save()
+    out_buf.seek(0)
     return StreamingResponse(
-        buf,
+        out_buf,
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
