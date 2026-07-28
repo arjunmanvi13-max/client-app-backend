@@ -1,7 +1,8 @@
 """Reports module — Financial reports + MVP catalog, filters, Excel/PDF export."""
 from datetime import datetime, timedelta
 from io import BytesIO
-from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -448,6 +449,168 @@ async def export_financial(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={fname}"},
+    )
+
+
+class FinanceReportExportIn(BaseModel):
+    organization: str = "ALPHA Sports Academy & PWS"
+    title: str
+    subtitle: str
+    report_view: str
+    format: Literal["csv", "xlsx", "pdf"]
+    columns: List[str]
+    rows: List[List[Any]]
+    summary_rows: List[List[Any]] = Field(default_factory=list)
+
+
+def _finance_export_pdf(org: str, title: str, subtitle: str, columns: List[str], rows: List[List[Any]], summary_rows: List[List[Any]], filename: str) -> StreamingResponse:
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.units import mm
+    from reportlab.pdfgen import canvas as pdfcanvas
+
+    buf = BytesIO()
+    page_size = landscape(A4)
+    c = pdfcanvas.Canvas(buf, pagesize=page_size)
+    W, H = page_size
+    margin = 20 * mm
+    line_h = 5 * mm
+    page_num = 1
+
+    def draw_footer():
+        c.setFont("Helvetica", 7)
+        c.drawString(margin, 10 * mm, subtitle[:160])
+        c.drawRightString(W - margin, 10 * mm, f"Page {page_num}")
+
+    def new_page():
+        nonlocal page_num, y
+        c.showPage()
+        page_num += 1
+        y = H - margin
+        c.setFont("Helvetica", 7)
+
+    y = H - margin
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(margin, y, org)
+    y -= line_h
+    c.setFont("Helvetica-Bold", 11)
+    c.drawString(margin, y, title)
+    y -= line_h
+    c.setFont("Helvetica", 8)
+    c.drawString(margin, y, subtitle[:160])
+    y -= line_h * 2
+
+    col_w = (W - 2 * margin) / max(len(columns), 1)
+    c.setFont("Helvetica-Bold", 8)
+    for i, col in enumerate(columns):
+        c.drawString(margin + i * col_w, y, str(col)[:20])
+    y -= line_h
+    c.setFont("Helvetica", 7)
+
+    for row in rows:
+        if y < 18 * mm:
+            draw_footer()
+            new_page()
+            c.setFont("Helvetica-Bold", 8)
+            for i, col in enumerate(columns):
+                c.drawString(margin + i * col_w, y, str(col)[:20])
+            y -= line_h
+            c.setFont("Helvetica", 7)
+        for i, val in enumerate(row):
+            c.drawString(margin + i * col_w, y, str(val)[:24] if val is not None else "")
+        y -= line_h
+
+    if summary_rows:
+        y -= line_h
+        c.setFont("Helvetica-Bold", 8)
+        c.drawString(margin, y, "Summary")
+        y -= line_h
+        c.setFont("Helvetica", 7)
+        for srow in summary_rows:
+            if y < 18 * mm:
+                draw_footer()
+                new_page()
+            c.drawString(margin, y, " · ".join(str(x) for x in srow))
+            y -= line_h
+
+    draw_footer()
+    c.save()
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/finance-reports/export")
+async def export_finance_report(payload: FinanceReportExportIn, user: dict = Depends(get_current_user)):
+    _access_check(user)
+    stamp = now_utc().strftime("%Y%m%d-%H%M")
+    fname_base = f"finance-{payload.report_view}-{stamp}"
+    subtitle = payload.subtitle
+
+    if payload.format == "csv":
+        lines = [payload.organization, payload.title, subtitle, "", ",".join(payload.columns)]
+        for row in payload.rows:
+            lines.append(",".join(f'"{str(c).replace(chr(34), chr(34)+chr(34))}"' for c in row))
+        if payload.summary_rows:
+            lines.extend(["", "Summary"])
+            for srow in payload.summary_rows:
+                lines.append(",".join(str(x) for x in srow))
+        content = "\n".join(lines)
+        return StreamingResponse(
+            iter([content]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{fname_base}.csv"'},
+        )
+
+    matrix = [[str(c) for c in row] for row in payload.rows]
+    if payload.format == "pdf":
+        return _finance_export_pdf(
+            payload.organization,
+            payload.title,
+            subtitle,
+            payload.columns,
+            matrix,
+            payload.summary_rows,
+            f"{fname_base}.pdf",
+        )
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = payload.title[:31]
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(len(payload.columns), 1))
+    ws.cell(row=1, column=1, value=payload.organization).font = Font(bold=True, size=12, color="1E40AF")
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=max(len(payload.columns), 1))
+    ws.cell(row=2, column=1, value=payload.title).font = Font(bold=True, size=14, color="1E40AF")
+    ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=max(len(payload.columns), 1))
+    ws.cell(row=3, column=1, value=subtitle).font = Font(italic=True, color="475569", size=10)
+    hr = 5
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill("solid", fgColor="1E40AF")
+    for idx, col in enumerate(payload.columns, start=1):
+        cell = ws.cell(row=hr, column=idx, value=col)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="left")
+    for ri, row in enumerate(matrix, start=hr + 1):
+        for ci, val in enumerate(row, start=1):
+            ws.cell(row=ri, column=ci, value=val)
+    if payload.summary_rows:
+        off = hr + len(matrix) + 2
+        ws.cell(row=off, column=1, value="Summary").font = Font(bold=True)
+        for i, srow in enumerate(payload.summary_rows, start=off + 1):
+            ws.cell(row=i, column=1, value=" · ".join(str(x) for x in srow))
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname_base}.xlsx"'},
     )
 
 
