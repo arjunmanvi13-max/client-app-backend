@@ -174,6 +174,15 @@ def _rewrite_category_code_prefix(code: str, from_entity: str, to_entity: str) -
     return code
 
 
+def _entity_from_code(code: str) -> Optional[str]:
+    upper = (code or "").upper()
+    if upper.startswith("ALPHA-"):
+        return "alpha"
+    if upper.startswith("PWS-"):
+        return "pws"
+    return None
+
+
 async def _ensure_unique_category_code(entity_id: str, code: str, exclude_id: Optional[str] = None) -> None:
     q: Dict[str, Any] = {"entity_id": entity_id, "category_code": code}
     if exclude_id:
@@ -235,8 +244,14 @@ async def update_expense_head(head_id: str, payload: ExpenseHeadPatch, user: dic
     _require_structure(user)
     head = await _load_head(head_id)
     patch: Dict[str, Any] = {"updated_at": now_utc().isoformat()}
-    target_entity = payload.entity_id or head["entity_id"]
-    entity_changed = payload.entity_id is not None and payload.entity_id != head["entity_id"]
+    head_entity = head.get("entity_id") or "pws"
+    target_entity = payload.entity_id or head_entity
+    entity_changed = payload.entity_id is not None and payload.entity_id != head_entity
+
+    if payload.category_code is not None and payload.entity_id is not None:
+        implied = _entity_from_code(payload.category_code.strip())
+        if implied and implied != payload.entity_id:
+            raise HTTPException(400, "Category code prefix does not match selected entity")
 
     for field in ("main_category", "sub_category", "status"):
         val = getattr(payload, field, None)
@@ -258,7 +273,7 @@ async def update_expense_head(head_id: str, payload: ExpenseHeadPatch, user: dic
         patch["category_code"] = code
     elif entity_changed:
         main_cat = patch.get("main_category") or head.get("main_category") or "Operational"
-        rewritten = _rewrite_category_code_prefix(head.get("category_code") or "", head["entity_id"], target_entity)
+        rewritten = _rewrite_category_code_prefix(head.get("category_code") or "", head_entity, target_entity)
         try:
             await _ensure_unique_category_code(target_entity, rewritten, exclude_id=head_id)
             patch["category_code"] = rewritten
