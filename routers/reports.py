@@ -320,6 +320,90 @@ async def payment_modes(
     return {"summary": summary, "transactions": txns}
 
 
+# ---------------- 3b. Daily Sales & Revenue Log ----------------
+@router.get("/financial/daily-revenue-log")
+async def daily_revenue_log(
+    user: dict = Depends(get_current_user),
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    institution: Optional[str] = None,
+    centre: Optional[str] = None,
+    sport: Optional[str] = None,
+):
+    """Daily collected revenue and expected dues for Finance Reports."""
+    _access_check(user)
+    await _ensure_recurring_fees()
+    inst = _resolve_institution(user, institution)
+    base_filter = _entity_filter(inst)
+    if centre and centre != "All":
+        base_filter["centre"] = centre
+    if sport and sport != "All" and inst != "PWS":
+        base_filter["sport"] = sport
+
+    df = _parse_iso(date_from)
+    dt = _parse_iso(date_to)
+    now = now_utc()
+    if not df:
+        df = now.replace(day=1)
+    if not dt:
+        dt = now
+    start = df.strftime("%Y-%m-%d")
+    end = dt.strftime("%Y-%m-%d")
+
+    paid_q = {**base_filter, "status": "paid", "paid_at": {"$gte": start, "$lte": end}}
+    daily_collected = await db.fees.aggregate([
+        {"$match": paid_q},
+        {"$project": {"day": {"$substr": ["$paid_at", 0, 10]}, "amount_due": 1}},
+        {"$group": {"_id": "$day", "collected": {"$sum": "$amount_due"}, "transactions": {"$sum": 1}}},
+        {"$sort": {"_id": 1}},
+    ]).to_list(400)
+    collected_by_day = {d["_id"]: {"collected": int(d["collected"]), "transactions": d["transactions"]} for d in daily_collected}
+
+    expected_q = {**base_filter, "due_date": {"$gte": start, "$lte": end}}
+    daily_expected = await db.fees.aggregate([
+        {"$match": expected_q},
+        {"$project": {"day": {"$substr": ["$due_date", 0, 10]}, "amount_due": 1}},
+        {"$group": {"_id": "$day", "expected": {"$sum": "$amount_due"}}},
+        {"$sort": {"_id": 1}},
+    ]).to_list(400)
+    expected_by_day = {d["_id"]: int(d["expected"]) for d in daily_expected}
+
+    daily = []
+    cursor = df
+    while cursor.date() <= dt.date():
+        day = cursor.strftime("%Y-%m-%d")
+        c = collected_by_day.get(day, {"collected": 0, "transactions": 0})
+        daily.append({
+            "date": day,
+            "collected": c["collected"],
+            "transactions": c["transactions"],
+            "expected": expected_by_day.get(day, 0),
+        })
+        cursor += timedelta(days=1)
+
+    weekly: Dict[str, Dict[str, int]] = {}
+    for row in daily:
+        day_dt = datetime.fromisoformat(row["date"])
+        week_start = day_dt - timedelta(days=day_dt.weekday())
+        label = f"Week of {week_start.strftime('%d %b')}"
+        bucket = weekly.setdefault(label, {"expected": 0, "collected": 0})
+        bucket["expected"] += row["expected"]
+        bucket["collected"] += row["collected"]
+
+    trend = [{"label": k, **v} for k, v in weekly.items()]
+
+    return {
+        "period": {"from": start, "to": end},
+        "daily": daily,
+        "trend": trend,
+        "totals": {
+            "collected": sum(r["collected"] for r in daily),
+            "expected": sum(r["expected"] for r in daily),
+            "transactions": sum(r["transactions"] for r in daily),
+        },
+    }
+
+
 # ---------------- 4. Excel Export ----------------
 @router.get("/financial/export")
 async def export_financial(
