@@ -298,16 +298,28 @@ async def toggle_expense_head(head_id: str, user: dict = Depends(get_current_use
 
 
 # -------------------- Expense Entries --------------------
+URGENCY_OPTIONS = ("Today", "Tomorrow", "This Week")
+
+
+def _validate_payment_reference(payment_mode: str, reference_number: Optional[str]) -> None:
+    if payment_mode != "Cash" and not (reference_number or "").strip():
+        raise HTTPException(400, "Reference number is required for non-cash payment methods")
+
+
 class ExpenseEntryIn(BaseModel):
     entity_id: Literal["pws", "alpha"]
     expense_head_id: str
     expense_date: str
     amount: int = Field(gt=0)
     payment_mode: Literal["Cash", "UPI", "Bank Transfer", "Cheque", "Credit Card"]
-    vendor_name: str = Field(min_length=1)
+    vendor_name: Optional[str] = None
     reference_number: Optional[str] = None
     description: Optional[str] = None
     venue: Optional[str] = None
+    sub_category: Optional[str] = None
+    rate: Optional[float] = Field(default=None, ge=0)
+    quantity: Optional[float] = Field(default=None, ge=0)
+    urgency: Optional[Literal["Today", "Tomorrow", "This Week"]] = None
 
 
 class ExpenseEntryPatch(BaseModel):
@@ -319,6 +331,10 @@ class ExpenseEntryPatch(BaseModel):
     reference_number: Optional[str] = None
     description: Optional[str] = None
     venue: Optional[str] = None
+    sub_category: Optional[str] = None
+    rate: Optional[float] = Field(default=None, ge=0)
+    quantity: Optional[float] = Field(default=None, ge=0)
+    urgency: Optional[Literal["Today", "Tomorrow", "This Week"]] = None
 
 
 class RejectIn(BaseModel):
@@ -372,6 +388,9 @@ async def create_expense_entry(payload: ExpenseEntryIn, user: dict = Depends(get
         raise HTTPException(400, "Expense head does not belong to this entity")
     if head.get("status") != "active":
         raise HTTPException(400, "Expense head is inactive")
+    _validate_payment_reference(payload.payment_mode, payload.reference_number)
+    vendor = (payload.vendor_name or head.get("sub_category") or "General").strip()
+    sub_category = (payload.sub_category or head.get("sub_category") or "").strip() or None
     budget = await _budget_alert(head, payload.expense_date, payload.amount)
     req_id = f"EXP-{payload.entity_id.upper()}-{uuid.uuid4().hex[:8].upper()}"
     log = _audit_entry("created", user, "Expense submitted for approval")
@@ -380,10 +399,14 @@ async def create_expense_entry(payload: ExpenseEntryIn, user: dict = Depends(get
         "request_id": req_id,
         "entity_id": payload.entity_id,
         "expense_head_id": payload.expense_head_id,
+        "sub_category": sub_category,
         "expense_date": payload.expense_date[:10],
         "amount": payload.amount,
+        "rate": payload.rate,
+        "quantity": payload.quantity,
+        "urgency": payload.urgency,
         "payment_mode": payload.payment_mode,
-        "vendor_name": payload.vendor_name.strip(),
+        "vendor_name": vendor,
         "reference_number": (payload.reference_number or "").strip() or None,
         "description": (payload.description or "").strip() or None,
         "venue": (payload.venue or "").strip() or None,
@@ -426,6 +449,9 @@ async def update_expense_entry(entry_id: str, payload: ExpenseEntryPatch, user: 
     head = await _load_head(head_id)
     expense_date = (payload.expense_date or entry["expense_date"])[:10]
     amount = payload.amount if payload.amount is not None else entry["amount"]
+    payment_mode = payload.payment_mode or entry["payment_mode"]
+    reference_number = payload.reference_number if payload.reference_number is not None else entry.get("reference_number")
+    _validate_payment_reference(payment_mode, reference_number)
     budget = await _budget_alert(head, expense_date, amount, exclude_id=entry_id)
     patch: Dict[str, Any] = {
         "updated_at": now_utc().isoformat(),
@@ -437,12 +463,15 @@ async def update_expense_entry(entry_id: str, payload: ExpenseEntryPatch, user: 
         patch["rejected_at"] = None
         patch["rejected_by_id"] = None
         patch["rejected_by_name"] = None
-    for field in ("expense_head_id", "expense_date", "amount", "payment_mode", "vendor_name", "reference_number", "description", "venue"):
+    for field in (
+        "expense_head_id", "expense_date", "amount", "payment_mode", "vendor_name",
+        "reference_number", "description", "venue", "sub_category", "rate", "quantity", "urgency",
+    ):
         val = getattr(payload, field, None)
         if val is not None:
             patch[field] = val.strip() if isinstance(val, str) else val
-    if payload.expense_date:
-        patch["expense_date"] = expense_date
+    if payload.expense_head_id and payload.sub_category is None:
+        patch["sub_category"] = head.get("sub_category")
     log = _audit_entry("updated", user, "Entry modified" + (" and resubmitted" if entry["status"] == "rejected" else ""))
     await db.expense_entries.update_one({"id": entry_id}, {"$set": patch, "$push": {"audit_trail": log}})
     await _write_audit_log(entry_id, log)
