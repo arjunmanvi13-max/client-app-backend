@@ -54,6 +54,112 @@ def _parse_iso(d: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _payments_entity_filter(inst: str) -> Dict[str, Any]:
+    if inst == "PWS":
+        return {"entity_id": "pws"}
+    if inst == "ALPHA":
+        return {"entity_id": "alpha"}
+    return {}
+
+
+def _payment_paid_day(p: dict) -> str:
+    return (p.get("transaction_date") or p.get("created_at") or "")[:10]
+
+
+async def _fetch_invoice_payment_receipts(
+    inst: str,
+    start: str,
+    end: str,
+    centre: Optional[str] = None,
+    limit: int = 5000,
+) -> List[dict]:
+    """Load invoice payments in range, optionally filtered by payer venue."""
+    pay_q: Dict[str, Any] = {**_payments_entity_filter(inst), "status": {"$ne": "refunded"}}
+    pay_q["$or"] = [
+        {"transaction_date": {"$gte": start, "$lte": end}},
+        {"created_at": {"$gte": f"{start}T00:00:00", "$lte": f"{end}T23:59:59"}},
+    ]
+    payments = await db.payments.find(pay_q, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    if not payments:
+        return []
+
+    inv_ids = list({p.get("invoice_id") for p in payments if p.get("invoice_id")})
+    inv_map: Dict[str, dict] = {}
+    if inv_ids:
+        invs = await db.invoices.find({"id": {"$in": inv_ids}}, {"_id": 0, "id": 1, "invoice_number": 1, "person_name": 1, "person_id": 1}).to_list(len(inv_ids))
+        inv_map = {i["id"]: i for i in invs}
+
+    person_ids = list({inv_map.get(p.get("invoice_id"), {}).get("person_id") for p in payments if inv_map.get(p.get("invoice_id"), {}).get("person_id")})
+    person_map: Dict[str, dict] = {}
+    if person_ids:
+        people = await db.people.find({"id": {"$in": person_ids}}, {"_id": 0, "id": 1, "name": 1, "centre": 1, "group": 1}).to_list(len(person_ids))
+        person_map = {p["id"]: p for p in people}
+
+    rows: List[dict] = []
+    for p in payments:
+        day = _payment_paid_day(p)
+        if day < start or day > end:
+            continue
+        inv = inv_map.get(p.get("invoice_id"), {})
+        person = person_map.get(inv.get("person_id"), {})
+        venue = person.get("centre") or person.get("group") or ""
+        if centre and centre != "All" and venue and venue != centre:
+            continue
+        rows.append({
+            "id": p.get("id"),
+            "source": "invoice_payment",
+            "receipt_number": p.get("receipt_number"),
+            "invoice_number": inv.get("invoice_number"),
+            "payer_name": inv.get("person_name") or person.get("name"),
+            "amount": int(p.get("amount") or 0),
+            "payment_mode": p.get("payment_mode") or "Unknown",
+            "reference_id": p.get("reference_id"),
+            "paid_at": day,
+            "paid_at_iso": p.get("created_at"),
+            "venue": venue or None,
+            "sport": None,
+            "fee_type": "Invoice payment",
+            "collected_by_name": p.get("collected_by_name"),
+            "entity_id": p.get("entity_id"),
+        })
+    return rows
+
+
+async def _fetch_legacy_fee_receipts(
+    base_filter: Dict[str, Any],
+    start: str,
+    end: str,
+    limit: int = 5000,
+) -> List[dict]:
+    """Load paid legacy fee receipts in range."""
+    paid_q = {**base_filter, "status": "paid", "paid_at": {"$gte": start, "$lte": f"{end}T23:59:59"}}
+    fees = await db.fees.find(paid_q, {"_id": 0}).sort("paid_at", -1).limit(limit).to_list(limit)
+    rows: List[dict] = []
+    for f in fees:
+        paid_at = f.get("paid_at") or ""
+        day = paid_at[:10]
+        if not day or day < start or day > end:
+            continue
+        rows.append({
+            "id": f.get("id") or f.get("batch_id"),
+            "source": "legacy_fee",
+            "receipt_number": f.get("receipt_number") or f.get("reference_id") or (f.get("batch_id") or f.get("id") or "")[:8],
+            "invoice_number": None,
+            "payer_name": f.get("player_name") or f.get("person_name"),
+            "amount": int(f.get("amount_due") or 0),
+            "payment_mode": f.get("payment_mode") or "Unknown",
+            "reference_id": f.get("reference_id"),
+            "paid_at": day,
+            "paid_at_iso": paid_at,
+            "venue": f.get("centre"),
+            "sport": f.get("sport"),
+            "fee_type": f.get("fee_type"),
+            "collected_by_name": f.get("collected_by_name") or f.get("paid_by_name"),
+            "entity_id": f.get("entity_id") or "alpha",
+        })
+    return rows
+
+
 def _build_fee_query(
     user: dict,
     date_from: Optional[str],
@@ -316,7 +422,37 @@ async def payment_modes(
             "reference_id": f.get("reference_id"),
             "paid_at": f.get("paid_at"),
             "collected_by_name": f.get("collected_by_name") or f.get("paid_by_name") or None,
+            "source": "legacy_fee",
         })
+
+    inst = _resolve_institution(user, institution)
+    start = (df or now_utc().replace(day=1)).strftime("%Y-%m-%d")
+    end = (dt or now_utc()).strftime("%Y-%m-%d")
+    inv_receipts = await _fetch_invoice_payment_receipts(inst, start, end, centre, limit)
+    for r in inv_receipts:
+        mode = r.get("payment_mode") or "Unknown"
+        agg = summary.setdefault(mode, {"count": 0, "sum": 0})
+        agg["count"] += 1
+        agg["sum"] += r["amount"]
+        txns.append({
+            "player_id": None,
+            "player_name": r.get("payer_name"),
+            "centre": r.get("venue"),
+            "sport": None,
+            "fee_type": r.get("fee_type"),
+            "amount": r["amount"],
+            "payment_mode": mode,
+            "reference_id": r.get("reference_id"),
+            "paid_at": r.get("paid_at_iso") or r.get("paid_at"),
+            "collected_by_name": r.get("collected_by_name"),
+            "source": "invoice_payment",
+            "receipt_number": r.get("receipt_number"),
+            "invoice_number": r.get("invoice_number"),
+        })
+    txns.sort(key=lambda t: t.get("paid_at") or "", reverse=True)
+    if len(txns) > limit:
+        txns = txns[:limit]
+
     return {"summary": summary, "transactions": txns}
 
 
@@ -359,6 +495,13 @@ async def daily_revenue_log(
     ]).to_list(400)
     collected_by_day = {d["_id"]: {"collected": int(d["collected"]), "transactions": d["transactions"]} for d in daily_collected}
 
+    inv_receipts = await _fetch_invoice_payment_receipts(inst, start, end, centre)
+    for r in inv_receipts:
+        day = r["paid_at"]
+        bucket = collected_by_day.setdefault(day, {"collected": 0, "transactions": 0})
+        bucket["collected"] += r["amount"]
+        bucket["transactions"] += 1
+
     expected_q = {**base_filter, "due_date": {"$gte": start, "$lte": end}}
     daily_expected = await db.fees.aggregate([
         {"$match": expected_q},
@@ -400,6 +543,67 @@ async def daily_revenue_log(
             "collected": sum(r["collected"] for r in daily),
             "expected": sum(r["expected"] for r in daily),
             "transactions": sum(r["transactions"] for r in daily),
+        },
+    }
+
+
+# ---------------- 3c. Daily Collections & Receipts Log (unified) ----------------
+@router.get("/financial/daily-collections")
+async def daily_collections_log(
+    user: dict = Depends(get_current_user),
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    institution: Optional[str] = None,
+    centre: Optional[str] = None,
+    sport: Optional[str] = None,
+    limit: int = Query(3000, le=5000),
+):
+    """Unified daily receipts register: legacy fee collections + invoice payments."""
+    _access_check(user)
+    await _ensure_recurring_fees()
+    inst = _resolve_institution(user, institution)
+    base_filter = _entity_filter(inst)
+    if centre and centre != "All":
+        base_filter["centre"] = centre
+    if sport and sport != "All" and inst != "PWS":
+        base_filter["sport"] = sport
+
+    df = _parse_iso(date_from)
+    dt = _parse_iso(date_to)
+    now = now_utc()
+    if not df:
+        df = now.replace(day=1)
+    if not dt:
+        dt = now
+    start = df.strftime("%Y-%m-%d")
+    end = dt.strftime("%Y-%m-%d")
+
+    legacy = await _fetch_legacy_fee_receipts(base_filter, start, end, limit)
+    invoice = await _fetch_invoice_payment_receipts(inst, start, end, centre, limit)
+    receipts = legacy + invoice
+    receipts.sort(key=lambda r: (r.get("paid_at") or "", r.get("paid_at_iso") or ""), reverse=True)
+    if len(receipts) > limit:
+        receipts = receipts[:limit]
+
+    by_day: Dict[str, Dict[str, int]] = {}
+    for r in receipts:
+        day = r.get("paid_at") or ""
+        bucket = by_day.setdefault(day, {"count": 0, "amount": 0})
+        bucket["count"] += 1
+        bucket["amount"] += r["amount"]
+
+    today = now.strftime("%Y-%m-%d")
+    today_bucket = by_day.get(today, {"count": 0, "amount": 0})
+
+    return {
+        "period": {"from": start, "to": end},
+        "receipts": receipts,
+        "by_day": by_day,
+        "totals": {
+            "count": len(receipts),
+            "amount": sum(r["amount"] for r in receipts),
+            "collected_today": today_bucket["amount"],
+            "transactions_today": today_bucket["count"],
         },
     }
 
