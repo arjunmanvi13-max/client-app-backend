@@ -42,21 +42,27 @@ ROLE_PERMISSIONS: dict[UserRole, frozenset[Permission]] = {
         Permission.CORRECT_ATTENDANCE,
         Permission.DASHBOARD_ACCESS,
         Permission.CAPTURE_ALPHA_EXPENSES,
-    }), frozenset({
+    }),
+
+    UserRole.PWS_ACCOUNTS: frozenset({
         Permission.COLLECT_PWS_FEES,
         Permission.MANAGE_PWS_TASKS,
         Permission.ADD_PWS_STUDENTS,
         Permission.RUN_PWS_REPORTS,
         Permission.DASHBOARD_ACCESS,
         Permission.CAPTURE_PWS_EXPENSES,
-    }), frozenset({
+    }),
+
+    UserRole.ALPHA_ACCOUNTS: frozenset({
         Permission.COLLECT_ALPHA_FEES,
         Permission.MANAGE_ALPHA_TASKS,
         Permission.ADD_ALPHA_PLAYERS,
         Permission.RUN_ALPHA_REPORTS,
         Permission.DASHBOARD_ACCESS,
         Permission.CAPTURE_ALPHA_EXPENSES,
-    }), frozenset({
+    }),
+
+    UserRole.PWS_TEACHER: frozenset({
         Permission.MARK_STUDENT_ATTENDANCE,
         Permission.MANAGE_MARKS_ASSESSMENT,
         Permission.MANAGE_TEACHER_TASKS,
