@@ -158,10 +158,28 @@ class ExpenseHeadIn(BaseModel):
 
 
 class ExpenseHeadPatch(BaseModel):
+    entity_id: Optional[Literal["pws", "alpha"]] = None
+    category_code: Optional[str] = None
     main_category: Optional[str] = None
     sub_category: Optional[str] = None
     monthly_budget_limit: Optional[int] = Field(default=None, ge=0)
     status: Optional[Literal["active", "inactive"]] = None
+
+
+def _rewrite_category_code_prefix(code: str, from_entity: str, to_entity: str) -> str:
+    old_prefix = f"{from_entity.upper()}-"
+    new_prefix = f"{to_entity.upper()}-"
+    if (code or "").upper().startswith(old_prefix):
+        return new_prefix + code[len(old_prefix):]
+    return code
+
+
+async def _ensure_unique_category_code(entity_id: str, code: str, exclude_id: Optional[str] = None) -> None:
+    q: Dict[str, Any] = {"entity_id": entity_id, "category_code": code}
+    if exclude_id:
+        q["id"] = {"$ne": exclude_id}
+    if await db.expense_heads.find_one(q, {"_id": 1}):
+        raise HTTPException(400, "Category code already exists for this entity")
 
 
 @router.get("/heads")
@@ -217,10 +235,39 @@ async def update_expense_head(head_id: str, payload: ExpenseHeadPatch, user: dic
     _require_structure(user)
     head = await _load_head(head_id)
     patch: Dict[str, Any] = {"updated_at": now_utc().isoformat()}
-    for field in ("main_category", "sub_category", "monthly_budget_limit", "status"):
+    target_entity = payload.entity_id or head["entity_id"]
+    entity_changed = payload.entity_id is not None and payload.entity_id != head["entity_id"]
+
+    for field in ("main_category", "sub_category", "status"):
         val = getattr(payload, field, None)
         if val is not None:
             patch[field] = val.strip() if isinstance(val, str) else val
+
+    if payload.monthly_budget_limit is not None:
+        patch["monthly_budget_limit"] = payload.monthly_budget_limit
+
+    if entity_changed:
+        patch["entity_id"] = payload.entity_id
+        target_entity = payload.entity_id  # type: ignore[assignment]
+
+    if payload.category_code is not None:
+        code = payload.category_code.strip()
+        if not code:
+            raise HTTPException(400, "Category code cannot be empty")
+        await _ensure_unique_category_code(target_entity, code, exclude_id=head_id)
+        patch["category_code"] = code
+    elif entity_changed:
+        main_cat = patch.get("main_category") or head.get("main_category") or "Operational"
+        rewritten = _rewrite_category_code_prefix(head.get("category_code") or "", head["entity_id"], target_entity)
+        try:
+            await _ensure_unique_category_code(target_entity, rewritten, exclude_id=head_id)
+            patch["category_code"] = rewritten
+        except HTTPException:
+            patch["category_code"] = await _next_category_code(target_entity, main_cat)
+
+    if not patch.keys() - {"updated_at"}:
+        return head
+
     await db.expense_heads.update_one({"id": head_id}, {"$set": patch})
     return await _load_head(head_id)
 
