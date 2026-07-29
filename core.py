@@ -242,6 +242,7 @@ PERMISSION_KEYS = [
     # Fees & Bulk
     "view_fees", "collect_fees", "edit_fees", "manage_fee_catalog", "bulk_upload", "approve_deactivation",
     "approve_requests", "supervise_tasks",
+    "manage_expense_structure", "capture_pws_expenses", "capture_alpha_expenses",
 ]
 
 PERMISSION_GROUPS = {
@@ -250,6 +251,7 @@ PERMISSION_GROUPS = {
     "Management": ["add_players", "edit_players", "toggle_player_status", "add_students", "edit_students"],
     "Admin": ["access_reports", "dashboard_access", "lifecycle_dashboard", "manage_users", "manage_academic_structure", "enter_academic_marks", "view_academic_marks", "manage_coach_assessments", "enter_coach_assessments", "view_coach_assessments", "supervise_tasks", "approve_requests"],
     "Fees & Bulk": ["view_fees", "collect_fees", "edit_fees", "manage_fee_catalog", "bulk_upload", "approve_deactivation", "approve_requests"],
+    "Expenses": ["manage_expense_structure", "capture_pws_expenses", "capture_alpha_expenses"],
 }
 
 
@@ -273,6 +275,7 @@ def default_permissions(role: str, coach_type: Optional[str] = None) -> dict:
             "manage_academic_structure": True,
             "enter_academic_marks": True, "view_academic_marks": True,
             "view_fees": True, "collect_fees": True, "manage_fee_catalog": True,
+            "capture_pws_expenses": True, "approve_requests": True,
             "access_reports": True, "dashboard_access": True, "lifecycle_dashboard": True,
             "view_attendance": True, "correct_attendance": True,
             "supervise_tasks": True,

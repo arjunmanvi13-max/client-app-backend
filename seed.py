@@ -162,6 +162,15 @@ async def _ensure_indexes() -> None:
             await db.people.create_index("player_id", unique=True, sparse=True)
     except Exception as exc:
         logger.warning("Could not ensure people.player_id index: %s", exc)
+    for coll, fields in [
+        ("expense_heads", [("entity_id", 1), ("category_code", 1)]),
+        ("expense_entries", [("entity_id", 1), ("status", 1), ("expense_date", -1)]),
+        ("expense_audit_logs", [("entry_id", 1), ("at", 1)]),
+    ]:
+        try:
+            await db[coll].create_index(fields)
+        except Exception as exc:
+            logger.warning("Could not ensure %s index: %s", coll, exc)
 
 
 async def _migrate_legacy_emails() -> None:
@@ -1164,4 +1173,28 @@ async def _seed_fee_catalog():
         ("alpha", "alpha_tournament", "Tournament Fee", "tournament"),
     ]:
         await _upsert_item(entity, code, name, fee_type, 0, "one_time", {})
+
+    # Default expense structure heads (idempotent)
+    default_heads = [
+        ("pws", "PWS-OPS-001", "Operational", "Printing & Stationery", 25000),
+        ("pws", "PWS-UTL-001", "Utilities", "Electricity Bill", 80000),
+        ("pws", "PWS-SPT-001", "Sports Equipment", "Cricket Gear", 50000),
+        ("pws", "PWS-CAN-001", "Canteen", "Ration & Groceries", 120000),
+        ("alpha", "ALPHA-SPT-001", "Sports Equipment", "Cricket Gear", 40000),
+        ("alpha", "ALPHA-OPS-001", "Operational", "Fuel & Transport", 30000),
+    ]
+    for entity_id, code, main_cat, sub_cat, budget in default_heads:
+        await _insert_if_absent(db.expense_heads, {"entity_id": entity_id, "category_code": code}, {
+            "id": str(uuid.uuid4()),
+            "entity_id": entity_id,
+            "category_code": code,
+            "main_category": main_cat,
+            "sub_category": sub_cat,
+            "monthly_budget_limit": budget,
+            "status": "active",
+            "created_at": now_utc().isoformat(),
+            "created_by_id": "seed",
+            "created_by_name": "Seed",
+            "updated_at": now_utc().isoformat(),
+        })
 

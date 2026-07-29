@@ -58,4 +58,8 @@ PERMISSION_TO_LEGACY: dict[Permission, tuple[str, ...]] = {
     Permission.MANAGE_COACH_TASKS: ("supervise_tasks",),
 
     Permission.DASHBOARD_ACCESS: ("dashboard_access",),
+
+    Permission.MANAGE_EXPENSE_STRUCTURE: ("manage_expense_structure",),
+    Permission.CAPTURE_PWS_EXPENSES: ("capture_pws_expenses",),
+    Permission.CAPTURE_ALPHA_EXPENSES: ("capture_alpha_expenses",),
 }

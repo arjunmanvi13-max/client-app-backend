@@ -98,6 +98,11 @@ class Permission(str, Enum):
     # --- Shared read / dashboard (used across roles) ---
     DASHBOARD_ACCESS = "DASHBOARD_ACCESS"
 
+    # --- Expense Management ---
+    MANAGE_EXPENSE_STRUCTURE = "MANAGE_EXPENSE_STRUCTURE"
+    CAPTURE_PWS_EXPENSES = "CAPTURE_PWS_EXPENSES"
+    CAPTURE_ALPHA_EXPENSES = "CAPTURE_ALPHA_EXPENSES"
+
 
 # Maps stored MongoDB role strings → canonical UserRole
 LEGACY_ROLE_ALIASES: dict[str, UserRole] = {

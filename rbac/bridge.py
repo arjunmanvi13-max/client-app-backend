@@ -46,6 +46,9 @@ PERMISSION_TO_LEGACY.update({
     Permission.MANAGE_COACH_ASSESSMENTS_ADMIN: ("manage_coach_assessments",),
     Permission.APPROVE_REQUESTS: ("approve_requests",),
     Permission.VIEW_ATTENDANCE: ("view_attendance",),
+    Permission.MANAGE_EXPENSE_STRUCTURE: ("manage_expense_structure",),
+    Permission.CAPTURE_PWS_EXPENSES: ("capture_pws_expenses",),
+    Permission.CAPTURE_ALPHA_EXPENSES: ("capture_alpha_expenses",),
 })
 
 RBAC_PERMISSION_GROUPS: dict[str, list[str]] = {
@@ -58,6 +61,9 @@ RBAC_PERMISSION_GROUPS: dict[str, list[str]] = {
         Permission.ADD_COACHES.value,
         Permission.ADD_NEW_TEACHER.value,
         Permission.MANAGE_USERS_ROSTERS.value,
+        Permission.MANAGE_EXPENSE_STRUCTURE.value,
+        Permission.CAPTURE_PWS_EXPENSES.value,
+        Permission.CAPTURE_ALPHA_EXPENSES.value,
     ],
     "PWS Admin": [
         Permission.MARK_PWS_ATTENDANCE.value,
@@ -77,12 +83,14 @@ RBAC_PERMISSION_GROUPS: dict[str, list[str]] = {
         Permission.MANAGE_PWS_TASKS.value,
         Permission.ADD_PWS_STUDENTS.value,
         Permission.RUN_PWS_REPORTS.value,
+        Permission.CAPTURE_PWS_EXPENSES.value,
     ],
     "ALPHA Accounts": [
         Permission.COLLECT_ALPHA_FEES.value,
         Permission.MANAGE_ALPHA_TASKS.value,
         Permission.ADD_ALPHA_PLAYERS.value,
         Permission.RUN_ALPHA_REPORTS.value,
+        Permission.CAPTURE_ALPHA_EXPENSES.value,
     ],
     "PWS Teachers": [
         Permission.MARK_STUDENT_ATTENDANCE.value,
@@ -140,4 +148,7 @@ RBAC_PERMISSION_LABELS: dict[str, str] = {
     Permission.APPROVE_REQUESTS.value: "Approve requests",
     Permission.VIEW_ATTENDANCE.value: "View attendance",
     Permission.DASHBOARD_ACCESS.value: "Dashboard access",
+    Permission.MANAGE_EXPENSE_STRUCTURE.value: "Manage expense structure",
+    Permission.CAPTURE_PWS_EXPENSES.value: "PWS expense capture / data entry",
+    Permission.CAPTURE_ALPHA_EXPENSES.value: "ALPHA expense capture / data entry",
 }

@@ -105,6 +105,10 @@ MODULE_GROUPS: List[Dict[str, Any]] = [
             ], user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value, UserRole.ALPHA_ADMIN.value, UserRole.PWS_ACCOUNTS.value, UserRole.ALPHA_ACCOUNTS.value]),
             _mod("invoice-engine", "Invoice Engine", permission_keys=["collect_fees", "view_fees"], rbac=[Permission.COLLECT_PWS_FEES.value], pws_only=True,
                   user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value, UserRole.PWS_ACCOUNTS.value]),
+            _mod("pws-expenses", "PWS Expenses", permission_keys=["capture_pws_expenses"], rbac=[Permission.CAPTURE_PWS_EXPENSES.value], pws_only=True,
+                  user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value, UserRole.PWS_ACCOUNTS.value]),
+            _mod("alpha-expenses", "ALPHA Expenses", permission_keys=["capture_alpha_expenses"], rbac=[Permission.CAPTURE_ALPHA_EXPENSES.value], alpha_only=True,
+                  user_types=[UserRole.SUPER_ADMIN.value, UserRole.ALPHA_ADMIN.value, UserRole.ALPHA_ACCOUNTS.value]),
         ],
     },
     {
@@ -170,6 +174,8 @@ MODULE_GROUPS: List[Dict[str, Any]] = [
             _mod("academic-structure", "Academic Structure", permission_keys=["manage_academic_structure"],
                   rbac=[Permission.MANAGE_TEACHERS_MAP_SUBJECTS.value, Permission.MANAGE_TEACHERS_MAP_SECTIONS.value], pws_only=True),
             _mod("academy-structure", "ALPHA/PWS Structure", permission_keys=["manage_users"], rbac=[Permission.MANAGE_ACCESS.value],
+                  user_types=[UserRole.SUPER_ADMIN.value]),
+            _mod("expense-structure", "Expense Structure", permission_keys=["manage_expense_structure"], rbac=[Permission.MANAGE_EXPENSE_STRUCTURE.value],
                   user_types=[UserRole.SUPER_ADMIN.value]),
             _mod("settings", "Settings", permission_keys=["dashboard_access"], rbac=[Permission.DASHBOARD_ACCESS.value],
                   user_types=[t for t in APPROVED_LOGIN_USER_TYPES if t != UserRole.ALPHA_COACH.value]),
@@ -257,6 +263,7 @@ DEFAULT_ENABLED_MODULES: Dict[str, Set[str]] = {
     UserRole.PWS_ADMIN.value: {
         "dashboard", "reports", "approvals", "tasks",
         "directory-master", "staff", "teachers-directory", "students",
+        "pws-expenses",
         "attendance-take", "attendance-reports", "teacher-attendance", "hostel",
         "academic-structure", "marks-entry", "marks-setup", "report-cards", "coach-assessments",
         "settings", "notifications",
@@ -264,6 +271,7 @@ DEFAULT_ENABLED_MODULES: Dict[str, Set[str]] = {
     UserRole.ALPHA_ADMIN.value: {
         "dashboard", "reports", "approvals", "tasks",
         "directory-master", "staff", "coaches", "players",
+        "alpha-expenses",
         "attendance-take", "attendance-reports", "coach-attendance-admin",
         "player-assessments", "coach-assessments",
         "settings", "notifications",
@@ -271,13 +279,13 @@ DEFAULT_ENABLED_MODULES: Dict[str, Set[str]] = {
     UserRole.PWS_ACCOUNTS.value: {
         "dashboard", "reports", "tasks",
         "directory-master", "students",
-        "fee-catalog", "collect-fees", "defaulters", "finance-reports", "invoice-engine",
+        "fee-catalog", "collect-fees", "defaulters", "finance-reports", "invoice-engine", "pws-expenses",
         "settings", "notifications",
     },
     UserRole.ALPHA_ACCOUNTS.value: {
         "dashboard", "reports", "tasks",
         "directory-master", "players",
-        "fee-catalog", "collect-fees", "defaulters", "finance-reports",
+        "fee-catalog", "collect-fees", "defaulters", "finance-reports", "alpha-expenses",
         "settings", "notifications",
     },
     UserRole.PWS_TEACHER.value: {
@@ -317,6 +325,7 @@ def derive_permissions_from_modules(
         "enter_coach_assessments", "manage_coach_assessments", "view_coach_assessments",
         "view_fees", "collect_fees", "edit_fees", "manage_fee_catalog", "bulk_upload", "approve_deactivation",
         "approve_requests", "supervise_tasks",
+        "manage_expense_structure", "capture_pws_expenses", "capture_alpha_expenses",
     ]
     legacy = {k: False for k in permission_keys}
     rbac: Dict[str, bool] = {}
