@@ -3,6 +3,8 @@
 Routes live in /app/backend/routers/, shared deps in /app/backend/core.py,
 seed logic in /app/backend/seed.py.
 """
+import asyncio
+
 from fastapi import APIRouter, FastAPI
 from starlette.middleware.cors import CORSMiddleware
 from pymongo.errors import DuplicateKeyError
@@ -65,7 +67,12 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def on_start():
-    """Run idempotent seed on boot. Failures must never prevent the API from serving."""
+    """Run idempotent seed on boot without blocking login or health checks."""
+    asyncio.create_task(_run_startup_seed())
+
+
+async def _run_startup_seed():
+    """Failures must never prevent the API from serving."""
     try:
         await seed_data()
         logger.info("Seed completed")
