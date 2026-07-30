@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta
 from collections import defaultdict
 from fastapi import APIRouter, Depends, HTTPException
-from core import db, get_current_user, is_admin, now_utc, active_status_filter, merge_mongo_query
+from core import db, get_current_user, is_admin, is_pws_admin_user, now_utc, active_status_filter, merge_mongo_query
 
 router = APIRouter(tags=["command"])
 
@@ -106,7 +106,7 @@ async def _kpis(att: dict, tasks: dict) -> dict:
     }
 
 def _require_admin(user: dict):
-    if not is_admin(user):
+    if not is_admin(user) and not is_pws_admin_user(user):
         raise HTTPException(403, "Super Admin / Admin required")
 
 # ---------- Layer 1 ----------

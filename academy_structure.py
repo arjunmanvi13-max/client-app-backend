@@ -576,3 +576,17 @@ def assert_super_admin(user: dict) -> None:
     if not is_super_admin(user):
         from fastapi import HTTPException
         raise HTTPException(403, "Super Admin required")
+
+
+def assert_dashboard_metrics_access(user: dict, entity: Optional[str]) -> str:
+    """Super Admin may query any scope; PWS Admin is locked to PWS."""
+    from core import is_pws_admin_user
+    if is_super_admin(user):
+        raw = (entity or "both").strip().lower()
+        if raw in ("pws", "alpha", "both"):
+            return raw
+        return "both"
+    if is_pws_admin_user(user):
+        return "pws"
+    from fastapi import HTTPException
+    raise HTTPException(403, "Dashboard metrics access required")

@@ -191,6 +191,12 @@ def require_roles(*roles):
 def is_admin(user: dict) -> bool:
     return user["role"] in ("admin", "super_admin")
 
+
+def is_pws_admin_user(user: dict) -> bool:
+    """PWS Admin dashboard roles — Principal, Vice Principal, or PWS Admin."""
+    role = (user.get("role") or "").strip().lower()
+    return role in ("pws_admin", "principal", "vice_principal")
+
 def is_super_admin(user: dict) -> bool:
     if user.get("role") == "super_admin":
         return True

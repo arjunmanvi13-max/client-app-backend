@@ -13,6 +13,7 @@ from core import (
     attendance_entity_filter,
     is_super_admin,
     is_admin,
+    is_pws_admin_user,
 )
 from notifications_service import normalize_notification, notification_filter_for_user
 
@@ -301,10 +302,20 @@ async def parent_dashboard(user: dict) -> dict:
     }
 
 
+async def pws_admin_dashboard(user: dict) -> dict:
+    """PWS Admin — same MVP tiles as Super Admin, scoped to PWS."""
+    data = await super_admin_dashboard(user, "pws")
+    data["role"] = user.get("role") or "pws_admin"
+    data["entity_label"] = "PWS"
+    return data
+
+
 async def build_mvp_dashboard(user: dict, entity: Optional[str] = None) -> dict:
     role = user.get("role")
     if role == "super_admin":
         return await super_admin_dashboard(user, entity)
+    if is_pws_admin_user(user):
+        return await pws_admin_dashboard(user)
     if role == "admin":
         return await admin_dashboard(user)
     if role == "teacher":

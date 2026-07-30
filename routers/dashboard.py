@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query
 from typing import Optional
-from core import db, get_current_user, now_utc, is_super_admin
+from core import db, get_current_user, now_utc, is_super_admin, is_pws_admin_user
 from notifications_service import unread_count_for_user
 from dashboard_mvp import build_mvp_dashboard
 
@@ -52,9 +52,14 @@ async def dashboard_mvp(
     entity: Optional[str] = Query(None, description="pws | alpha | both — Super Admin only"),
 ):
     """Role-based dashboard MVP — lightweight tiles, no advanced financial analytics."""
-    if entity and not is_super_admin(user):
-        entity = None
-    return await build_mvp_dashboard(user, entity)
+    scoped_entity = entity
+    if is_super_admin(user):
+        pass
+    elif is_pws_admin_user(user):
+        scoped_entity = "pws"
+    elif entity:
+        scoped_entity = None
+    return await build_mvp_dashboard(user, scoped_entity)
 
 
 @router.get("/dashboard/super-admin-metrics")
@@ -62,6 +67,6 @@ async def dashboard_super_admin_metrics(
     user: dict = Depends(get_current_user),
     entity: Optional[str] = Query(None, description="pws | alpha | both"),
 ):
-    from academy_structure import assert_super_admin, build_super_admin_metrics
-    assert_super_admin(user)
-    return await build_super_admin_metrics(entity)
+    from academy_structure import assert_dashboard_metrics_access, build_super_admin_metrics
+    scope = assert_dashboard_metrics_access(user, entity)
+    return await build_super_admin_metrics(scope)
