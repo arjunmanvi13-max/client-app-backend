@@ -569,7 +569,12 @@ async def mark_attendance_batch(payload: AttendanceBatch, user: dict = Depends(g
     from routers.parents import push_parent_notification
     records = []
     today_str = now_utc().strftime("%Y-%m-%d")
-    sess = normalize_session(payload.session, kind=payload.kind)
+    if payload.kind == "student":
+        if payload.session and normalize_session(payload.session, kind="student") != "morning":
+            raise HTTPException(400, "Student attendance is recorded once daily in the morning session")
+        sess = "morning"
+    else:
+        sess = normalize_session(payload.session, kind=payload.kind)
     for m in payload.marks:
         rec = await upsert_attendance(
             user,
@@ -627,6 +632,8 @@ async def list_attendance(
     assert_teacher_student_scope(user, kind)
     if is_teacher_user(user):
         kind = kind or "student"
+    if kind == "student":
+        session = "morning"
     if kind and not is_admin(user):
         perm = _MARK_PERM_BY_KIND.get(kind)
         if perm:
