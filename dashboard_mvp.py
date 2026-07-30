@@ -14,6 +14,9 @@ from core import (
     is_super_admin,
     is_admin,
     is_pws_admin_user,
+    is_pws_accounts_user,
+    is_alpha_admin_user,
+    is_alpha_accounts_user,
 )
 from notifications_service import normalize_notification, notification_filter_for_user
 
@@ -303,10 +306,18 @@ async def parent_dashboard(user: dict) -> dict:
 
 
 async def pws_admin_dashboard(user: dict) -> dict:
-    """PWS Admin — same MVP tiles as Super Admin, scoped to PWS."""
+    """PWS-scoped org dashboard — admin, accounts, principal roles."""
     data = await super_admin_dashboard(user, "pws")
     data["role"] = user.get("role") or "pws_admin"
     data["entity_label"] = "PWS"
+    return data
+
+
+async def alpha_org_dashboard(user: dict) -> dict:
+    """ALPHA-scoped org dashboard — admin, accounts roles."""
+    data = await super_admin_dashboard(user, "alpha")
+    data["role"] = user.get("role") or "admin"
+    data["entity_label"] = "ALPHA"
     return data
 
 
@@ -314,8 +325,10 @@ async def build_mvp_dashboard(user: dict, entity: Optional[str] = None) -> dict:
     role = user.get("role")
     if role == "super_admin":
         return await super_admin_dashboard(user, entity)
-    if is_pws_admin_user(user):
+    if is_pws_admin_user(user) or is_pws_accounts_user(user):
         return await pws_admin_dashboard(user)
+    if is_alpha_admin_user(user) or is_alpha_accounts_user(user):
+        return await alpha_org_dashboard(user)
     if role == "admin":
         return await admin_dashboard(user)
     if role == "teacher":

@@ -197,6 +197,31 @@ def is_pws_admin_user(user: dict) -> bool:
     role = (user.get("role") or "").strip().lower()
     return role in ("pws_admin", "principal", "vice_principal")
 
+
+def is_alpha_admin_user(user: dict) -> bool:
+    """ALPHA operations admin — legacy admin or alpha_admin."""
+    role = (user.get("role") or "").strip().lower()
+    return role in ("admin", "alpha_admin")
+
+
+def is_pws_accounts_user(user: dict) -> bool:
+    return (user.get("role") or "").strip().lower() == "pws_accounts"
+
+
+def is_alpha_accounts_user(user: dict) -> bool:
+    return (user.get("role") or "").strip().lower() == "alpha_accounts"
+
+
+def can_access_org_dashboard(user: dict) -> bool:
+    """Roles that may load org-wide command center and metrics dashboards."""
+    return (
+        is_super_admin(user)
+        or is_pws_admin_user(user)
+        or is_alpha_admin_user(user)
+        or is_pws_accounts_user(user)
+        or is_alpha_accounts_user(user)
+    )
+
 def is_super_admin(user: dict) -> bool:
     if user.get("role") == "super_admin":
         return True
@@ -411,7 +436,8 @@ def role_display(role: str, user_type: Optional[str] = None, designation: Option
 
 def is_sports_admin(user: dict) -> bool:
     """Admin restricted to ALPHA-only operations."""
-    return user.get("role") == "admin"
+    role = (user.get("role") or "").strip().lower()
+    return role in ("admin", "alpha_admin")
 
 
 def get_perm(user: dict, key: str) -> bool:

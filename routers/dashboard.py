@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query
 from typing import Optional
-from core import db, get_current_user, now_utc, is_super_admin, is_pws_admin_user
+from core import db, get_current_user, now_utc, is_super_admin, is_pws_admin_user, is_pws_accounts_user, is_alpha_admin_user, is_alpha_accounts_user
 from notifications_service import unread_count_for_user
 from dashboard_mvp import build_mvp_dashboard
 
@@ -55,8 +55,10 @@ async def dashboard_mvp(
     scoped_entity = entity
     if is_super_admin(user):
         pass
-    elif is_pws_admin_user(user):
+    elif is_pws_admin_user(user) or is_pws_accounts_user(user):
         scoped_entity = "pws"
+    elif is_alpha_admin_user(user) or is_alpha_accounts_user(user):
+        scoped_entity = "alpha"
     elif entity:
         scoped_entity = None
     return await build_mvp_dashboard(user, scoped_entity)
