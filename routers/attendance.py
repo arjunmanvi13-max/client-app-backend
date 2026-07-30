@@ -10,6 +10,7 @@ from core import (
     db, AttendanceBatch, AttendanceCorrectionIn, get_current_user, now_utc, is_admin,
     assert_perm, get_perm, resolve_user_institution, attendance_entity_filter,
     attendance_entity_for_kind, active_status_filter, merge_mongo_query,
+    is_teacher_user, assert_teacher_student_scope,
 )
 from academic_calendar import calendar_day_info, is_holiday_for_kind
 from rbac.authorization import normalize_role
@@ -542,6 +543,7 @@ async def _validate_batch_marks(
 
 @router.post("/batch")
 async def mark_attendance_batch(payload: AttendanceBatch, user: dict = Depends(get_current_user)):
+    assert_teacher_student_scope(user, payload.kind)
     perm = _MARK_PERM_BY_KIND.get(payload.kind)
     if not perm:
         raise HTTPException(400, "Invalid attendance kind")
@@ -622,6 +624,9 @@ async def list_attendance(
     institution: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
+    assert_teacher_student_scope(user, kind)
+    if is_teacher_user(user):
+        kind = kind or "student"
     if kind and not is_admin(user):
         perm = _MARK_PERM_BY_KIND.get(kind)
         if perm:

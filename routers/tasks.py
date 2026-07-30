@@ -11,8 +11,10 @@ from core import (
     get_current_user,
     get_perm,
     is_super_admin,
+    is_teacher_user,
     now_utc,
     assert_assignable_user_ids,
+    merge_mongo_query,
 )
 from notifications_service import send_notification
 
@@ -179,7 +181,17 @@ async def list_tasks(
     if priority:
         q["priority"] = priority
     if entity_id:
+        if is_teacher_user(user) and entity_id not in ("pws", "both"):
+            raise HTTPException(403, "Teachers may only view PWS tasks")
         q["entity_id"] = entity_id
+    elif is_teacher_user(user):
+        q = merge_mongo_query(q, {
+            "$or": [
+                {"entity_id": "pws"},
+                {"entity_id": "both"},
+                {"entity_id": {"$exists": False}},
+            ],
+        })
     rows = await db.tasks.find(q, {"_id": 0}).sort("created_at", -1).to_list(1000)
     return [_task_out(r) for r in rows]
 

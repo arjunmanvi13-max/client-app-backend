@@ -204,6 +204,20 @@ def is_alpha_admin_user(user: dict) -> bool:
     return role in ("admin", "alpha_admin")
 
 
+def is_teacher_user(user: dict) -> bool:
+    """PWS classroom teacher — not admin/principal accounts."""
+    role = (user.get("role") or "").strip().lower()
+    return role in ("teacher", "pws_teacher")
+
+
+def assert_teacher_student_scope(user: dict, kind: Optional[str] = None) -> None:
+    """Teachers may only access student (PWS) attendance data."""
+    if not is_teacher_user(user):
+        return
+    if kind and kind != "student":
+        raise HTTPException(403, "Teachers may only access student attendance")
+
+
 def is_pws_accounts_user(user: dict) -> bool:
     return (user.get("role") or "").strip().lower() == "pws_accounts"
 
