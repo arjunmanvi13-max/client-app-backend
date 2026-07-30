@@ -25,7 +25,9 @@ from core import (
     db, get_current_user, is_admin, is_super_admin, assert_perm, now_utc, get_perm, notify_role,
     resolve_user_institution, fee_entity_filter, derive_person_entities, person_entity_filter,
     is_sports_admin, format_date_display, format_datetime_display, format_month_display,
+    assert_entity_access,
 )
+from rbac.guards import can_collect_fees_for
 
 from fees_collection_utils import compute_player_fee_status
 
@@ -467,7 +469,7 @@ async def _collection_people_query(
     group: Optional[str],
     search: Optional[str],
 ) -> dict:
-    inst = (institution or resolve_user_institution(user, None) or "ALPHA").upper()
+    inst = resolve_user_institution(user, institution).upper()
     if inst not in ("PWS", "ALPHA"):
         inst = "ALPHA"
     query: dict = {"status": {"$ne": "deactivated"}}
@@ -529,7 +531,7 @@ async def fees_collection_summary(
     await ensure_all_players_monthly_fees()
     today = now_utc().strftime("%Y-%m-%d")
     current_month = today[:7]
-    inst = (institution or resolve_user_institution(user, None) or "ALPHA").upper()
+    inst = resolve_user_institution(user, institution).upper()
     if inst not in ("PWS", "ALPHA"):
         inst = "ALPHA"
 
@@ -695,6 +697,7 @@ async def list_fees(
     q: dict = {}
     if player_id: q["player_id"] = player_id
     if entity_id:
+        assert_entity_access(user, entity_id)
         q["entity_id"] = entity_id
     else:
         inst = resolve_user_institution(user, institution)
@@ -781,6 +784,10 @@ async def collect_fee(fee_id: str, payload: CollectIn, user: dict = Depends(get_
     fee = await db.fees.find_one({"id": fee_id})
     if not fee:
         raise HTTPException(404, "Fee not found")
+    fee_entity = fee.get("entity_id") or ("pws" if fee.get("organization") == "PWS" else "alpha")
+    assert_entity_access(user, fee_entity)
+    if not can_collect_fees_for(user, fee_entity):
+        raise HTTPException(403, "Cannot collect fees for this entity")
     if fee.get("status") == "paid":
         raise HTTPException(400, "Fee already paid")
     if payload.payment_mode in ("Online", "UPI") and not (payload.reference_id or "").strip():

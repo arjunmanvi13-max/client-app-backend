@@ -505,9 +505,13 @@ def resolve_user_institution(user: dict, requested: Optional[str] = None) -> str
     if is_super_admin(user):
         v = (requested or "BOTH").upper()
         return v if v in INSTITUTIONS else "BOTH"
-    if is_sports_admin(user) or user.get("role") == "coach":
+    if is_pws_admin_user(user) or is_pws_accounts_user(user):
+        return "PWS"
+    if is_alpha_admin_user(user) or is_alpha_accounts_user(user):
         return "ALPHA"
-    if user.get("role") in ("principal", "vice_principal", "teacher"):
+    if is_sports_admin(user) or user.get("role") in ("coach", "alpha_coach"):
+        return "ALPHA"
+    if user.get("role") in ("principal", "vice_principal", "teacher", "pws_teacher"):
         return "PWS"
     if user.get("role") == "warden":
         return "BOTH"
@@ -516,6 +520,60 @@ def resolve_user_institution(user: dict, requested: Optional[str] = None) -> str
         v = (requested or "BOTH").upper()
         return v if v in INSTITUTIONS else "BOTH"
     return org if org in ("PWS", "ALPHA") else "PWS"
+
+
+def normalize_entity_id(raw: Optional[str]) -> Optional[str]:
+    """Normalize client entity strings to pws | alpha | both."""
+    if raw is None:
+        return None
+    e = raw.strip().lower()
+    if e in ("both", "combined", "all"):
+        return "both"
+    if e in FEE_ENTITIES:
+        return e
+    upper = raw.strip().upper()
+    if upper == "PWS":
+        return "pws"
+    if upper == "ALPHA":
+        return "alpha"
+    return None
+
+
+def user_entity_scope(user: dict) -> str:
+    """Authoritative entity scope: pws | alpha | both (ignores client input)."""
+    inst = resolve_user_institution(user, None)
+    return "both" if inst == "BOTH" else inst.lower()
+
+
+def assert_entity_access(user: dict, entity_id: str) -> str:
+    """Validate entity_id against user scope; returns normalized pws|alpha."""
+    normalized = normalize_entity_id(entity_id)
+    if not normalized or normalized == "both":
+        raise HTTPException(400, "entity_id must be pws or alpha")
+    scope = user_entity_scope(user)
+    if scope == "both":
+        return normalized
+    if scope != normalized:
+        raise HTTPException(403, "Entity access denied")
+    return normalized
+
+
+def resolve_entity_for_query(
+    user: dict,
+    *,
+    entity_id: Optional[str] = None,
+    institution: Optional[str] = None,
+) -> str:
+    """Resolve query entity with scope enforcement; returns pws | alpha | both."""
+    scope = user_entity_scope(user)
+    requested = normalize_entity_id(entity_id) or normalize_entity_id(institution)
+    if scope == "both":
+        if requested and requested != "both":
+            return requested
+        return "both"
+    if requested and requested != "both" and requested != scope:
+        raise HTTPException(403, "Entity access denied")
+    return scope
 
 
 def institution_to_fee_entity(inst: str) -> Optional[str]:

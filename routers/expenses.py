@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
-from core import db, get_current_user, get_perm, is_super_admin, now_utc
+from core import db, get_current_user, get_perm, is_super_admin, now_utc, assert_entity_access, user_entity_scope
 from rbac.authorization import has_permission
 from rbac.enums import BusinessEntity, Permission
 from notifications_service import send_notification, send_to_role
@@ -75,6 +75,18 @@ def _can_approve_expenses(user: dict) -> bool:
         or get_perm(user, "approve_requests")
         or has_permission(user, Permission.APPROVE_REQUESTS)
     )
+
+
+def _can_approve_entity_expenses(user: dict, entity_id: str) -> bool:
+    if not _can_approve_expenses(user):
+        return False
+    if is_super_admin(user):
+        return True
+    try:
+        assert_entity_access(user, entity_id)
+        return True
+    except HTTPException:
+        return False
 
 
 def _can_view_both_entities(user: dict) -> bool:
@@ -441,6 +453,7 @@ async def list_expense_entries(
 async def create_expense_entry(payload: ExpenseEntryIn, user: dict = Depends(get_current_user)):
     if not _can_capture(user, payload.entity_id):
         raise HTTPException(403, "Expense capture permission required")
+    assert_entity_access(user, payload.entity_id)
     head = await _load_head(payload.expense_head_id)
     if head["entity_id"] != payload.entity_id:
         raise HTTPException(400, "Expense head does not belong to this entity")
@@ -680,7 +693,12 @@ async def expense_approval_queue(
     if entity_id:
         if entity_id not in ENTITY_IDS:
             raise HTTPException(400, "Invalid entity_id")
+        assert_entity_access(user, entity_id)
         q["entity_id"] = entity_id
+    else:
+        scope = user_entity_scope(user)
+        if scope != "both":
+            q["entity_id"] = scope
     rows = await db.expense_entries.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
     head_ids = list({r["expense_head_id"] for r in rows})
     heads = await db.expense_heads.find({"id": {"$in": head_ids}}, {"_id": 0}).to_list(len(head_ids) or 1)
@@ -704,6 +722,8 @@ async def approve_expense_entry(entry_id: str, user: dict = Depends(get_current_
     if not _can_approve_expenses(user):
         raise HTTPException(403, "Approver access required")
     entry = await _load_entry(entry_id)
+    if not _can_approve_entity_expenses(user, entry["entity_id"]):
+        raise HTTPException(403, "Cannot approve expenses for this entity")
     if entry["status"] != "pending":
         raise HTTPException(400, "Entry is not pending")
     log = _audit_entry("approved", user, "Expense approved")
@@ -727,6 +747,8 @@ async def reject_expense_entry(entry_id: str, payload: RejectIn, user: dict = De
     if not _can_approve_expenses(user):
         raise HTTPException(403, "Approver access required")
     entry = await _load_entry(entry_id)
+    if not _can_approve_entity_expenses(user, entry["entity_id"]):
+        raise HTTPException(403, "Cannot reject expenses for this entity")
     if entry["status"] != "pending":
         raise HTTPException(400, "Entry is not pending")
     log = _audit_entry("rejected", user, payload.reason.strip())
@@ -754,6 +776,8 @@ async def bulk_approve_expenses(payload: BulkApproveIn, user: dict = Depends(get
         try:
             entry = await _load_entry(eid)
             if entry["status"] != "pending":
+                continue
+            if not _can_approve_entity_expenses(user, entry["entity_id"]):
                 continue
             log = _audit_entry("approved", user, "Bulk approval")
             now = now_utc().isoformat()
