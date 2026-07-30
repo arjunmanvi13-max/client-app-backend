@@ -77,6 +77,10 @@ def _can_approve_expenses(user: dict) -> bool:
     )
 
 
+def _can_view_both_entities(user: dict) -> bool:
+    return _can_view_entity_expenses(user, "pws") and _can_view_entity_expenses(user, "alpha")
+
+
 def _entry_out(doc: dict, head: Optional[dict] = None) -> dict:
     out = {k: v for k, v in doc.items() if k != "_id"}
     if head:
@@ -306,17 +310,70 @@ def _validate_payment_reference(payment_mode: str, reference_number: Optional[st
         raise HTTPException(400, "Reference number is required for non-cash payment methods")
 
 
+class ExpenseLineItemIn(BaseModel):
+    item_name: str = Field(min_length=1)
+    rate: float = Field(ge=0)
+    quantity: float = Field(gt=0)
+    amount: int = Field(gt=0)
+
+
+def _normalize_line_items(
+    items: Optional[List[ExpenseLineItemIn]],
+    *,
+    rate: Optional[float] = None,
+    quantity: Optional[float] = None,
+    amount: Optional[int] = None,
+    sub_category: Optional[str] = None,
+) -> tuple[List[dict], int, Optional[str], Optional[float], Optional[float]]:
+    if items:
+        normalized: List[dict] = []
+        total = 0
+        for it in items:
+            name = it.item_name.strip()
+            if not name:
+                raise HTTPException(400, "Each line item requires a name")
+            calc = round(it.rate * it.quantity)
+            if abs(calc - it.amount) > 1:
+                raise HTTPException(400, f"Line item amount mismatch for '{name}'")
+            normalized.append({
+                "item_name": name,
+                "rate": float(it.rate),
+                "quantity": float(it.quantity),
+                "amount": int(it.amount),
+            })
+            total += int(it.amount)
+        if total <= 0:
+            raise HTTPException(400, "Total amount must be greater than zero")
+        sub = normalized[0]["item_name"] if len(normalized) == 1 else f"{len(normalized)} items"
+        legacy_rate = normalized[0]["rate"] if len(normalized) == 1 else None
+        legacy_qty = normalized[0]["quantity"] if len(normalized) == 1 else None
+        return normalized, total, sub, legacy_rate, legacy_qty
+    if amount and amount > 0 and rate is not None and quantity is not None:
+        name = (sub_category or "Item").strip() or "Item"
+        return [{
+            "item_name": name,
+            "rate": float(rate),
+            "quantity": float(quantity),
+            "amount": int(amount),
+        }], int(amount), name, float(rate), float(quantity)
+    if amount and amount > 0:
+        name = (sub_category or "Expense").strip() or "Expense"
+        return [{"item_name": name, "rate": 0.0, "quantity": 1.0, "amount": int(amount)}], int(amount), name, None, None
+    raise HTTPException(400, "At least one line item is required")
+
+
 class ExpenseEntryIn(BaseModel):
     entity_id: Literal["pws", "alpha"]
     expense_head_id: str
     expense_date: str
-    amount: int = Field(gt=0)
+    amount: Optional[int] = Field(default=None, gt=0)
     payment_mode: Literal["Cash", "UPI", "Bank Transfer", "Cheque", "Credit Card"]
     vendor_name: Optional[str] = None
     reference_number: Optional[str] = None
     description: Optional[str] = None
     venue: Optional[str] = None
     sub_category: Optional[str] = None
+    items: Optional[List[ExpenseLineItemIn]] = None
     rate: Optional[float] = Field(default=None, ge=0)
     quantity: Optional[float] = Field(default=None, ge=0)
     urgency: Optional[Literal["Today", "Tomorrow", "This Week"]] = None
@@ -332,6 +389,7 @@ class ExpenseEntryPatch(BaseModel):
     description: Optional[str] = None
     venue: Optional[str] = None
     sub_category: Optional[str] = None
+    items: Optional[List[ExpenseLineItemIn]] = None
     rate: Optional[float] = Field(default=None, ge=0)
     quantity: Optional[float] = Field(default=None, ge=0)
     urgency: Optional[Literal["Today", "Tomorrow", "This Week"]] = None
@@ -389,9 +447,17 @@ async def create_expense_entry(payload: ExpenseEntryIn, user: dict = Depends(get
     if head.get("status") != "active":
         raise HTTPException(400, "Expense head is inactive")
     _validate_payment_reference(payload.payment_mode, payload.reference_number)
-    vendor = (payload.vendor_name or head.get("sub_category") or "General").strip()
-    sub_category = (payload.sub_category or head.get("sub_category") or "").strip() or None
-    budget = await _budget_alert(head, payload.expense_date, payload.amount)
+    line_items, total_amount, sub_category, legacy_rate, legacy_qty = _normalize_line_items(
+        payload.items,
+        rate=payload.rate,
+        quantity=payload.quantity,
+        amount=payload.amount,
+        sub_category=payload.sub_category,
+    )
+    if payload.amount is not None and payload.amount != total_amount:
+        raise HTTPException(400, "amount must equal the sum of line items")
+    vendor = (payload.vendor_name or line_items[0]["item_name"] or head.get("sub_category") or "General").strip()
+    budget = await _budget_alert(head, payload.expense_date, total_amount)
     req_id = f"EXP-{payload.entity_id.upper()}-{uuid.uuid4().hex[:8].upper()}"
     log = _audit_entry("created", user, "Expense submitted for approval")
     doc = {
@@ -400,10 +466,11 @@ async def create_expense_entry(payload: ExpenseEntryIn, user: dict = Depends(get
         "entity_id": payload.entity_id,
         "expense_head_id": payload.expense_head_id,
         "sub_category": sub_category,
+        "items": line_items,
         "expense_date": payload.expense_date[:10],
-        "amount": payload.amount,
-        "rate": payload.rate,
-        "quantity": payload.quantity,
+        "amount": total_amount,
+        "rate": legacy_rate,
+        "quantity": legacy_qty,
         "urgency": payload.urgency,
         "payment_mode": payload.payment_mode,
         "vendor_name": vendor,
@@ -430,7 +497,7 @@ async def create_expense_entry(payload: ExpenseEntryIn, user: dict = Depends(get
     await db.expense_entries.insert_one(doc)
     await _write_audit_log(doc["id"], log)
     await send_to_role("super_admin", ntype="expense_pending", title="Expense pending approval",
-                       message=f"{user['name']} submitted {req_id} for ₹{payload.amount:,}", ref_id=doc["id"], ref_type="expense")
+                       message=f"{user['name']} submitted {req_id} for ₹{total_amount:,}", ref_id=doc["id"], ref_type="expense")
     role_targets = ["principal", "vice_principal"] if payload.entity_id == "pws" else ["admin"]
     for role in role_targets:
         await send_to_role(role, ntype="expense_pending", title="Expense pending approval",
@@ -448,15 +515,32 @@ async def update_expense_entry(entry_id: str, payload: ExpenseEntryPatch, user: 
     head_id = payload.expense_head_id or entry["expense_head_id"]
     head = await _load_head(head_id)
     expense_date = (payload.expense_date or entry["expense_date"])[:10]
-    amount = payload.amount if payload.amount is not None else entry["amount"]
     payment_mode = payload.payment_mode or entry["payment_mode"]
     reference_number = payload.reference_number if payload.reference_number is not None else entry.get("reference_number")
     _validate_payment_reference(payment_mode, reference_number)
+
+    if payload.items is not None:
+        line_items, amount, sub_category, legacy_rate, legacy_qty = _normalize_line_items(payload.items)
+    else:
+        amount = payload.amount if payload.amount is not None else entry["amount"]
+        line_items = None
+        sub_category = None
+        legacy_rate = None
+        legacy_qty = None
+
     budget = await _budget_alert(head, expense_date, amount, exclude_id=entry_id)
     patch: Dict[str, Any] = {
         "updated_at": now_utc().isoformat(),
         "budget_alert": budget,
     }
+    if line_items is not None:
+        patch["items"] = line_items
+        patch["amount"] = amount
+        patch["sub_category"] = sub_category
+        patch["rate"] = legacy_rate
+        patch["quantity"] = legacy_qty
+    elif payload.amount is not None:
+        patch["amount"] = amount
     if entry["status"] == "rejected":
         patch["status"] = "pending"
         patch["rejection_reason"] = None
@@ -464,14 +548,14 @@ async def update_expense_entry(entry_id: str, payload: ExpenseEntryPatch, user: 
         patch["rejected_by_id"] = None
         patch["rejected_by_name"] = None
     for field in (
-        "expense_head_id", "expense_date", "amount", "payment_mode", "vendor_name",
-        "reference_number", "description", "venue", "sub_category", "rate", "quantity", "urgency",
+        "expense_head_id", "expense_date", "payment_mode", "vendor_name",
+        "reference_number", "description", "venue", "urgency",
     ):
         val = getattr(payload, field, None)
         if val is not None:
             patch[field] = val.strip() if isinstance(val, str) else val
-    if payload.expense_head_id and payload.sub_category is None:
-        patch["sub_category"] = head.get("sub_category")
+    if payload.expense_head_id and payload.items is None and payload.sub_category is None and "sub_category" not in patch:
+        patch["sub_category"] = entry.get("sub_category") or head.get("sub_category")
     log = _audit_entry("updated", user, "Entry modified" + (" and resubmitted" if entry["status"] == "rejected" else ""))
     await db.expense_entries.update_one({"id": entry_id}, {"$set": patch, "$push": {"audit_trail": log}})
     await _write_audit_log(entry_id, log)
@@ -706,12 +790,20 @@ async def expense_outflow_summary(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     venue: Optional[str] = None,
+    all_statuses: bool = Query(False, description="Include pending and rejected entries for finance expense report"),
 ):
-    if entity_id and not _can_view_entity_expenses(user, entity_id):
-        raise HTTPException(403, "Access denied")
-    if not entity_id and not is_super_admin(user):
+    if entity_id:
+        if entity_id not in ENTITY_IDS:
+            raise HTTPException(400, "entity_id must be pws or alpha")
+        if not _can_view_entity_expenses(user, entity_id):
+            raise HTTPException(403, "Access denied")
+    elif not (is_super_admin(user) or _can_view_both_entities(user)):
         raise HTTPException(400, "entity_id required")
-    q: Dict[str, Any] = {"status": "approved"}
+    q: Dict[str, Any] = {}
+    if all_statuses:
+        q["status"] = {"$in": ["pending", "approved", "rejected"]}
+    else:
+        q["status"] = "approved"
     if entity_id:
         q["entity_id"] = entity_id
     if date_from or date_to:
@@ -721,27 +813,52 @@ async def expense_outflow_summary(
         if date_to:
             rng["$lte"] = date_to[:10]
         q["expense_date"] = rng
-    if venue and venue != "All":
+    if venue and venue not in ("All", "all"):
         q["venue"] = venue
-    rows = await db.expense_entries.find(q, {"_id": 0}).to_list(5000)
-    head_ids = list({r["expense_head_id"] for r in rows})
+    rows = await db.expense_entries.find(q, {"_id": 0}).sort("expense_date", -1).to_list(5000)
+    head_ids = list({r["expense_head_id"] for r in rows if r.get("expense_head_id")})
     heads = await db.expense_heads.find({"id": {"$in": head_ids}}, {"_id": 0}).to_list(len(head_ids) or 1)
     hmap = {h["id"]: h for h in heads}
     by_head: Dict[str, Dict[str, Any]] = {}
     by_venue: Dict[str, int] = {}
-    total = 0
+    summary = {
+        "total_amount": 0,
+        "total_count": len(rows),
+        "pending_count": 0,
+        "pending_amount": 0,
+        "approved_count": 0,
+        "approved_amount": 0,
+        "rejected_count": 0,
+        "rejected_amount": 0,
+    }
+    approved_total = 0
+    approved_count = 0
     for r in rows:
-        total += r["amount"]
-        head = hmap.get(r["expense_head_id"], {})
-        label = head.get("sub_category") or "Other"
+        amt = int(r.get("amount") or 0)
+        status = r.get("status") or "pending"
+        summary["total_amount"] += amt
+        if status == "pending":
+            summary["pending_count"] += 1
+            summary["pending_amount"] += amt
+        elif status == "approved":
+            summary["approved_count"] += 1
+            summary["approved_amount"] += amt
+            approved_total += amt
+            approved_count += 1
+        elif status == "rejected":
+            summary["rejected_count"] += 1
+            summary["rejected_amount"] += amt
+        head = hmap.get(r.get("expense_head_id"), {})
+        label = r.get("sub_category") or head.get("sub_category") or "Other"
         bucket = by_head.setdefault(label, {"expense_head": label, "main_category": head.get("main_category"), "amount": 0, "count": 0})
-        bucket["amount"] += r["amount"]
+        bucket["amount"] += amt
         bucket["count"] += 1
         v = r.get("venue") or "Unassigned"
-        by_venue[v] = by_venue.get(v, 0) + r["amount"]
+        by_venue[v] = by_venue.get(v, 0) + amt
     return {
-        "totals": {"amount": total, "count": len(rows)},
+        "summary": summary,
+        "totals": {"amount": approved_total if all_statuses else summary["total_amount"], "count": approved_count if all_statuses else len(rows)},
         "by_expense_head": sorted(by_head.values(), key=lambda x: -x["amount"]),
         "by_venue": [{"venue": k, "amount": v} for k, v in sorted(by_venue.items(), key=lambda x: -x[1])],
-        "rows": [_entry_out(r, hmap.get(r.get("expense_head_id"))) for r in rows[:500]],
+        "rows": [_entry_out(r, hmap.get(r.get("expense_head_id"))) for r in rows],
     }
