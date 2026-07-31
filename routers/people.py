@@ -648,6 +648,11 @@ async def update_person(person_id: str, payload: PersonUpdate, user: dict = Depe
 
     if not fee_pending_approval:
         upd.pop("status", None)
+    fee_keys_changed: set[str] = set()
+    if target["kind"] in ("player", "student") and not fee_pending_approval:
+        from fee_sync import fee_related_keys_changed
+        fee_keys_changed = fee_related_keys_changed(upd, target)
+
     if not upd:
         raise HTTPException(400, "No fields to update")
     merged = {**target, **upd}
@@ -679,13 +684,18 @@ async def update_person(person_id: str, payload: PersonUpdate, user: dict = Depe
             "approval": approval_out(approval_doc),
         }
 
-    if fresh.get("kind") == "student" and fresh.get("pws_class"):
+    if fee_keys_changed and fresh.get("kind") in ("player", "student"):
         try:
-            from routers.pws_fees import sync_pws_fees_for_student
-            await sync_pws_fees_for_student(fresh)
+            from fee_sync import sync_person_fees_to_financials
+            sync_result = await sync_person_fees_to_financials(
+                fresh, user, changed_keys=fee_keys_changed,
+            )
+            fresh = {**fresh, "fee_sync": sync_result}
         except Exception:
             import logging
-            logging.getLogger("people").exception("PWS fee sync failed for student %s", person_id)
+            logging.getLogger("people").exception(
+                "Fee sync to financials failed for person %s", person_id,
+            )
     if fresh.get("kind") == "staff":
         try:
             await ensure_staff_user_account(fresh)

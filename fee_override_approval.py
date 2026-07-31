@@ -298,16 +298,16 @@ async def apply_approved_fee_override(req: dict, modified_custom_fees: Optional[
     fresh = await db.people.find_one({"id": person_id}, {"_id": 0})
     if not fresh:
         return
+    actor = {
+        "id": req.get("decided_by_id") or req.get("requested_by_id"),
+        "name": req.get("decided_by_name") or req.get("requested_by_name") or "System",
+    }
     try:
-        if fresh.get("kind") == "player":
-            from routers.fees import auto_create_fees_for_player
-            await auto_create_fees_for_player(fresh)
-        elif fresh.get("kind") == "student":
-            from routers.pws_fees import sync_pws_fees_for_student
-            await sync_pws_fees_for_student(fresh)
+        from fee_sync import sync_person_fees_to_financials
+        await sync_person_fees_to_financials(fresh, actor)
     except Exception:
         logging.getLogger("fee_override_approval").exception(
-            "Fee materialization failed after approving override for person %s", person_id,
+            "Fee sync failed after approving override for person %s", person_id,
         )
 
 
