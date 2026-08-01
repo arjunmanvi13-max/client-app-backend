@@ -68,9 +68,9 @@ def assert_can_list_login_users(actor: dict, user_type: Optional[str] = None, *,
 
 
 def assert_can_create_directory_teacher(actor: dict) -> None:
-    if is_super_admin(actor) or is_principal_user(actor):
+    if is_super_admin(actor) or is_principal_user(actor) or can_add_new_teacher(actor):
         return
-    raise HTTPException(403, "Only Super Admin or Principal can add directory teachers")
+    raise HTTPException(403, "Only Super Admin, Principal, or users with Add New Teacher permission can add teachers")
 
 
 def can_bulk_upload(user: dict) -> bool:

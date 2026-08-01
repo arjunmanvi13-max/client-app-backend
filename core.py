@@ -879,6 +879,9 @@ class DirectoryTeacherCreate(BaseModel):
     guardian_mobile: str
     reference_name: str
     reference_mobile: str
+    enable_login: bool = False
+    login_email: Optional[EmailStr] = None
+    password: Optional[str] = None
 
     @field_validator("name", "address", "last_job", "guardian_name", "reference_name")
     @classmethod
@@ -919,6 +922,15 @@ class DirectoryTeacherCreate(BaseModel):
             self.qualification_other = other
         else:
             self.qualification_other = None
+        return self
+
+    @model_validator(mode="after")
+    def _validate_login_fields(self):
+        if self.enable_login:
+            if not self.login_email or not (self.password or "").strip():
+                raise ValueError("Login email and password are required when system login is enabled")
+            if len((self.password or "").strip()) < 6:
+                raise ValueError("Password must be at least 6 characters")
         return self
 
 class UserUpdate(BaseModel):

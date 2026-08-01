@@ -261,6 +261,11 @@ async def create_user(payload: UserCreate, user: dict = Depends(get_current_user
     assert_can_create_login_user(user, payload.user_type)
     if payload.user_type == UserRole.SUPER_ADMIN.value:
         raise HTTPException(403, "Super Admin accounts are seed-managed and cannot be created via API")
+    if payload.user_type == UserRole.PWS_TEACHER.value:
+        raise HTTPException(
+            400,
+            "PWS teachers must be created from Directory → Teachers. Use POST /users/directory-teachers.",
+        )
 
     if not payload.email or not payload.password:
         raise HTTPException(400, "Email and password are required")
@@ -350,7 +355,7 @@ async def create_user(payload: UserCreate, user: dict = Depends(get_current_user
 
 @router.post("/directory-teachers")
 async def create_directory_teacher(payload: DirectoryTeacherCreate, user: dict = Depends(get_current_user)):
-    """Create a PWS teacher profile for the Directory roster (no login account yet)."""
+    """Create a PWS teacher profile for the Directory roster (optional system login)."""
     assert_can_create_directory_teacher(user)
 
     mobile = _normalize_mobile(payload.mobile)
@@ -367,6 +372,17 @@ async def create_directory_teacher(payload: DirectoryTeacherCreate, user: dict =
 
     legacy_role = "teacher"
     perms = default_permissions(legacy_role)
+    rbac_overrides: dict = {}
+
+    if payload.enable_login:
+        email = validate_domain_email(str(payload.login_email))
+        if await db.users.find_one({"email": email}):
+            raise HTTPException(400, "Login email already exists")
+        from category_permissions_service import permissions_for_user_type
+        cat_perms = await permissions_for_user_type(UserRole.PWS_TEACHER.value)
+        if cat_perms:
+            perms = {k: bool(cat_perms["permissions"].get(k, False)) for k in PERMISSION_KEYS}
+            rbac_overrides = dict(cat_perms.get("permissions_rbac") or {})
 
     doc = {
         "id": str(uuid.uuid4()),
@@ -377,10 +393,10 @@ async def create_directory_teacher(payload: DirectoryTeacherCreate, user: dict =
         "entity_scope": "PWS",
         "can_manage": [],
         "permissions": perms,
-        "permissions_rbac": {},
+        "permissions_rbac": rbac_overrides,
         "status": "active",
         "is_active": True,
-        "has_login_account": False,
+        "has_login_account": bool(payload.enable_login),
         "personal_email": personal_email,
         "mobile": mobile,
         "date_of_birth": payload.date_of_birth,
@@ -396,6 +412,11 @@ async def create_directory_teacher(payload: DirectoryTeacherCreate, user: dict =
         "teacher_designation": "TEACHER",
         "created_at": now_utc().isoformat(),
     }
+    if payload.enable_login:
+        doc["email"] = validate_domain_email(str(payload.login_email))
+        doc["password_hash"] = hash_password(payload.password.strip())
+        doc["is_password_set"] = True
+        doc["must_change_password"] = True
     apply_user_type_fields(doc, user_type=UserRole.PWS_TEACHER.value)
     await db.users.insert_one(doc)
     await _log_user_type_audit(
