@@ -18,6 +18,14 @@ ROLE_PERMISSIONS: dict[UserRole, frozenset[Permission]] = {
         Permission.MANAGE_EXPENSE_STRUCTURE,
         Permission.CAPTURE_PWS_EXPENSES,
         Permission.CAPTURE_ALPHA_EXPENSES,
+        Permission.TIMETABLE_VIEW_ALL,
+        Permission.TIMETABLE_VIEW_OWN,
+        Permission.TIMETABLE_CREATE,
+        Permission.TIMETABLE_EDIT,
+        Permission.TIMETABLE_DELETE,
+        Permission.TIMETABLE_SUBSTITUTE,
+        Permission.TIMETABLE_PUBLISH,
+        Permission.TIMETABLE_EXPORT,
     }),
 
     UserRole.PWS_ADMIN: frozenset({
@@ -67,6 +75,8 @@ ROLE_PERMISSIONS: dict[UserRole, frozenset[Permission]] = {
         Permission.MANAGE_MARKS_ASSESSMENT,
         Permission.MANAGE_TEACHER_TASKS,
         Permission.DASHBOARD_ACCESS,
+        Permission.TIMETABLE_VIEW_OWN,
+        Permission.TIMETABLE_EXPORT,
     }),
 
     UserRole.ALPHA_COACH: frozenset({

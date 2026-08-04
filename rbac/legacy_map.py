@@ -62,4 +62,13 @@ PERMISSION_TO_LEGACY: dict[Permission, tuple[str, ...]] = {
     Permission.MANAGE_EXPENSE_STRUCTURE: ("manage_expense_structure",),
     Permission.CAPTURE_PWS_EXPENSES: ("capture_pws_expenses",),
     Permission.CAPTURE_ALPHA_EXPENSES: ("capture_alpha_expenses",),
+
+    Permission.TIMETABLE_VIEW_ALL: ("timetable_view_all",),
+    Permission.TIMETABLE_VIEW_OWN: ("timetable_view_own",),
+    Permission.TIMETABLE_CREATE: ("timetable_create",),
+    Permission.TIMETABLE_EDIT: ("timetable_edit",),
+    Permission.TIMETABLE_DELETE: ("timetable_delete",),
+    Permission.TIMETABLE_SUBSTITUTE: ("timetable_substitute",),
+    Permission.TIMETABLE_PUBLISH: ("timetable_publish",),
+    Permission.TIMETABLE_EXPORT: ("timetable_export",),
 }

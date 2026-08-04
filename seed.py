@@ -166,6 +166,9 @@ async def _ensure_indexes() -> None:
         ("expense_heads", [("entity_id", 1), ("category_code", 1)]),
         ("expense_entries", [("entity_id", 1), ("status", 1), ("expense_date", -1)]),
         ("expense_audit_logs", [("entry_id", 1), ("at", 1)]),
+        ("timetable_periods", [("entity_id", 1), ("academic_year_id", 1), ("schedule_group", 1), ("day_type", 1)]),
+        ("timetable_slots", [("entity_id", 1), ("academic_year_id", 1), ("class_id", 1), ("day_of_week", 1), ("period_id", 1)]),
+        ("timetable_substitutions", [("slot_id", 1), ("substitution_date", 1), ("status", 1)]),
     ]:
         try:
             await db[coll].create_index(fields)
@@ -338,6 +341,7 @@ async def _run_seed():
 
     for step_name, step in [
         ("academic_structure", _seed_academic_structure),
+        ("timetable", _seed_timetable),
         ("academic_marks", _seed_academic_marks),
         ("coach_assessments", _seed_coach_assessments),
         ("pws_student_fees", _seed_pws_student_fees),
@@ -1197,4 +1201,105 @@ async def _seed_fee_catalog():
             "created_by_name": "Seed",
             "updated_at": now_utc().isoformat(),
         })
+
+
+async def _seed_timetable():
+    """PWS timetable periods, extended subjects, club duty roster."""
+    from timetable.constants import (
+        CLUB_INCHARGE_ROSTER,
+        ENTITY_PWS,
+        PERIOD_SEED_TEMPLATES,
+        TIMETABLE_SUBJECTS,
+        TEACHER_SEED_NAMES,
+    )
+
+    year = await db.academic_years.find_one({"entity_id": ENTITY_PWS, "status": "open"})
+    if not year:
+        year = await db.academic_years.find_one({"entity_id": ENTITY_PWS})
+    if not year:
+        return
+    year_id = year["id"]
+
+    templates = [
+        ("PRE_PRIMARY", "WEEKDAY", "PRE_PRIMARY_WEEKDAY"),
+        ("PRIMARY_SECONDARY", "WEEKDAY", "PRIMARY_SECONDARY_WEEKDAY"),
+        ("PRE_PRIMARY", "SATURDAY", "SATURDAY"),
+        ("PRIMARY_SECONDARY", "SATURDAY", "SATURDAY"),
+    ]
+    for schedule_group, day_type, key in templates:
+        for order, label, start, end, ptype in PERIOD_SEED_TEMPLATES[key]:
+            await _insert_if_absent(
+                db.timetable_periods,
+                {
+                    "entity_id": ENTITY_PWS,
+                    "academic_year_id": year_id,
+                    "schedule_group": schedule_group,
+                    "day_type": day_type,
+                    "period_order": order,
+                },
+                {
+                    "id": str(uuid.uuid4()),
+                    "entity_id": ENTITY_PWS,
+                    "academic_year_id": year_id,
+                    "schedule_group": schedule_group,
+                    "day_type": day_type,
+                    "period_order": order,
+                    "period_label": label,
+                    "start_time": start,
+                    "end_time": end,
+                    "period_type": ptype,
+                    "is_active": True,
+                    "created_at": now_utc().isoformat(),
+                    "updated_at": now_utc().isoformat(),
+                    "created_by": "seed",
+                    "updated_by": "seed",
+                },
+            )
+
+    sort = 100
+    for name in TIMETABLE_SUBJECTS:
+        existing = await db.subjects.find_one({"academic_year_id": year_id, "name": name})
+        if not existing:
+            await _insert_if_absent(
+                db.subjects,
+                {"academic_year_id": year_id, "name": name},
+                {
+                    "id": str(uuid.uuid4()),
+                    "academic_year_id": year_id,
+                    "name": name,
+                    "code": name[:4].upper().replace(" ", ""),
+                    "sort_order": sort,
+                    "grade_ids": [],
+                    "section_ids": [],
+                    "entity_id": ENTITY_PWS,
+                    "created_at": now_utc().isoformat(),
+                },
+            )
+        sort += 1
+
+    teacher_by_name: dict = {}
+    for tname in TEACHER_SEED_NAMES:
+        doc = await db.users.find_one({"role": "teacher", "name": {"$regex": f"^{tname}$", "$options": "i"}})
+        if doc:
+            teacher_by_name[tname.lower()] = doc["id"]
+
+    for club, tname in CLUB_INCHARGE_ROSTER:
+        tid = teacher_by_name.get(tname.lower())
+        if not tid:
+            continue
+        await _insert_if_absent(
+            db.timetable_duty_roster,
+            {"entity_id": ENTITY_PWS, "academic_year_id": year_id, "duty_type": "CLUB_INCHARGE", "club_name": club},
+            {
+                "id": str(uuid.uuid4()),
+                "entity_id": ENTITY_PWS,
+                "academic_year_id": year_id,
+                "day_of_week": "SAT",
+                "duty_type": "CLUB_INCHARGE",
+                "club_name": club,
+                "teacher_id": tid,
+                "created_at": now_utc().isoformat(),
+                "created_by": "seed",
+            },
+        )
 

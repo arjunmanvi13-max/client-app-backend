@@ -288,6 +288,8 @@ PERMISSION_KEYS = [
     "view_fees", "collect_fees", "edit_fees", "manage_fee_catalog", "bulk_upload", "approve_deactivation",
     "approve_requests", "supervise_tasks",
     "manage_expense_structure", "capture_pws_expenses", "capture_alpha_expenses",
+    "timetable_view_all", "timetable_view_own", "timetable_create", "timetable_edit",
+    "timetable_delete", "timetable_substitute", "timetable_publish", "timetable_export",
 ]
 
 PERMISSION_GROUPS = {
@@ -297,6 +299,10 @@ PERMISSION_GROUPS = {
     "Admin": ["access_reports", "dashboard_access", "lifecycle_dashboard", "manage_users", "manage_academic_structure", "enter_academic_marks", "view_academic_marks", "manage_coach_assessments", "enter_coach_assessments", "view_coach_assessments", "supervise_tasks", "approve_requests"],
     "Fees & Bulk": ["view_fees", "collect_fees", "edit_fees", "manage_fee_catalog", "bulk_upload", "approve_deactivation", "approve_requests"],
     "Expenses": ["manage_expense_structure", "capture_pws_expenses", "capture_alpha_expenses"],
+    "Time Table": [
+        "timetable_view_all", "timetable_view_own", "timetable_create", "timetable_edit",
+        "timetable_delete", "timetable_substitute", "timetable_publish", "timetable_export",
+    ],
 }
 
 

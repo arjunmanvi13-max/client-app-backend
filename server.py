@@ -11,7 +11,7 @@ from pymongo.errors import DuplicateKeyError
 
 from core import client, logger
 from seed import seed_data
-from routers import auth, users, people, tasks, attendance, hostel, notifications, dashboard, coach, command, permissions, fees, uploads, deactivation, parents, alpha_dashboard, reports, academic, invoices, marks, report_cards, coach_assessments, fee_catalog, approvals, pws_fees, academy_structure, expenses
+from routers import auth, users, people, tasks, attendance, hostel, notifications, dashboard, coach, command, permissions, fees, uploads, deactivation, parents, alpha_dashboard, reports, academic, invoices, marks, report_cards, coach_assessments, fee_catalog, approvals, pws_fees, academy_structure, expenses, timetable
 
 app = FastAPI(title="PWS & ALPHA Tracker")
 api = APIRouter(prefix="/api")
@@ -44,6 +44,7 @@ api.include_router(coach_assessments.router)
 api.include_router(fee_catalog.router)
 api.include_router(academy_structure.router)
 api.include_router(expenses.router)
+api.include_router(timetable.router)
 
 @api.get("/")
 async def root():

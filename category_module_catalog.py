@@ -157,6 +157,16 @@ MODULE_GROUPS: List[Dict[str, Any]] = [
             ]),
             _mod("report-cards", "Report Cards", permission_keys=["enter_academic_marks", "view_academic_marks"],
                   rbac=[Permission.MANAGE_MARKS_ASSESSMENT.value], pws_only=True),
+            _mod("timetable", "Time Table", permission_keys=[
+                    "timetable_view_all", "timetable_view_own", "timetable_create", "timetable_edit",
+                    "timetable_delete", "timetable_substitute", "timetable_publish", "timetable_export",
+                 ],
+                 rbac=[
+                    Permission.TIMETABLE_VIEW_ALL.value, Permission.TIMETABLE_VIEW_OWN.value,
+                    Permission.TIMETABLE_CREATE.value, Permission.TIMETABLE_EDIT.value,
+                    Permission.TIMETABLE_DELETE.value, Permission.TIMETABLE_SUBSTITUTE.value,
+                    Permission.TIMETABLE_PUBLISH.value, Permission.TIMETABLE_EXPORT.value,
+                 ], pws_only=True),
         ],
     },
     {
