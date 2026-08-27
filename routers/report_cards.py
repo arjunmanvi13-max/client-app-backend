@@ -22,6 +22,7 @@ from report_card_format import (
 )
 from routers.academic import assert_teacher_section_access
 from routers.marks import default_grading_scale, grade_for_score, percentage_for_score
+from starlette.concurrency import run_in_threadpool
 
 router = APIRouter(prefix="/report-cards", tags=["report-cards"])
 
@@ -587,7 +588,7 @@ async def report_card_pdf(card_id: str, user: dict = Depends(get_current_user)):
         raise HTTPException(403, "PDF export is available only for finalized report cards")
     card = enrich_card_computed(card, await _bands_for_card(card))
     await _audit(card_id, "exported_pdf", user)
-    pdf = render_report_card_pdf(card)
+    pdf = await run_in_threadpool(render_report_card_pdf, card)
     name = (card.get("person_name") or "report").replace(" ", "_")
     return Response(
         content=pdf,

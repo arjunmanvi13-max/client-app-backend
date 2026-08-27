@@ -13,9 +13,9 @@ CREDS = {
     "super_admin": ("superadmin@prarambhika.com", "Super@123"),
 }
 LEGACY_CREDS = {
-    "principal": ("admin@pws-alpha.com", "Admin@123"),
-    "teacher": ("teacher@pws-alpha.com", "Teacher@123"),
-    "super_admin": ("super@pws-alpha.com", "Super@123"),
+    "principal": ("admin@prarambhika.com", "Admin@123"),
+    "teacher": ("teacher@prarambhika.com", "Teacher@123"),
+    "super_admin": ("super@prarambhika.com", "Super@123"),
 }
 TOKENS = {}
 
@@ -162,16 +162,37 @@ class TestAcademicStructureAPI:
             assert years[0]["status"] in ("open", "closed", "archived")
 
     def test_archived_year_blocks_grade_create(self):
-        years = requests.get(f"{API}/academic/years", headers=_hdr("principal"), timeout=15)
-        if years.status_code != 200 or not years.json():
-            pytest.skip("No academic years")
-        year_id = years.json()[0]["id"]
-        requests.patch(
+        """Archive a throwaway year, never the shared open one.
+
+        Archiving is a one-way transition for non-super-admins, so archiving the
+        live year here used to leave the whole database without an open academic
+        year — which silently disables student attendance and section pickers.
+        """
+        import uuid as _uuid
+
+        created = requests.post(
+            f"{API}/academic/years",
+            headers=_hdr("principal"),
+            json={
+                "name": f"ZZ-test-{_uuid.uuid4().hex[:6]}",
+                "entity_id": "pws",
+                "start_date": "2019-04-01",
+                "end_date": "2020-03-31",
+            },
+            timeout=15,
+        )
+        if created.status_code not in (200, 201):
+            pytest.skip(f"Could not create a scratch academic year: {created.text}")
+        year_id = created.json()["id"]
+
+        archived = requests.patch(
             f"{API}/academic/years/{year_id}/status",
             headers=_hdr("principal"),
             json={"status": "archived"},
             timeout=15,
         )
+        assert archived.status_code == 200, archived.text
+
         r = requests.post(
             f"{API}/academic/grades",
             headers=_hdr("principal"),
@@ -179,11 +200,15 @@ class TestAcademicStructureAPI:
             timeout=15,
         )
         assert r.status_code == 403, r.text
-        requests.patch(
-            f"{API}/academic/years/{year_id}/status",
-            headers=_hdr("principal"),
-            json={"status": "open"},
-            timeout=15,
+
+    def test_open_academic_year_exists(self):
+        """Guards the invariant the suite used to destroy."""
+        r = requests.get(f"{API}/academic/sections/for-attendance",
+                         headers=_hdr("super_admin"), timeout=15)
+        assert r.status_code == 200, r.text
+        assert r.json().get("academic_year"), (
+            "No open PWS academic year — student attendance and section pickers "
+            "will be empty across the app."
         )
 
     def test_teacher_subjects_scoped_in_section(self):

@@ -9,14 +9,14 @@ BASE = (os.environ.get("EXPO_PUBLIC_BACKEND_URL") or os.environ.get("EXPO_BACKEN
 API = f"{BASE}/api"
 
 CREDS = {
-    "super_admin": ("super@pws-alpha.com", "Super@123"),
+    "super_admin": ("super@prarambhika.com", "Super@123"),
     "principal": ("principal@prarambhika.com", "Principal@123"),
     "teacher": ("teacher@prarambhika.com", "Teacher@123"),
 }
 FALLBACK = {
-    "super_admin": ("super@pws-alpha.com", "Super@123"),
-    "principal": ("admin@pws-alpha.com", "Admin@123"),
-    "teacher": ("teacher@pws-alpha.com", "Teacher@123"),
+    "super_admin": ("super@prarambhika.com", "Super@123"),
+    "principal": ("admin@prarambhika.com", "Admin@123"),
+    "teacher": ("teacher@prarambhika.com", "Teacher@123"),
 }
 TOKENS = {}
 

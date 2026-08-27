@@ -26,6 +26,7 @@ import requests
 from dotenv import load_dotenv
 
 load_dotenv("/app/backend/.env")
+load_dotenv()
 
 BASE_URL = os.environ.get(
     "EXPO_PUBLIC_BACKEND_URL", "https://unified-track.preview.emergentagent.com"
@@ -39,6 +40,25 @@ _state = {}
 
 
 # ---------- Helpers ----------
+def _next_month(period: str) -> str:
+    y, m = (int(x) for x in period.split("-"))
+    return f"{y + 1}-01" if m == 12 else f"{y}-{m + 1:02d}"
+
+
+def _fy_end(period: str) -> str:
+    y, m = (int(x) for x in period.split("-"))
+    return f"{y + 1}-03" if m >= 4 else f"{y}-03"
+
+
+def _months_between(start_excl: str, end_incl: str) -> list:
+    out = []
+    cur = _next_month(start_excl)
+    while cur <= end_incl:
+        out.append(cur)
+        cur = _next_month(cur)
+    return out
+
+
 def _mongo():
     from motor.motor_asyncio import AsyncIOMotorClient
     mongo_url = os.environ.get("MONGO_URL")
@@ -110,14 +130,17 @@ class TestPlayerDuesAdvanceShape:
         r = requests.get(f"{API}/fees/player-dues/{_state['karan']['id']}", headers=headers, timeout=30)
         assert r.status_code == 200, r.text
         data = r.json()
-        assert data.get("financial_year_end") == "2027-03", data.get("financial_year_end")
-        assert data.get("current_month") == "2026-07"
+        current = data.get("current_month")
+        assert current, data
+        assert data.get("financial_year_end") == _fy_end(current), data.get("financial_year_end")
         adv = data.get("advance") or []
         monthly = [a for a in adv if a["fee_type"] == "Monthly"]
         transport = [a for a in adv if a["fee_type"] == "Transport"]
         periods = sorted(a["period_month"] for a in monthly)
-        expected = ["2026-08", "2026-09", "2026-10", "2026-11",
-                    "2026-12", "2027-01", "2027-02", "2027-03"]
+        expected = _months_between(current, data["financial_year_end"])
+        _state["current_month"] = current
+        _state["fy_end"] = data["financial_year_end"]
+        _state["adv_months"] = expected
         # snapshot dues summary for later comparison BEFORE asserting so downstream tests still run
         _state["dues_before"] = data["summary"]
         _state["unpaid_before"] = data["unpaid"]
@@ -137,15 +160,21 @@ class TestCollectMixed:
         _state["dash_before"] = r.json()["by_centre"]["Balua"]
 
     def test_collect_one_due_plus_two_advance(self, headers):
-        # Grab a still-unpaid Monthly (2026-01)
         unpaid = _state["unpaid_before"]
-        m_jan = next((f for f in unpaid if f["fee_type"] == "Monthly" and f["period_month"] == "2026-01"), None)
-        assert m_jan, "Missing 2026-01 monthly for Karan"
+        past = sorted(
+            (f for f in unpaid if f["fee_type"] == "Monthly" and f["period_month"] < _state["current_month"]),
+            key=lambda f: f["period_month"],
+        )
+        assert past, "Karan has no past-due Monthly to collect"
+        m_past = past[0]
+        _state["paid_due_amount"] = m_past["amount_due"]
+        a1, a2 = _state["adv_months"][0], _state["adv_months"][1]
+        _state["paid_months"] = [m_past["period_month"], a1, a2]
         payload = {
-            "fee_ids": [m_jan["id"]],
+            "fee_ids": [m_past["id"]],
             "advance": [
-                {"period_month": "2026-08", "fee_type": "Monthly"},
-                {"period_month": "2026-09", "fee_type": "Monthly"},
+                {"period_month": a1, "fee_type": "Monthly"},
+                {"period_month": a2, "fee_type": "Monthly"},
             ],
             "player_id": _state["karan"]["id"],
             "payment_mode": "Cash",
@@ -158,8 +187,7 @@ class TestCollectMixed:
         # Sorted by period_month
         periods = [f["period_month"] for f in rcpt["fees"]]
         assert periods == sorted(periods), f"fees not sorted by period: {periods}"
-        assert set(periods) == {"2026-01", "2026-08", "2026-09"}
-        # Total = 9000 + 9000 + 9000 = 27000 (Karan monthly is 9000)
+        assert set(periods) == set(_state["paid_months"])
         expected_total = sum(f["amount_due"] for f in rcpt["fees"])
         assert rcpt["total_amount"] == expected_total
         # Two advance rows must have advance_payment True
@@ -180,7 +208,7 @@ class TestAdvanceOnly:
     def test_advance_only(self, headers):
         payload = {
             "fee_ids": [],
-            "advance": [{"period_month": "2026-10", "fee_type": "Monthly"}],
+            "advance": [{"period_month": _state["adv_months"][2], "fee_type": "Monthly"}],
             "player_id": _state["karan"]["id"],
             "payment_mode": "Cash",
         }
@@ -188,7 +216,8 @@ class TestAdvanceOnly:
         assert r.status_code == 200, r.text
         rcpt = r.json()
         assert len(rcpt["fees"]) == 1
-        assert rcpt["fees"][0]["period_month"] == "2026-10"
+        assert rcpt["fees"][0]["period_month"] == _state["adv_months"][2]
+        _state["paid_months"].append(_state["adv_months"][2])
         assert rcpt["fees"][0]["advance_payment"] is True
         _state["batch_id_2"] = rcpt["batch_id"]
         _state["batch_2_total"] = rcpt["total_amount"]
@@ -198,21 +227,20 @@ class TestAdvanceOnly:
         assert r.status_code == 200
         data = r.json()
         adv_periods = {a["period_month"] for a in data.get("advance", []) if a["fee_type"] == "Monthly"}
-        # 08, 09, 10 must be removed from advance list
-        for m in ("2026-08", "2026-09", "2026-10"):
+        for m in _state["adv_months"][:3]:
             assert m not in adv_periods, f"{m} still in advance list after payment"
         # And they must NOT appear in unpaid
         unpaid_periods = {(f["fee_type"], f["period_month"]) for f in data["unpaid"]}
-        for m in ("2026-08", "2026-09", "2026-10"):
+        for m in _state["adv_months"][:3]:
             assert ("Monthly", m) not in unpaid_periods, f"{m} in unpaid after advance payment"
         # Dues summary outstanding: originally X, minus the one 2026-01 we paid
         before = _state["dues_before"]
         after = data["summary"]
         # Only 2026-01 (one Monthly, past due) was collected from outstanding — the advance
         # months should NOT reduce outstanding since they were future months.
-        monthly_amt = _state["monthly_amt"]
-        assert after["previous_pending_due"] == before["previous_pending_due"] - monthly_amt, (
-            f"previous_pending_due should drop by {monthly_amt} only. before={before}, after={after}"
+        paid_amt = _state["paid_due_amount"]
+        assert after["previous_pending_due"] == before["previous_pending_due"] - paid_amt, (
+            f"previous_pending_due should drop by {paid_amt} only. before={before}, after={after}"
         )
         assert after["current_month_due"] == before["current_month_due"], "current month should be unchanged"
 
@@ -224,14 +252,14 @@ class TestValidations:
 
     def test_current_month_rejected(self, headers):
         r = self._post(headers, {
-            "fee_ids": [], "advance": [{"period_month": "2026-07", "fee_type": "Monthly"}],
+            "fee_ids": [], "advance": [{"period_month": _state["current_month"], "fee_type": "Monthly"}],
             "player_id": _state["karan"]["id"], "payment_mode": "Cash",
         })
         assert r.status_code == 400, r.text
 
     def test_next_fy_rejected(self, headers):
         r = self._post(headers, {
-            "fee_ids": [], "advance": [{"period_month": "2027-04", "fee_type": "Monthly"}],
+            "fee_ids": [], "advance": [{"period_month": _next_month(_state["fy_end"]), "fee_type": "Monthly"}],
             "player_id": _state["karan"]["id"], "payment_mode": "Cash",
         })
         assert r.status_code == 400, r.text
@@ -240,24 +268,23 @@ class TestValidations:
         r = self._post(headers, {
             "fee_ids": [],
             "advance": [
-                {"period_month": "2026-11", "fee_type": "Monthly"},
-                {"period_month": "2026-11", "fee_type": "Monthly"},
+                {"period_month": _state["adv_months"][3], "fee_type": "Monthly"},
+                {"period_month": _state["adv_months"][3], "fee_type": "Monthly"},
             ],
             "player_id": _state["karan"]["id"], "payment_mode": "Cash",
         })
         assert r.status_code == 400, r.text
 
     def test_already_paid_month_rejected(self, headers):
-        # 2026-08 was paid in TestCollectMixed
         r = self._post(headers, {
-            "fee_ids": [], "advance": [{"period_month": "2026-08", "fee_type": "Monthly"}],
+            "fee_ids": [], "advance": [{"period_month": _state["adv_months"][0], "fee_type": "Monthly"}],
             "player_id": _state["karan"]["id"], "payment_mode": "Cash",
         })
         assert r.status_code == 400, r.text
 
     def test_transport_no_config_rejected(self, headers):
         r = self._post(headers, {
-            "fee_ids": [], "advance": [{"period_month": "2026-11", "fee_type": "Transport"}],
+            "fee_ids": [], "advance": [{"period_month": _state["adv_months"][3], "fee_type": "Transport"}],
             "player_id": _state["karan"]["id"], "payment_mode": "Cash",
         })
         assert r.status_code == 400, r.text
@@ -269,7 +296,7 @@ class TestValidations:
     def test_advance_without_player_id_rejected(self, headers):
         r = self._post(headers, {
             "fee_ids": [],
-            "advance": [{"period_month": "2026-11", "fee_type": "Monthly"}],
+            "advance": [{"period_month": _state["adv_months"][3], "fee_type": "Monthly"}],
             "payment_mode": "Cash",
         })
         assert r.status_code == 400, r.text
@@ -292,10 +319,9 @@ class TestDashboardAggregation:
         assert after["due_current_month"] == before["due_current_month"], (
             f"due_current_month changed: {before['due_current_month']} → {after['due_current_month']}"
         )
-        # due_past should have decreased by the one real due (monthly_amt, 2026-01)
-        monthly_amt = _state["monthly_amt"]
-        assert after["due_past"] == before["due_past"] - monthly_amt, (
-            f"due_past mismatch: before={before['due_past']} after={after['due_past']} monthly={monthly_amt}"
+        paid_amt = _state["paid_due_amount"]
+        assert after["due_past"] == before["due_past"] - paid_amt, (
+            f"due_past mismatch: before={before['due_past']} after={after['due_past']} paid={paid_amt}"
         )
 
 
@@ -318,4 +344,4 @@ class TestCleanupFinal:
         adv = [f for f in fees if f.get("advance_payment") is True]
         assert len(paid) == 0, f"Karan should have 0 paid, got {len(paid)}"
         assert len(adv) == 0, f"Karan should have 0 advance rows, got {len(adv)}"
-        assert len(due) == 9, f"Karan should have 9 due (Reg + 8 Monthly), got {len(due)}: {[(f['fee_type'], f.get('period_month')) for f in due]}"
+        assert len(due) == len(fees), f"every Karan fee should be back to due, got {len(due)}/{len(fees)}"

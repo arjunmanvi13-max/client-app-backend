@@ -98,6 +98,14 @@ def _task_out(doc: dict) -> dict:
 @router.post("")
 async def create_task(payload: TaskCreate, user: dict = Depends(get_current_user)):
     assignee_id, assignee_ids = await _resolve_assignees(payload)
+    if not _can_supervise_tasks(user):
+        others = [a for a in assignee_ids if a != user["id"]]
+        if others:
+            raise HTTPException(
+                403,
+                "You can only create tasks for yourself. Assigning work to other "
+                "people requires task supervision rights.",
+            )
     await assert_assignable_user_ids(assignee_ids)
     due_date = _resolve_due_date(payload)
     assignee_name = None

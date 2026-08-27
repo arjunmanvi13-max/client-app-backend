@@ -8,7 +8,7 @@ from core import (
     now_utc,
     person_entity_filter,
     fee_entity_filter,
-    is_super_admin,
+    is_super_admin, today_ist,
 )
 
 ACADEMY_CATEGORIES = ["Day Boarding", "Boarding", "Hostel", "Daily Players"]
@@ -430,7 +430,7 @@ async def _aging_dues(inst: str, this_month: str) -> dict:
 
 
 async def _attendance_for_roles(inst: str) -> dict:
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
 
     async def role_stats(kind: str) -> dict:
         roster = 0
@@ -489,7 +489,7 @@ def _approval_entity_filter(inst: str) -> dict:
 
 async def build_super_admin_metrics(entity: Optional[str]) -> dict:
     inst = _entity_scope(entity)
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
     this_month = today[:7]
 
     active_legacy = await _count_enrollment(inst)

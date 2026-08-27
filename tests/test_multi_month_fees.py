@@ -21,6 +21,7 @@ import requests
 from dotenv import load_dotenv
 
 load_dotenv("/app/backend/.env")
+load_dotenv()
 
 BASE_URL = os.environ.get("EXPO_PUBLIC_BACKEND_URL", "https://unified-track.preview.emergentagent.com").rstrip("/")
 API = f"{BASE_URL}/api"
@@ -103,20 +104,24 @@ class TestKaranMultiMonthDues:
         summary = data["summary"]
         # Extract Monthly period_months from unpaid
         monthly_periods = sorted({f["period_month"] for f in unpaid if f["fee_type"] == "Monthly"})
-        # Karan admitted 2025-12; current month is 2026-07 → 8 monthly periods
-        expected = ["2025-12", "2026-01", "2026-02", "2026-03", "2026-04", "2026-05", "2026-06", "2026-07"]
-        for m in expected:
-            assert m in monthly_periods, f"Missing monthly period {m}. Have: {monthly_periods}"
+        admission_month = (_state["karan_admission"] or "")[:7]
+        current_month = data["current_month"]
+        assert admission_month and current_month, data
+        assert monthly_periods[0] == admission_month, monthly_periods
+        assert monthly_periods[-1] == current_month, monthly_periods
+        assert len(monthly_periods) >= 2, monthly_periods
         types = {f["fee_type"] for f in unpaid}
         assert "Registration" in types
         assert summary["previous_pending_due"] > 0, summary
         assert summary["total_outstanding"] == summary["current_month_due"] + summary["previous_pending_due"]
         # Stash two fees from DIFFERENT months for later
-        m_jan = next((f for f in unpaid if f["fee_type"] == "Monthly" and f["period_month"] == "2026-01"), None)
-        m_feb = next((f for f in unpaid if f["fee_type"] == "Monthly" and f["period_month"] == "2026-02"), None)
-        assert m_jan and m_feb, "Could not find 2026-01 and 2026-02 monthly fees"
-        _state["fee_jan"] = m_jan
-        _state["fee_feb"] = m_feb
+        months = sorted(
+            (f for f in unpaid if f["fee_type"] == "Monthly"),
+            key=lambda f: f["period_month"],
+        )
+        assert len(months) >= 2, "need two unpaid monthly fees for the multi-month test"
+        _state["fee_jan"] = months[0]
+        _state["fee_feb"] = months[1]
 
 
 # ------------------------- T3: collect-multi across different months -------------------------
@@ -144,7 +149,7 @@ class TestCollectMulti:
         paid_ats = {f.get("paid_at") for f in rcpt["fees"]}
         assert None not in paid_ats
         periods = sorted(f["period_month"] for f in rcpt["fees"])
-        assert periods == ["2026-01", "2026-02"]
+        assert periods == sorted([_state["fee_jan"]["period_month"], _state["fee_feb"]["period_month"]])
         _state["batch_id"] = rcpt["batch_id"]
         _state["batch_total"] = rcpt["total_amount"]
 

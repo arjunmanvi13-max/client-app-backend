@@ -1,6 +1,7 @@
 """Shared reporting filters, entity labels, and Excel/PDF export helpers."""
 from __future__ import annotations
 
+import re
 import io
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Callable, Awaitable
@@ -21,7 +22,7 @@ from core import (
     derive_person_entities,
     format_date_display,
     format_datetime_display,
-    format_month_display,
+    format_month_display, today_ist,
 )
 
 REPORT_IDS = (
@@ -235,7 +236,7 @@ def _people_base_query(
     if section_id:
         q["section_id"] = section_id
     elif grade and grade.lower() != "all":
-        q["group"] = {"$regex": f"^{grade}"}
+        q["group"] = {"$regex": f"^{re.escape(grade)}"}
     if department and department.lower() != "all":
         q["department"] = department
     if designation and designation.lower() != "all":
@@ -365,7 +366,7 @@ async def _coach_attendance_match(user: dict, match: dict, sport: Optional[str])
 
 
 async def run_attendance_summary(user: dict, entity: str, filters: dict) -> dict:
-    start = filters.get("date_from") or now_utc().strftime("%Y-%m-%d")
+    start = filters.get("date_from") or today_ist()
     end = filters.get("date_to") or start
     match: dict = {"date": {"$gte": start, "$lte": end}}
     sport_filter = filters.get("sport") if filters.get("sport") and filters["sport"].lower() != "all" else None
@@ -376,7 +377,7 @@ async def run_attendance_summary(user: dict, entity: str, filters: dict) -> dict
     if filters.get("section_id"):
         match["section_id"] = filters["section_id"]
     elif filters.get("grade") and filters["grade"].lower() != "all":
-        match["group"] = {"$regex": f"^{filters['grade']}"}
+        match["group"] = {"$regex": f"^{re.escape(str(filters['grade']))}"}
     ent_f = attendance_entity_filter(entity)
     if ent_f:
         match = {"$and": [match, ent_f]}
@@ -409,7 +410,7 @@ async def run_attendance_summary(user: dict, entity: str, filters: dict) -> dict
 
 
 async def run_attendance_detail(user: dict, entity: str, filters: dict) -> dict:
-    start = filters.get("date_from") or now_utc().strftime("%Y-%m-%d")
+    start = filters.get("date_from") or today_ist()
     end = filters.get("date_to") or start
     match: dict = {"date": {"$gte": start, "$lte": end}}
     sport_filter = filters.get("sport") if filters.get("sport") and filters["sport"].lower() != "all" else None
@@ -497,7 +498,7 @@ async def run_fee_collection(user: dict, entity: str, filters: dict) -> dict:
             q["due_date"] = rng
 
     if payment_method and str(payment_method).lower() != "all":
-        q["payment_mode"] = {"$regex": f"^{payment_method}$", "$options": "i"}
+        q["payment_mode"] = {"$regex": f"^{re.escape(payment_method)}$", "$options": "i"}
 
     fees = await db.fees.find(q, {"_id": 0}).sort("paid_at" if not is_due_report else "due_date", -1).to_list(3000)
 

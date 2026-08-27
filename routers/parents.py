@@ -2,7 +2,7 @@
 from datetime import timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
-from core import db, get_current_user, now_utc, derive_person_entities
+from core import db, get_current_user, now_utc, derive_person_entities, today_ist
 from notifications_service import normalize_notification, notification_filter_for_user, mark_read
 
 router = APIRouter(prefix="/parent", tags=["parent"])
@@ -116,7 +116,7 @@ async def parent_profile(user: dict = Depends(get_current_user)):
 async def list_wards(user: dict = Depends(get_current_user)):
     _ensure_parent(user)
     wards = await _wards_for(user)
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
     thirty_ago = (now_utc() - timedelta(days=30)).strftime("%Y-%m-%d")
     out = []
     for w in wards:
@@ -173,7 +173,7 @@ async def ward_fees(person_id: str, user: dict = Depends(get_current_user)):
     fees = await db.fees.find({"player_id": person_id}, {"_id": 0}).sort("due_date", -1).to_list(200)
     total_due = sum(f.get("amount_due", 0) for f in fees if f.get("status") != "paid")
     total_paid = sum(f.get("amount_due", 0) for f in fees if f.get("status") == "paid")
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
     overdue_count = sum(1 for f in fees if f.get("status") != "paid" and (f.get("due_date") or "9999") < today)
     return {
         "person_id": person_id,
@@ -338,7 +338,7 @@ async def parent_alerts(user: dict = Depends(get_current_user)):
 async def _compute_alerts_for_parent(user: dict) -> list[dict]:
     alerts: list[dict] = []
     wards = await _wards_for(user)
-    today_str = now_utc().strftime("%Y-%m-%d")
+    today_str = today_ist()
     week_ago = (now_utc() - timedelta(days=7)).strftime("%Y-%m-%d")
     cutoff_overdue = (now_utc() - timedelta(days=7)).strftime("%Y-%m-%d")
 

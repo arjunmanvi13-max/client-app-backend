@@ -1,0 +1,4 @@
+Full Name *,Date of Birth *,Address *,Mobile *,Personal Email *,Aadhaar Number *,Qualification *,Qualification (Other),Last Job *,Guardian Name *,Guardian Mobile *,Reference Name *,Reference Mobile *,Teacher Designation,Date of Joining
+,,,,"Personal address, not the login email",Exactly 12 characters,"One of: B.Ed, Bachelor's Degree, Master's Degree, Other",Required when Qualification is Other,,,,,,"One of: CLASS_TEACHER, TEACHER",
+Anjali Gupta,1990-03-14,"44 Rajendra Nagar, Patna",9876500401,anjali.gupta@example.com,234567890123,Master's Degree,,St Xavier High School,Ramesh Gupta,9876500411,Dr Sunil Jha,9876500421,CLASS_TEACHER,2026-04-01
+Nikhil Ranjan,1993-07-22,"8 Patliputra Colony, Patna",9876500402,nikhil.ranjan@example.com,345678901234,B.Ed,,Delhi Public School,Shashi Ranjan,9876500412,Meera Nair,9876500422,TEACHER,2026-04-01

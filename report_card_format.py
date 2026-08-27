@@ -172,7 +172,10 @@ def validate_for_finalize(card: dict) -> List[str]:
         errors.append("At least one scholastic subject row is required")
     if not (card.get("teacher_remark") or "").strip():
         errors.append("Remarks are required before finalization")
-    att = card.get("attendance_display") or format_attendance(
+    stored_att = (card.get("attendance_display") or "").strip()
+    if stored_att in ("—", "-", ""):
+        stored_att = ""
+    att = stored_att or format_attendance(
         card.get("attendance_present"), card.get("attendance_total"), card.get("attendance_pct"),
     )
     if att in ("—", ""):

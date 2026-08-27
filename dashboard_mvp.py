@@ -16,7 +16,7 @@ from core import (
     is_pws_admin_user,
     is_pws_accounts_user,
     is_alpha_admin_user,
-    is_alpha_accounts_user,
+    is_alpha_accounts_user, today_ist,
 )
 from notifications_service import normalize_notification, notification_filter_for_user
 
@@ -29,7 +29,7 @@ def _entity_param(entity: Optional[str]) -> str:
 
 
 async def _attendance_totals_today(entity: str) -> dict:
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
     match: dict = {"date": today}
     ent_f = attendance_entity_filter(entity)
     if ent_f:
@@ -47,8 +47,8 @@ async def _attendance_totals_today(entity: str) -> dict:
 
 
 async def _fees_collected_today(entity: str) -> dict:
-    today = now_utc().strftime("%Y-%m-%d")
-    base = {"status": "paid", "paid_at": {"$regex": f"^{today}"}}
+    today = today_ist()
+    base = {"status": "paid", "paid_on": today}
     base.update(fee_entity_filter(entity))
     rows = await db.fees.aggregate([
         {"$match": base},
@@ -108,7 +108,7 @@ async def super_admin_dashboard(user: dict, entity: Optional[str] = None) -> dic
         "role": "super_admin",
         "entity": inst,
         "entity_label": "Combined" if inst == "BOTH" else inst,
-        "today": now_utc().strftime("%Y-%m-%d"),
+        "today": today_ist(),
         "active_people": await db.people.count_documents(people_q),
         "attendance_today": await _attendance_totals_today(inst),
         "fees_collected_today": await _fees_collected_today(inst),
@@ -129,7 +129,7 @@ async def admin_dashboard(user: dict) -> dict:
 async def teacher_dashboard(user: dict) -> dict:
     from routers.academic import get_open_academic_year
 
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
     open_year = await get_open_academic_year()
     year_id = (open_year or {}).get("id")
     assignments: List[dict] = []
@@ -211,7 +211,7 @@ async def teacher_dashboard(user: dict) -> dict:
 async def coach_dashboard_mvp(user: dict) -> dict:
     from routers.coach import _coach_visibility_filter
 
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
     q = _coach_visibility_filter(user)
     players = await db.people.find(q, {"_id": 0, "id": 1, "centre": 1, "sport": 1, "slot": 1}).to_list(2000)
     player_ids = [p["id"] for p in players]
@@ -257,7 +257,7 @@ async def parent_dashboard(user: dict) -> dict:
     from routers.parents import _wards_for, _public_profile
 
     wards = await _wards_for(user)
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
     week_ago = (now_utc() - timedelta(days=7)).strftime("%Y-%m-%d")
     children: List[dict] = []
 
@@ -339,6 +339,6 @@ async def build_mvp_dashboard(user: dict, entity: Optional[str] = None) -> dict:
         return await parent_dashboard(user)
     return {
         "role": role,
-        "today": now_utc().strftime("%Y-%m-%d"),
+        "today": today_ist(),
         "message": "Use GET /dashboard for generic stats",
     }
