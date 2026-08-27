@@ -3,10 +3,11 @@ import uuid
 from typing import Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from pymongo.errors import DuplicateKeyError
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from core import db, get_current_user, get_perm, is_super_admin, now_utc, format_date_display, format_month_display
+from core import db, get_current_user, get_perm, is_super_admin, now_utc, derive_person_entities, format_date_display, format_month_display, today_ist, current_month_ist, to_ist_day
 from pws_fee_structure import (
     PWS_ACADEMIC_YEAR,
     PWS_CLASSES,
@@ -18,8 +19,10 @@ from pws_fee_structure import (
     structure_metadata,
     student_type_to_legacy,
 )
+from starlette.concurrency import run_in_threadpool
 from routers.fees import (
     _build_fee,
+    _undo_collection_batch,
     _fy_end,
     _month_key,
     _require_view_fees,
@@ -42,7 +45,7 @@ async def _get_pws_student(student_id: str) -> dict:
     person = await db.people.find_one({"id": student_id, "kind": "student"}, {"_id": 0})
     if not person:
         raise HTTPException(404, "Student not found")
-    if person.get("organization") != "PWS":
+    if "PWS" not in derive_person_entities(person):
         raise HTTPException(400, "PWS students only")
     return person
 
@@ -60,12 +63,12 @@ async def sync_pws_fees_for_student(student: dict) -> List[dict]:
     admission = profile["date_of_admission"]
     created: List[dict] = []
     for item in schedule:
-        existing = await db.fees.find_one({
+        key = {
             "player_id": student["id"],
             "fee_type": item.fee_type,
             "period_month": item.period_month,
-        })
-        if existing:
+        }
+        if await db.fees.find_one(key, {"_id": 1}):
             continue
         amt = item.amount
         if item.fee_type == "Monthly" and item.period_month == _month_key(admission):
@@ -77,8 +80,12 @@ async def sync_pws_fees_for_student(student: dict) -> List[dict]:
             "pws_category": item.category,
             "academic_year": PWS_ACADEMIC_YEAR,
         })
-        await db.fees.insert_one(doc)
-        created.append(doc)
+        try:
+            res = await db.fees.update_one(key, {"$setOnInsert": doc}, upsert=True)
+        except DuplicateKeyError:
+            continue
+        if res.upserted_id is not None:
+            created.append(doc)
     return created
 
 
@@ -114,7 +121,7 @@ async def preview_fees(payload: PreviewIn, user: dict = Depends(get_current_user
         payload.transport_distance,
         payload.overrides if _can_override_fees(user) else None,
     )
-    admission = payload.date_of_admission or now_utc().strftime("%Y-%m-%d")
+    admission = payload.date_of_admission or today_ist()
     schedule = build_pws_fee_schedule(
         payload.pws_class,
         admission,
@@ -175,7 +182,7 @@ async def get_roadmap(student_id: str, user: dict = Depends(get_current_user)):
 
     unpaid = [f for f in fees if f.get("status") != "paid"]
     paid = [f for f in fees if f.get("status") == "paid"]
-    current_month = now_utc().strftime("%Y-%m")
+    current_month = current_month_ist()
 
     return {
         "academic_year": PWS_ACADEMIC_YEAR,
@@ -232,26 +239,43 @@ async def collect_roadmap_fees(payload: CollectRoadmapIn, user: dict = Depends(g
         raise HTTPException(400, "Some fees are already paid")
     batch_id = str(uuid.uuid4())
     paid_at = now_utc().isoformat()
-    txn_date = payload.transaction_date or now_utc().strftime("%Y-%m-%d")
+    txn_date = payload.transaction_date or today_ist()
     update = {
         "status": "paid",
         "payment_mode": payload.payment_mode,
         "reference_id": payload.reference_id or None,
         "transaction_date": txn_date,
         "paid_at": paid_at,
+        "paid_on": to_ist_day(paid_at),
         "collected_by_id": user["id"],
         "collected_by_name": user["name"],
         "batch_id": batch_id,
         "notes": payload.notes or None,
     }
-    await db.fees.update_many({"id": {"$in": payload.fee_ids}}, {"$set": update})
+    res = await db.fees.update_many(
+        {"id": {"$in": payload.fee_ids}, "status": {"$ne": "paid"}}, {"$set": update}
+    )
+    if res.modified_count != len(payload.fee_ids):
+        await _undo_collection_batch(batch_id, [])
+        raise HTTPException(409, "Some fees were already collected — reload and try again")
     student = await db.people.find_one({"id": next(iter(player_ids))}, {"_id": 0})
     fees_after = await db.fees.find({"id": {"$in": payload.fee_ids}}, {"_id": 0}).sort("period_month", 1).to_list(100)
     return {
         "batch_id": batch_id,
         "student": student,
+        "player": {
+            "id": (student or {}).get("id"),
+            "name": (student or {}).get("name"),
+            "mobile": (student or {}).get("mobile"),
+            "admission_number": (student or {}).get("admission_number"),
+            "player_id": (student or {}).get("player_id"),
+            "centre": (student or {}).get("centre") or (student or {}).get("group"),
+            "group": (student or {}).get("group"),
+            "pws_class": (student or {}).get("pws_class"),
+        },
+        "entity_id": "pws",
         "fees": fees_after,
-        "total_amount": sum(f.get("amount_due", 0) for f in fees_after),
+        "total_amount": sum(int(f.get("amount_due") or 0) for f in fees_after),
         "payment_mode": payload.payment_mode,
         "collected_by": {"id": user["id"], "name": user["name"]},
     }
@@ -267,13 +291,13 @@ async def export_invoice_pdf(student_id: str, user: dict = Depends(get_current_u
 
     from fee_receipt_pdf import render_pws_fee_statement_pdf
 
-    pdf_bytes = render_pws_fee_statement_pdf(
+    pdf_bytes = await run_in_threadpool(lambda: render_pws_fee_statement_pdf(
         student,
         profile,
         fees,
         PWS_ACADEMIC_YEAR,
         format_month=format_month_display,
-        format_date=lambda _: format_date_display(now_utc().strftime("%Y-%m-%d")),
-    )
+        format_date=lambda _: format_date_display(today_ist()),
+    ))
     fname = f"pws-fees-{student.get('name', 'student').replace(' ', '-').lower()}.pdf"
     return Response(content=pdf_bytes, media_type="application/pdf", headers={"Content-Disposition": f'attachment; filename="{fname}"'})

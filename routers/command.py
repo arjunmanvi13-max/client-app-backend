@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta
 from collections import defaultdict
 from fastapi import APIRouter, Depends, HTTPException
-from core import db, get_current_user, can_access_org_dashboard, now_utc, active_status_filter, merge_mongo_query
+from core import db, get_current_user, can_access_org_dashboard, now_utc, active_status_filter, merge_mongo_query, today_ist
 
 router = APIRouter(tags=["command"])
 
@@ -10,7 +10,7 @@ router = APIRouter(tags=["command"])
 ENTITY_KINDS = ["teacher", "staff", "coach", "student", "player"]
 
 async def _attendance_today_by_kind() -> dict:
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
     pipeline = [
         {"$match": {"date": today}},
         {"$group": {"_id": {"kind": "$kind", "status": "$status"}, "count": {"$sum": 1}}},
@@ -25,7 +25,7 @@ async def _attendance_today_by_kind() -> dict:
     return out
 
 async def _hostel_today() -> dict:
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
     morning_present = await db.roll_calls.count_documents({"date": today, "session": "morning", "present": True})
     morning_absent = await db.roll_calls.count_documents({"date": today, "session": "morning", "present": False})
     night_present = await db.roll_calls.count_documents({"date": today, "session": "night", "present": True})
@@ -64,7 +64,7 @@ async def _task_snapshot() -> dict:
 
 async def _alerts() -> list:
     alerts = []
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
     # Overdue tasks
     overdue = await db.tasks.count_documents({
         "status": {"$nin": ["completed", "reviewed", "cancelled"]},
@@ -166,7 +166,7 @@ async def command_center(user: dict = Depends(get_current_user)):
     }
 
     return {
-        "date": now_utc().strftime("%Y-%m-%d"),
+        "date": today_ist(),
         "roster_counts": roster_counts,
         "deactivated_players": deactivated_players,
         "attendance_by_kind": att,
@@ -180,7 +180,7 @@ async def command_center(user: dict = Depends(get_current_user)):
 @router.get("/departments/school")
 async def dept_school(user: dict = Depends(get_current_user)):
     _require_admin(user)
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
     # Class-wise attendance
     pipeline = [
         {"$match": {"kind": "student", "date": today}},
@@ -206,7 +206,7 @@ async def dept_school(user: dict = Depends(get_current_user)):
 @router.get("/departments/sports")
 async def dept_sports(user: dict = Depends(get_current_user)):
     _require_admin(user)
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
     pipeline = [
         {"$match": {"kind": "player", "date": today}},
         {"$group": {"_id": {"slot": "$slot", "status": "$status"}, "count": {"$sum": 1}}},

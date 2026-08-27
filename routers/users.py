@@ -6,9 +6,9 @@ from pydantic import BaseModel
 from core import (
     db, UserCreate, UserUpdate, DirectoryTeacherCreate, get_current_user,
     is_admin, is_sports_admin, is_super_admin, has_any_manage_rights, assert_can_manage, MANAGE_KINDS,
-    hash_password, public_user, directory_user, now_utc,
+    hash_password, public_user, directory_user, now_utc, get_perm,
     validate_domain_email, default_permissions, PERMISSION_KEYS, format_date_display,
-    active_status_filter, merge_mongo_query, normalize_aadhaar_number,
+    active_status_filter, merge_mongo_query, normalize_aadhaar_number, validate_password_strength,
 )
 from coach_scope import normalize_coach_assignments, ERR_MULTI_SPORT
 from user_classification import (
@@ -29,6 +29,7 @@ from rbac.guards import (
     assert_can_list_login_users,
 )
 from teacher_profile_pdf import render_teacher_profile_pdf
+from starlette.concurrency import run_in_threadpool
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -243,6 +244,8 @@ async def directory(
     ut = resolve_user_type(user)
     if ut == UserRole.ALPHA_COACH.value or user.get("role") == "coach":
         raise HTTPException(403, "Directory is not available for coach accounts")
+    if user.get("role") in ("parent", "student", "player"):
+        raise HTTPException(403, "Directory is not available for this account type")
     q: dict = {}
     if role:
         q["role"] = role
@@ -269,8 +272,7 @@ async def create_user(payload: UserCreate, user: dict = Depends(get_current_user
 
     if not payload.email or not payload.password:
         raise HTTPException(400, "Email and password are required")
-    if len(payload.password) < 6:
-        raise HTTPException(400, "Password must be at least 6 characters")
+    validate_password_strength(payload.password)
     email = validate_domain_email(payload.email)
     mobile = payload.mobile.strip() if payload.mobile else None
     if mobile:
@@ -296,6 +298,12 @@ async def create_user(payload: UserCreate, user: dict = Depends(get_current_user
     rbac_overrides: dict = {}
     if payload.permissions:
         perms = {k: bool(payload.permissions.get(k, False)) for k in PERMISSION_KEYS}
+        granted_beyond_self = sorted(k for k, v in perms.items() if v and not get_perm(user, k))
+        if granted_beyond_self:
+            raise HTTPException(
+                403,
+                "You cannot grant permissions you do not hold: " + ", ".join(granted_beyond_self),
+            )
     else:
         from category_permissions_service import permissions_for_user_type
         cat_perms = await permissions_for_user_type(payload.user_type)
@@ -414,7 +422,7 @@ async def create_directory_teacher(payload: DirectoryTeacherCreate, user: dict =
     }
     if payload.enable_login:
         doc["email"] = validate_domain_email(str(payload.login_email))
-        doc["password_hash"] = hash_password(payload.password.strip())
+        doc["password_hash"] = hash_password(validate_password_strength(payload.password.strip()))
         doc["is_password_set"] = True
         doc["must_change_password"] = True
     apply_user_type_fields(doc, user_type=UserRole.PWS_TEACHER.value)
@@ -453,6 +461,7 @@ async def update_user(user_id: str, payload: UserUpdate, user: dict = Depends(ge
         body.pop("email", None)
         body.pop("user_type", None)
         body.pop("designation", None)
+        body.pop("password", None)
 
     upd: dict = {}
     if "email" in body:
@@ -465,7 +474,7 @@ async def update_user(user_id: str, payload: UserUpdate, user: dict = Depends(ge
         body["mobile"] = _normalize_mobile(body["mobile"])
 
     if body.get("permissions") is not None:
-        if not is_super_admin(user) and not _can_manage_teacher_account(user, target):
+        if not is_super_admin(user):
             raise HTTPException(403, "Only Super Admin can change module permissions")
 
     prev_user_type = resolve_user_type(target)
@@ -473,11 +482,11 @@ async def update_user(user_id: str, payload: UserUpdate, user: dict = Depends(ge
 
     for k, v in body.items():
         if k == "password":
-            if len(v) < 6:
-                raise HTTPException(400, "Password must be at least 6 characters")
+            validate_password_strength(v)
             upd["password_hash"] = hash_password(v)
             upd["is_password_set"] = True
             upd["must_change_password"] = True
+            upd["password_set_at"] = now_utc().isoformat()
         elif k == "permissions":
             perms = {pk: bool(v.get(pk, False)) for pk in PERMISSION_KEYS}
             upd["permissions"] = perms
@@ -621,10 +630,10 @@ async def deactivate_user(user_id: str, user: dict = Depends(get_current_user)):
     if target.get("role") == "super_admin":
         raise HTTPException(400, "Cannot deactivate Super Admin")
 
-    from routers.approvals import _can_approve, _approval_out, _insert_deactivation_approval
+    from routers.approvals import can_approve_deactivation, _approval_out, _insert_deactivation_approval
     from approval_types import entity_from_user, role_label_from_user
 
-    if not _can_approve(user):
+    if not can_approve_deactivation(user):
         entity = entity_from_user(target)
         entity_id = entity.lower() if entity != "BOTH" else "pws"
         doc = await _insert_deactivation_approval(
@@ -677,12 +686,12 @@ async def reset_user_password(user_id: str, payload: ResetPasswordIn, user: dict
     target = await db.users.find_one({"id": user_id})
     if not target:
         raise HTTPException(404, "User not found")
-    if len(payload.new_password) < 6:
-        raise HTTPException(400, "Password must be at least 6 characters")
+    validate_password_strength(payload.new_password)
     await db.users.update_one({"id": user_id}, {"$set": {
         "password_hash": hash_password(payload.new_password),
         "is_password_set": True,
         "must_change_password": True,
+        "password_set_at": now_utc().isoformat(),
         "password_reset_by": user["id"],
         "password_reset_at": now_utc().isoformat(),
     }})
@@ -739,11 +748,11 @@ async def teacher_profile_pdf(user_id: str, user: dict = Depends(get_current_use
     if not _can_manage_teacher_account(user, target):
         raise HTTPException(403, "Not permitted")
     class_rows = await _teacher_class_rows_for_pdf(user_id)
-    pdf_bytes = render_teacher_profile_pdf(
+    pdf_bytes = await run_in_threadpool(lambda: render_teacher_profile_pdf(
         target,
         class_rows=class_rows,
         format_date=format_date_display,
-    )
+    ))
     safe_name = (target.get("name") or "teacher").replace(" ", "_")
     return Response(
         content=pdf_bytes,

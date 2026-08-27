@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
 
-from core import db, is_login_user_active, now_utc
+from core import db, is_login_user_active, now_utc, today_ist
 from timetable.constants import (
     DAYS_OF_WEEK,
     DEFAULT_MAX_WEEKLY_PERIODS,
@@ -371,7 +371,7 @@ async def resolve_schedule_for_teacher(
         "status": {"$in": status_filter},
     }, {"_id": 0}).to_list(500)
 
-    date_key = (date_iso or now_utc().strftime("%Y-%m-%d"))[:10]
+    date_key = (date_iso or today_ist())[:10]
     day_filter = None
     if date_iso:
         day_filter = day_of_week_for_date(date_key)

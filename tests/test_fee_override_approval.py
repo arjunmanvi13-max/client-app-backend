@@ -1,5 +1,6 @@
 """Tests for custom fee override approval workflow."""
 import pytest
+from pws_fee_structure import tuition_amount
 
 from fee_override_approval import (
     analyze_fee_overrides,
@@ -51,7 +52,7 @@ async def test_student_pws_override_detected():
     }
     differs, defaults, custom = await analyze_fee_overrides(person)
     assert differs is True
-    assert defaults.get("Tuition") == 1300
+    assert defaults.get("Tuition") == tuition_amount("Class I")
     assert custom.get("Tuition") == 900
 
 

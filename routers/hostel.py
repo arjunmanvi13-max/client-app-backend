@@ -1,12 +1,40 @@
 import uuid
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, HTTPException
-from core import db, GatePassCreate, GatePassDecision, RollCallIn, get_current_user, require_roles, now_utc
+from core import db, GatePassCreate, GatePassDecision, RollCallIn, get_current_user, get_perm, require_roles, now_utc, today_ist
 
 router = APIRouter(prefix="/hostel", tags=["hostel"])
 
+HOSTEL_STAFF_ROLES = ("warden", "admin", "super_admin")
+
+
+def _is_hostel_staff(user: dict) -> bool:
+    return user.get("role") in HOSTEL_STAFF_ROLES or get_perm(user, "mark_hostel_attendance")
+
+
+def _assert_hostel_read(user: dict) -> None:
+    """Gate-pass and roll-call records name minors and their movements, so they are
+    restricted to hostel staff. A general `view_attendance` grant is deliberately
+    not enough — every teacher and coach holds it."""
+    if not _is_hostel_staff(user):
+        raise HTTPException(403, "Hostel records permission required")
+
+
 @router.post("/gate-pass")
 async def request_gate_pass(payload: GatePassCreate, user: dict = Depends(get_current_user)):
+    if not _is_hostel_staff(user):
+        linked = set(user.get("linked_person_ids") or [])
+        if user.get("person_id"):
+            linked.add(user["person_id"])
+        if payload.resident_id not in linked:
+            raise HTTPException(403, "You can only request a gate pass for yourself or your ward")
+
+    resident = await db.people.find_one({"id": payload.resident_id}, {"_id": 0, "id": 1, "status": 1})
+    if not resident:
+        raise HTTPException(404, "Resident not found")
+    if resident.get("status") == "deactivated":
+        raise HTTPException(400, "Resident is deactivated")
+
     doc = {
         "id": str(uuid.uuid4()),
         "resident_id": payload.resident_id,
@@ -26,7 +54,8 @@ async def request_gate_pass(payload: GatePassCreate, user: dict = Depends(get_cu
     return doc
 
 @router.get("/gate-pass")
-async def list_gate_passes(status_filter: Optional[str] = None, _user: dict = Depends(get_current_user)):
+async def list_gate_passes(status_filter: Optional[str] = None, user: dict = Depends(get_current_user)):
+    _assert_hostel_read(user)
     q = {}
     if status_filter:
         q["status"] = status_filter
@@ -88,7 +117,8 @@ async def submit_roll_call(payload: RollCallIn, user: dict = Depends(get_current
     return {"count": len(saved)}
 
 @router.get("/roll-call")
-async def list_roll_call(date: Optional[str] = None, session: Optional[str] = None, _user: dict = Depends(get_current_user)):
+async def list_roll_call(date: Optional[str] = None, session: Optional[str] = None, user: dict = Depends(get_current_user)):
+    _assert_hostel_read(user)
     q = {}
     if date: q["date"] = date
     if session: q["session"] = session
@@ -96,7 +126,7 @@ async def list_roll_call(date: Optional[str] = None, session: Optional[str] = No
 
 @router.get("/dashboard")
 async def warden_dashboard(_user: dict = Depends(require_roles("warden", "admin", "super_admin"))):
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
     residents_count = await db.users.count_documents({"role": {"$in": ["student", "player"]}})
     pending_passes = await db.gate_passes.count_documents({"status": "pending"})
     morning = await db.roll_calls.count_documents({"date": today, "session": "morning", "present": True})

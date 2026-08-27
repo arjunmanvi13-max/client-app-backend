@@ -323,8 +323,6 @@ async def apply_rejected_fee_override(req: dict) -> None:
         {"$set": {
             "status": "active",
             "transport_fee_monthly": 0,
-            "pending_fee_defaults": None,
-            "pending_fee_custom": None,
         }, "$unset": {
             "pending_fee_defaults": "",
             "pending_fee_custom": "",

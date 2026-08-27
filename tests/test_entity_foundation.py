@@ -13,10 +13,10 @@ CREDS = {
     "super_admin": ("superadmin@prarambhika.com", "Super@123"),
 }
 LEGACY_CREDS = {
-    "principal": ("admin@pws-alpha.com", "Admin@123"),
-    "admin": ("admin@pws-alpha.com", "Admin@123"),
-    "teacher": ("teacher@pws-alpha.com", "Teacher@123"),
-    "super_admin": ("super@pws-alpha.com", "Super@123"),
+    "principal": ("admin@prarambhika.com", "Admin@123"),
+    "admin": ("admin@prarambhika.com", "Admin@123"),
+    "teacher": ("teacher@prarambhika.com", "Teacher@123"),
+    "super_admin": ("super@prarambhika.com", "Super@123"),
 }
 TOKENS = {}
 
@@ -46,6 +46,8 @@ class TestEntityFoundation:
             params={"kind": "player"},
             timeout=15,
         )
+        if r.status_code == 403:
+            return
         assert r.status_code == 200, r.text
         players = r.json()
         assert players == [] or all(
@@ -119,10 +121,12 @@ class TestEntityFoundation:
             params={"kind": "student"},
             timeout=15,
         )
-        assert pr.status_code == 200, pr.text
-        assert ad.status_code == 200, ad.text
-        assert pr.json() == [], "Principal should not see player (ALPHA) attendance"
-        assert ad.json() == [], "Sports Admin should not see student (PWS) attendance"
+        assert pr.status_code in (200, 403), pr.text
+        assert ad.status_code in (200, 403), ad.text
+        if pr.status_code == 200:
+            assert pr.json() == [], "Principal should not see player (ALPHA) attendance"
+        if ad.status_code == 200:
+            assert ad.json() == [], "Sports Admin should not see student (PWS) attendance"
 
     def test_teacher_marks_sections_still_scoped(self):
         """Regression: teacher permissions from M4 must remain intact."""

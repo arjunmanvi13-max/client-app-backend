@@ -9,7 +9,7 @@ import logging
 import uuid
 from typing import Any, Dict, List, Optional, Set
 
-from core import db, now_utc
+from core import db, now_utc, today_ist
 from fee_override_approval import FEE_OVERRIDE_KEYS
 
 log = logging.getLogger("fee_sync")
@@ -51,7 +51,7 @@ def _first_month_amount(monthly: int, admission_iso: str) -> int:
 
 def compute_amount_due(fee: dict, nominal: int, person: dict) -> int:
     """Target amount_due for an unpaid fee after a nominal amount change."""
-    admission = person.get("date_of_admission") or now_utc().strftime("%Y-%m-%d")
+    admission = person.get("date_of_admission") or today_ist()
     period = fee.get("period_month") or ""
 
     def base_due_for(nom: int) -> int:

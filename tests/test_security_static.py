@@ -24,6 +24,9 @@ def test_seed_passwords_are_demo_only_documented():
     assert "Super@123" in seed  # documents known demo credential risk
 
 
-def test_staff_default_password_documented():
+def test_staff_provisioning_uses_no_predictable_password():
+    """Auto-provisioned staff logins must not ship a guessable default."""
     people = (ROOT / "routers" / "people.py").read_text()
-    assert "Staff@123" in people  # documents predictable staff provisioning risk
+    assert "Staff@123" not in people
+    assert "secrets.token_urlsafe" in people
+    assert '"is_password_set": False' in people

@@ -49,7 +49,9 @@ def can_manage_users_rosters(user: dict) -> bool:
 
 
 def assert_can_create_login_user(actor: dict, user_type: str) -> None:
-    if can_manage_users_rosters(actor):
+    if has_permission(actor, Permission.CREATE_USERS, use_legacy_fallback=False) or has_permission(
+        actor, Permission.MANAGE_USERS_ROSTERS, use_legacy_fallback=False
+    ):
         return
     if user_type == UserRole.PWS_TEACHER.value and can_add_new_teacher(actor):
         return

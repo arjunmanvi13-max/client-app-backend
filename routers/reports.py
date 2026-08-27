@@ -1,5 +1,5 @@
 """Reports module — Financial reports + MVP catalog, filters, Excel/PDF export."""
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from io import BytesIO
 from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Literal, Optional
@@ -7,7 +7,8 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
-from core import db, get_current_user, is_super_admin, is_sports_admin, now_utc, resolve_user_institution, fee_entity_filter, format_date_display, format_datetime_display
+from core import db, get_current_user, is_super_admin, is_sports_admin, now_utc, resolve_user_institution, fee_entity_filter, format_date_display, format_datetime_display, today_ist
+from starlette.concurrency import run_in_threadpool
 from reports_engine import (
     _access_reports,
     resolve_entity,
@@ -189,7 +190,7 @@ def _build_fee_query(
     elif payment_status == "overdue":
         # Overdue = due AND due_date < today
         q["status"] = "due"
-        q["due_date"] = {"$lt": now_utc().strftime("%Y-%m-%d")}
+        q["due_date"] = {"$lt": today_ist()}
     # Date range on paid_at for "collected within window"; on due_date if payment_status pending/overdue
     df = _parse_iso(date_from)
     dt = _parse_iso(date_to)
@@ -329,13 +330,20 @@ async def defaulters_aging(
     institution: Optional[str] = None,
     centre: Optional[str] = None,
     sport: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     limit: int = Query(500, le=2000),
 ):
     _access_check(user)
     await _ensure_recurring_fees()
     inst = _resolve_institution(user, institution)
-    today_str = now_utc().strftime("%Y-%m-%d")
-    q: Dict[str, Any] = {"status": "due", "due_date": {"$lt": today_str}}
+    today_str = today_ist()
+    due_range: Dict[str, Any] = {"$lt": today_str}
+    if date_from:
+        due_range["$gte"] = date_from
+    if date_to and date_to < today_str:
+        due_range["$lt"] = date_to
+    q: Dict[str, Any] = {"status": "due", "due_date": due_range}
     q.update(_entity_filter(inst))
     if centre and centre != "All":
         q["centre"] = centre
@@ -344,13 +352,12 @@ async def defaulters_aging(
     cur = db.fees.find(q, {"_id": 0}).limit(limit)
     fees_docs = await cur.to_list(limit)
     rows = []
-    today_dt = now_utc()
+    today_date = date.fromisoformat(today_str)
     buckets = {"0_7": 0, "8_15": 0, "16_30": 0, "gt_30": 0}
     for f in fees_docs:
         try:
-            due_dt = datetime.fromisoformat(f.get("due_date", "")[:10])
-            days = max((today_dt - due_dt).days, 0)
-        except Exception:
+            days = max((today_date - date.fromisoformat(str(f.get("due_date") or "")[:10])).days, 0)
+        except (TypeError, ValueError):
             days = 0
         if days <= 7: bucket = "0_7"
         elif days <= 15: bucket = "8_15"
@@ -358,6 +365,7 @@ async def defaulters_aging(
         else: bucket = "gt_30"
         buckets[bucket] += 1
         rows.append({
+            "id": f.get("id"),
             "player_id": f.get("player_id"),
             "player_name": f.get("player_name"),
             "centre": f.get("centre"),
@@ -370,7 +378,58 @@ async def defaulters_aging(
             "bucket": bucket,
         })
     rows.sort(key=lambda r: r["days_overdue"], reverse=True)
-    return {"buckets": buckets, "rows": rows}
+
+    totals_agg = await db.fees.aggregate([
+        {"$match": q},
+        {"$group": {
+            "_id": None,
+            "amount": {"$sum": {"$ifNull": ["$amount_due", 0]}},
+            "count": {"$sum": 1},
+            "payers": {"$addToSet": "$player_id"},
+        }},
+    ]).to_list(1)
+    aging_agg = await db.fees.aggregate([
+        {"$match": q},
+        {"$addFields": {
+            "_days": {
+                "$dateDiff": {
+                    "startDate": {"$dateFromString": {
+                        "dateString": {"$substrBytes": [{"$ifNull": ["$due_date", today_str]}, 0, 10]},
+                        "onError": {"$dateFromString": {"dateString": today_str}},
+                    }},
+                    "endDate": {"$dateFromString": {"dateString": today_str}},
+                    "unit": "day",
+                }
+            }
+        }},
+        {"$group": {
+            "_id": {
+                "$switch": {
+                    "branches": [
+                        {"case": {"$lte": ["$_days", 30]}, "then": "1_30"},
+                        {"case": {"$lte": ["$_days", 60]}, "then": "31_60"},
+                        {"case": {"$lte": ["$_days", 90]}, "then": "61_90"},
+                    ],
+                    "default": "90_plus",
+                }
+            },
+            "count": {"$sum": 1},
+            "amount": {"$sum": {"$ifNull": ["$amount_due", 0]}},
+        }},
+    ]).to_list(10)
+    aging = {k: {"count": 0, "amount": 0} for k in ("1_30", "31_60", "61_90", "90_plus")}
+    for row in aging_agg:
+        aging[row["_id"]] = {"count": int(row["count"]), "amount": int(row["amount"])}
+
+    agg = totals_agg[0] if totals_agg else {}
+    payers = [p for p in (agg.get("payers") or []) if p]
+    totals = {
+        "amount": int(agg.get("amount") or 0),
+        "count": int(agg.get("count") or 0),
+        "payers": len(payers),
+        "truncated": int(agg.get("count") or 0) > len(rows),
+    }
+    return {"buckets": buckets, "aging": aging, "rows": rows, "totals": totals}
 
 
 # ---------------- 3. Payment Mode Report ----------------
@@ -677,7 +736,9 @@ async def export_financial(
             ws.cell(row=i, column=3, value=r["count"])
     elif kind == "defaulters":
         ws.title = "Defaulters & Aging"
-        data = await defaulters_aging(user, institution, centre, sport, 2000)
+        data = await defaulters_aging(
+            user=user, institution=institution, centre=centre, sport=sport, limit=2000
+        )
         write_title(ws, "PWS & ALPHA — Defaulters & Aging", subtitle)
         b = data["buckets"]
         ws.cell(row=4, column=1, value="0–7 days").font = Font(bold=True); ws.cell(row=4, column=2, value=b["0_7"])
@@ -1005,9 +1066,9 @@ async def export_mvp_report(
     stamp = now_utc().strftime("%Y%m%d-%H%M")
     fname = f"{report_id}-{stamp}.{fmt}"
     if fmt == "pdf":
-        return export_pdf(meta["title"], columns, matrix, subtitle, fname)
+        return await run_in_threadpool(export_pdf, meta["title"], columns, matrix, subtitle, fname)
     if fmt == "xlsx":
-        return export_excel(meta["title"], columns, matrix, subtitle, fname)
+        return await run_in_threadpool(export_excel, meta["title"], columns, matrix, subtitle, fname)
     raise HTTPException(400, "format must be xlsx or pdf")
 
 

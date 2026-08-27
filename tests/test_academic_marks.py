@@ -14,10 +14,10 @@ CREDS = {
     "super_admin": ("superadmin@prarambhika.com", "Super@123"),
 }
 LEGACY_CREDS = {
-    "principal": ("admin@pws-alpha.com", "Admin@123"),
-    "teacher": ("teacher@pws-alpha.com", "Teacher@123"),
-    "parent": ("parent@pws-alpha.com", "Parent@123"),
-    "super_admin": ("super@pws-alpha.com", "Super@123"),
+    "principal": ("admin@prarambhika.com", "Admin@123"),
+    "teacher": ("teacher@prarambhika.com", "Teacher@123"),
+    "parent": ("parent_pws@prarambhika.com", "Parent@123"),
+    "super_admin": ("super@prarambhika.com", "Super@123"),
 }
 TOKENS = {}
 
@@ -128,7 +128,10 @@ class TestAcademicMarksAPI:
         )
         if grid.status_code != 200 or not grid.json().get("students"):
             pytest.skip("No students for teacher")
-        target = grid.json()["students"][0]
+        editable = [s for s in grid.json()["students"] if s.get("status") not in ("published", "final")]
+        if not editable:
+            pytest.skip("All rows for this assessment are locked")
+        target = editable[0]
         score = 42.0
         batch = requests.post(
             f"{API}/marks/batch",

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query
 from typing import Optional
-from core import db, get_current_user, now_utc, is_super_admin, is_pws_admin_user, is_pws_accounts_user, is_alpha_admin_user, is_alpha_accounts_user
+from core import db, get_current_user, now_utc, is_super_admin, is_pws_admin_user, is_pws_accounts_user, is_alpha_admin_user, is_alpha_accounts_user, today_ist
 from notifications_service import unread_count_for_user
 from dashboard_mvp import build_mvp_dashboard
 
@@ -25,7 +25,7 @@ async def dashboard(user: dict = Depends(get_current_user)):
         ],
     })
     unread = await unread_count_for_user(user)
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
 
     extras = {}
     if user["role"] in ("admin", "super_admin"):

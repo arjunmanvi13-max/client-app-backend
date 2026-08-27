@@ -1,9 +1,15 @@
 """Seed demo data on app startup (idempotent — safe for production restarts)."""
+import os
 import uuid
 from datetime import timedelta
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, OperationFailure
 from core import db, hash_password, now_utc, logger
 from user_classification import apply_user_type_fields, migrate_legacy_role
+
+
+def demo_seed_enabled() -> bool:
+    """Demo accounts have published, guessable passwords. Opt-in only, never in production."""
+    return os.getenv("SEED_DEMO_DATA", "").strip().lower() in ("1", "true", "yes")
 
 DEMO_USERS = [
     {"email": "admin@prarambhika.com", "password": "Admin@123", "name": "Rohan Sharma", "role": "admin", "organization": "ALPHA", "department": "ALPHA Operations"},
@@ -158,8 +164,16 @@ async def _ensure_indexes() -> None:
         logger.warning("Could not ensure otps indexes: %s", exc)
     try:
         idx_info = await db.people.index_information()
-        if "player_id_1" not in idx_info:
-            await db.people.create_index("player_id", unique=True, sparse=True)
+        existing = idx_info.get("player_id_1")
+        if existing and existing.get("sparse"):
+            await db.people.drop_index("player_id_1")
+            existing = None
+        if not existing:
+            await db.people.create_index(
+                "player_id",
+                unique=True,
+                partialFilterExpression={"player_id": {"$type": "string"}},
+            )
     except Exception as exc:
         logger.warning("Could not ensure people.player_id index: %s", exc)
     for coll, fields in [
@@ -169,11 +183,104 @@ async def _ensure_indexes() -> None:
         ("timetable_periods", [("entity_id", 1), ("academic_year_id", 1), ("schedule_group", 1), ("day_type", 1)]),
         ("timetable_slots", [("entity_id", 1), ("academic_year_id", 1), ("class_id", 1), ("day_of_week", 1), ("period_id", 1)]),
         ("timetable_substitutions", [("slot_id", 1), ("substitution_date", 1), ("status", 1)]),
+        ("users", [("id", 1)]),
+        ("people", [("id", 1)]),
+        ("fees", [("id", 1)]),
+        ("people", [("kind", 1), ("status", 1), ("name", 1)]),
+        ("people", [("section_id", 1), ("kind", 1)]),
+        ("people", [("organization", 1), ("kind", 1), ("centre", 1), ("sport", 1)]),
+        ("people", [("parent_user_ids", 1)]),
+        ("fees", [("player_id", 1), ("status", 1)]),
+        ("fees", [("entity_id", 1), ("status", 1), ("period_month", 1)]),
+        ("fees", [("status", 1), ("paid_at", -1)]),
+        ("fees", [("status", 1), ("paid_on", -1)]),
+        ("fees", [("batch_id", 1)]),
+        ("attendance", [("date", -1), ("kind", 1), ("status", 1)]),
+        ("attendance", [("person_id", 1), ("date", -1)]),
+        ("attendance", [("entity_id", 1), ("date", -1)]),
+        ("notifications", [("user_id", 1), ("read", 1), ("created_at", -1)]),
+        ("notifications", [("user_id", 1), ("type", 1), ("ref_id", 1), ("created_at", -1)]),
+        ("academic_marks", [("assessment_id", 1), ("status", 1)]),
+        ("assessments", [("section_id", 1), ("subject_id", 1), ("exam_term_id", 1)]),
+        ("invoices", [("person_id", 1), ("status", 1)]),
+        ("invoices", [("entity_id", 1), ("status", 1), ("due_date", 1)]),
+        ("invoice_items", [("invoice_id", 1)]),
+        ("payments", [("invoice_id", 1), ("created_at", -1)]),
+        ("approval_requests", [("type", 1), ("subject_id", 1), ("status", 1)]),
+        ("approval_requests", [("status", 1), ("requested_at", -1)]),
+        ("tasks", [("assignee_ids", 1), ("status", 1), ("due_date", 1)]),
+        ("gate_passes", [("status", 1), ("expected_return", 1)]),
+        ("report_cards", [("entity_id", 1), ("status", 1)]),
     ]:
         try:
             await db[coll].create_index(fields)
         except Exception as exc:
             logger.warning("Could not ensure %s index: %s", coll, exc)
+
+    await _ensure_unique_indexes()
+
+
+RECURRING_FEE_TYPES = ["Monthly", "Hostel", "Transport"]
+
+# month) and needs the unique index — the one-time PWS charges most of all, since
+PROTECTED_FEE_TYPES = RECURRING_FEE_TYPES + [
+    "Registration", "Admission", "Security", "Annual", "Exam", "Physical Education",
+]
+
+
+async def _ensure_unique_indexes() -> None:
+    """Unique constraints that make check-then-insert paths genuinely atomic.
+
+    These are what stop duplicate attendance marks, duplicate monthly fee rows and
+    duplicate mark entries under concurrency. The fees constraint covers only
+    recurring types — ad-hoc charges (Kit, Uniform, Other) may legitimately repeat
+    for the same person in the same month. Creation fails if the collection
+    already contains duplicates — that is reported loudly rather than swallowed,
+    because until it succeeds the corresponding race is still live. Run
+    `scripts/find_duplicates.py` to list offending rows.
+    """
+    unique_specs = [
+        ("attendance", [("kind", 1), ("person_id", 1), ("date", 1), ("session", 1)], None),
+        (
+            "fees",
+            [("player_id", 1), ("fee_type", 1), ("period_month", 1)],
+            {"fee_type": {"$in": PROTECTED_FEE_TYPES}},
+        ),
+        (
+            "payments",
+            [("invoice_id", 1), ("idempotency_key", 1)],
+            {"idempotency_key": {"$type": "string"}},
+        ),
+        ("people", [("admission_number", 1)], {"admission_number": {"$type": "string"}}),
+        ("people", [("employee_id", 1)], {"employee_id": {"$type": "string"}}),
+        ("academic_marks", [("person_id", 1), ("assessment_id", 1)], None),
+        ("roll_calls", [("date", 1), ("session", 1), ("resident_id", 1)], None),
+    ]
+    for coll, fields, partial in unique_specs:
+        kwargs = {"unique": True}
+        if partial:
+            kwargs["partialFilterExpression"] = partial
+        try:
+            await db[coll].create_index(fields, **kwargs)
+        except OperationFailure as exc:
+            if exc.code in (85, 86):
+                try:
+                    await db[coll].drop_index("_".join(f"{f}_{d}" for f, d in fields))
+                    await db[coll].create_index(fields, **kwargs)
+                    continue
+                except Exception:
+                    logger.exception("Could not rebuild the %s unique index", coll)
+            logger.error(
+                "UNIQUE index on %s%s could not be created — duplicate rows likely "
+                "already exist and the duplicate-write race remains open: %s",
+                coll, [f for f, _ in fields], exc,
+            )
+        except Exception as exc:
+            logger.error(
+                "UNIQUE index on %s%s could not be created — duplicate rows likely "
+                "already exist and the duplicate-write race remains open: %s",
+                coll, [f for f, _ in fields], exc,
+            )
 
 
 async def _migrate_legacy_emails() -> None:
@@ -217,6 +324,8 @@ async def _clear_all_phone_numbers() -> None:
 
 async def _seed_demo_users() -> None:
     """Insert demo users only when their email is not already in the database."""
+    if not demo_seed_enabled():
+        return
     for u in DEMO_USERS:
         defaults = ROLE_DEFAULT_CAN_MANAGE.get(u["role"], [])
         coach_defaults = ROLE_DEFAULT_COACH_PERMS.get(u["role"], [])
@@ -247,7 +356,15 @@ async def _seed_demo_users() -> None:
 
 
 async def _seed_super_admins() -> None:
-    """Insert super-admin accounts only when email is not already in the database."""
+    """Insert super-admin accounts only when email is not already in the database.
+
+    Outside demo mode this seeds nothing from the hardcoded list. Production gets a
+    single bootstrap account from BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD,
+    and only while no user exists at all.
+    """
+    if not demo_seed_enabled():
+        await _bootstrap_first_super_admin()
+        return
     for sa in SUPER_ADMIN_SEEDS:
         doc = {
             "id": str(uuid.uuid4()),
@@ -269,6 +386,41 @@ async def _seed_super_admins() -> None:
         }
         apply_user_type_fields(doc, user_type="super_admin")
         await _seed_user_if_absent(sa["email"], doc)
+
+
+async def _bootstrap_first_super_admin() -> None:
+    """Create one super admin on a genuinely empty database, from env only.
+
+    No-ops once any user exists, so it cannot resurrect a deleted account the way
+    the demo seeds did.
+    """
+    email = (os.getenv("BOOTSTRAP_ADMIN_EMAIL") or "").strip().lower()
+    password = os.getenv("BOOTSTRAP_ADMIN_PASSWORD") or ""
+    if not email or not password:
+        return
+    if await db.users.find_one({}, {"_id": 1}):
+        return
+    doc = {
+        "id": str(uuid.uuid4()),
+        "password_hash": hash_password(password),
+        "is_password_set": True,
+        "must_change_password": True,
+        "name": "Super Admin",
+        "role": "super_admin",
+        "organization": "BOTH",
+        "department": "Trustee",
+        "can_manage": ["student", "player", "teacher", "coach", "staff"],
+        "coach_permissions": [],
+        "coach_type": None,
+        "assigned_sport": None,
+        "assigned_centres": [],
+        "assigned_sports": [],
+        "created_at": now_utc().isoformat(),
+        "legacy_role": "super_admin",
+    }
+    apply_user_type_fields(doc, user_type="super_admin")
+    if await _seed_user_if_absent(email, doc):
+        logger.info("Bootstrapped initial super admin %s (password change required)", email)
 
 
 async def _backfill_staff_user_accounts() -> None:
@@ -319,7 +471,7 @@ async def _run_seed():
         ("Dev Ranjan", "10-B"), ("Pooja Devi", "10-B"), ("Manish Roy", "10-B"),
         ("Tanvi Jha", "10-B"),
     ]
-    for name, cls in sample_students:
+    for name, cls in sample_students if demo_seed_enabled() else []:
         try:
             await _insert_if_absent(
                 db.people,
@@ -339,28 +491,30 @@ async def _run_seed():
         except Exception as exc:
             logger.warning("Sample student seed failed for %s: %s", name, exc)
 
-    for step_name, step in [
+    steps = [
         ("academic_structure", _seed_academic_structure),
-        ("timetable", _seed_timetable),
-        ("academic_marks", _seed_academic_marks),
-        ("coach_assessments", _seed_coach_assessments),
-        ("pws_student_fees", _seed_pws_student_fees),
         ("entity_settings", _seed_entity_settings),
         ("fee_catalog", _seed_fee_catalog),
         ("entity_foundation", _migrate_entity_foundation),
         ("attendance_mvp", _migrate_attendance_mvp),
         ("enrollment_ids", _backfill_enrollment_ids),
-        ("report_cards", _seed_report_cards),
-    ]:
+        ("paid_on_ist", _backfill_paid_on_ist),
+    ]
+    if demo_seed_enabled():
+        steps += [
+            ("timetable", _seed_timetable),
+            ("academic_marks", _seed_academic_marks),
+            ("coach_assessments", _seed_coach_assessments),
+            ("pws_student_fees", _seed_pws_student_fees),
+            ("report_cards", _seed_report_cards),
+            ("people_and_links", _seed_people_and_links),
+        ]
+
+    for step_name, step in steps:
         try:
             await step()
         except Exception as exc:
             logger.exception("Seed step %s failed (continuing): %s", step_name, exc)
-
-    try:
-        await _seed_people_and_links()
-    except Exception as exc:
-        logger.exception("Seed step people_and_links failed (continuing): %s", exc)
 
 
 async def _seed_people_and_links() -> None:
@@ -1303,3 +1457,34 @@ async def _seed_timetable():
             },
         )
 
+
+
+async def _backfill_paid_on_ist():
+    """Derive the IST collection day for fee rows paid before `paid_on` existed.
+
+    Collection totals key on the IST calendar day; without this, historic rows
+    are invisible to every "collected today/this month" figure.
+    """
+    if await db.app_meta.find_one({"_id": "paid_on_ist_v1"}):
+        return
+    from core import to_ist_day
+    from pymongo import UpdateOne
+
+    ops = []
+    cursor = db.fees.find(
+        {"status": "paid", "paid_at": {"$ne": None}, "paid_on": {"$exists": False}},
+        {"_id": 1, "paid_at": 1},
+    )
+    async for row in cursor:
+        day = to_ist_day(row.get("paid_at"))
+        if day:
+            ops.append(UpdateOne({"_id": row["_id"]}, {"$set": {"paid_on": day}}))
+        if len(ops) >= 1000:
+            await db.fees.bulk_write(ops, ordered=False)
+            ops = []
+    if ops:
+        await db.fees.bulk_write(ops, ordered=False)
+    await db.app_meta.update_one(
+        {"_id": "paid_on_ist_v1"}, {"$setOnInsert": {"at": now_utc().isoformat()}}, upsert=True
+    )
+    logger.info("Backfilled paid_on (IST day) on legacy paid fee rows")

@@ -623,10 +623,11 @@ async def published_marks(person_id: str, user: dict = Depends(get_current_user)
         if person_id not in (user.get("linked_person_ids") or []):
             raise HTTPException(404, "Ward not found")
     elif user.get("role") == "student":
-        if user.get("name") != person.get("name"):
-            linked = user.get("linked_person_ids") or []
-            if person_id not in linked:
-                raise HTTPException(403, "You can only view your own marks")
+        own = set(user.get("linked_person_ids") or [])
+        if user.get("person_id"):
+            own.add(user["person_id"])
+        if person_id not in own:
+            raise HTTPException(403, "You can only view your own marks")
     elif not _can_view(user):
         raise HTTPException(403, "Not allowed")
 

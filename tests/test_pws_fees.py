@@ -13,9 +13,9 @@ CREDS = {
     "admin": ("admin@prarambhika.com", "Admin@123"),
 }
 LEGACY_CREDS = {
-    "principal": ("admin@pws-alpha.com", "Admin@123"),
-    "super_admin": ("super@pws-alpha.com", "Super@123"),
-    "admin": ("admin@pws-alpha.com", "Admin@123"),
+    "principal": ("admin@prarambhika.com", "Admin@123"),
+    "super_admin": ("super@prarambhika.com", "Super@123"),
+    "admin": ("admin@prarambhika.com", "Admin@123"),
 }
 TOKENS = {}
 
@@ -42,7 +42,7 @@ class TestPWSFeesAPI:
         r = requests.get(f"{API}/fees/rate-card", headers=_hdr("principal"), params={"entity": "pws"}, timeout=15)
         assert r.status_code == 200, r.text
         data = r.json()
-        assert "Day Scholar" in data or "pws" in data
+        assert "Day Scholar" in (data.get("rates") or data), data
 
     def test_principal_lists_pws_student_fees(self):
         people = requests.get(
@@ -94,4 +94,4 @@ class TestPWSFeesAPI:
         r = requests.get(f"{API}/fees/rate-card", headers=_hdr("admin"), params={"entity": "alpha"}, timeout=15)
         assert r.status_code == 200, r.text
         data = r.json()
-        assert "Daily" in data or "alpha" in data
+        assert "Daily" in (data.get("rates") or data), data

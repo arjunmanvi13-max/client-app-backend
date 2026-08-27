@@ -11,8 +11,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
-from core import db, get_current_user, is_admin, is_super_admin, get_perm, now_utc, format_date_display, format_datetime_display
+from core import db, get_current_user, is_admin, is_super_admin, get_perm, now_utc, format_date_display, format_datetime_display, today_ist
+from starlette.concurrency import run_in_threadpool
 
 router = APIRouter(prefix="/invoices", tags=["invoices"])
 
@@ -113,7 +115,7 @@ def _is_overdue(inv: dict) -> bool:
     if not due or len(due) < 10:
         return False
     try:
-        return due[:10] < now_utc().strftime("%Y-%m-%d") and int(inv.get("balance_due", 0)) > 0
+        return due[:10] < today_ist() and int(inv.get("balance_due", 0)) > 0
     except Exception:
         return False
 
@@ -461,7 +463,7 @@ async def migrate_legacy_fees(entity_id: Literal["alpha", "pws"], user: dict = D
 
     settings = await get_entity_settings(entity_id)
     tax_rate = float(settings.get("tax_rate_percent") or 0)
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
     created_invoices = 0
     created_items = 0
 
@@ -512,8 +514,11 @@ async def migrate_legacy_fees(entity_id: Literal["alpha", "pws"], user: dict = D
         if inv_doc["status"] == "draft":
             inv_doc["status"] = "issued"
         await db.invoices.insert_one(inv_doc)
+        inv_doc.pop("_id", None)
         if items:
             await db.invoice_items.insert_many(items)
+            for it in items:
+                it.pop("_id", None)
         created_invoices += 1
 
     return {
@@ -579,7 +584,7 @@ async def payment_receipt_pdf(payment_id: str):
         raise HTTPException(404, "Payment not found")
     inv = await _load_invoice(payment["invoice_id"])
     person = await db.people.find_one({"id": inv["person_id"]}, {"_id": 0}) or {}
-    pdf = _render_receipt_pdf(payment, inv, person)
+    pdf = await run_in_threadpool(_render_receipt_pdf, payment, inv, person)
     fname = (payment.get("receipt_number") or payment_id).replace("/", "-")
     return Response(
         content=pdf,
@@ -611,7 +616,7 @@ async def create_invoice(payload: InvoiceCreateIn, user: dict = Depends(get_curr
 
     settings = await get_entity_settings(payload.entity_id)
     tax_rate = float(settings.get("tax_rate_percent") or 0)
-    issue_date = payload.issue_date or now_utc().strftime("%Y-%m-%d")
+    issue_date = payload.issue_date or today_ist()
     inv_id = str(uuid.uuid4())
     items = []
     for it in payload.items:
@@ -652,8 +657,11 @@ async def create_invoice(payload: InvoiceCreateIn, user: dict = Depends(get_curr
     }
     inv["status"] = _derive_status(inv, items)
     await db.invoices.insert_one(inv)
+    inv.pop("_id", None)
     if items:
         await db.invoice_items.insert_many(items)
+        for it in items:
+            it.pop("_id", None)
     inv["items"] = items
     serialized = _serialize_invoice(inv, items)
     if not payload.as_draft:
@@ -730,6 +738,11 @@ class PaymentIn(BaseModel):
     transaction_date: Optional[str] = None
     allocations: List[AllocationIn]
     notes: Optional[str] = None
+    idempotency_key: Optional[str] = Field(
+        default=None,
+        max_length=128,
+        description="Client-generated id; a retry with the same key returns the original receipt",
+    )
 
 
 @router.post("/{invoice_id}/payments")
@@ -757,9 +770,16 @@ async def record_payment(invoice_id: str, payload: PaymentIn, user: dict = Depen
         if a.amount > item_map[a.item_id].get("balance_due", 0):
             raise HTTPException(400, f"Allocation exceeds balance for item {a.item_id}")
 
+    if payload.idempotency_key:
+        prior = await db.payments.find_one(
+            {"invoice_id": invoice_id, "idempotency_key": payload.idempotency_key}, {"_id": 0}
+        )
+        if prior:
+            return {"payment": prior, "invoice": await _load_invoice(invoice_id), "replayed": True}
+
     pay_id = str(uuid.uuid4())
     receipt_number = await _next_receipt_number(inv["entity_id"])
-    txn_date = payload.transaction_date or now_utc().strftime("%Y-%m-%d")
+    txn_date = payload.transaction_date or today_ist()
     payment = {
         "id": pay_id,
         "invoice_id": invoice_id,
@@ -775,18 +795,53 @@ async def record_payment(invoice_id: str, payload: PaymentIn, user: dict = Depen
         "status": "completed",
         "collected_by_id": user["id"],
         "collected_by_name": user["name"],
+        "idempotency_key": payload.idempotency_key,
         "created_at": now_utc().isoformat(),
     }
-    await db.payments.insert_one(payment)
-
-    for a in payload.allocations:
-        item = item_map[a.item_id]
-        new_paid = int(item.get("amount_paid", 0)) + a.amount
-        new_balance = max(int(item.get("line_total", 0)) - new_paid, 0)
-        await db.invoice_items.update_one(
-            {"id": a.item_id},
-            {"$set": {"amount_paid": new_paid, "balance_due": new_balance}},
+    try:
+        await db.payments.insert_one(payment)
+    except DuplicateKeyError:
+        prior = await db.payments.find_one(
+            {"invoice_id": invoice_id, "idempotency_key": payload.idempotency_key}, {"_id": 0}
         )
+        if prior:
+            return {"payment": prior, "invoice": await _load_invoice(invoice_id), "replayed": True}
+        raise
+    payment.pop("_id", None)
+
+    applied: list = []
+    for a in payload.allocations:
+        res = await db.invoice_items.update_one(
+            {"id": a.item_id, "balance_due": {"$gte": a.amount}},
+            [{"$set": {
+                "amount_paid": {"$add": [{"$ifNull": ["$amount_paid", 0]}, a.amount]},
+                "balance_due": {"$max": [
+                    0,
+                    {"$subtract": [
+                        {"$ifNull": ["$line_total", 0]},
+                        {"$add": [{"$ifNull": ["$amount_paid", 0]}, a.amount]},
+                    ]},
+                ]},
+            }}],
+        )
+        if res.matched_count == 0:
+            for done in applied:
+                await db.invoice_items.update_one(
+                    {"id": done.item_id},
+                    [{"$set": {
+                        "amount_paid": {"$max": [0, {"$subtract": [{"$ifNull": ["$amount_paid", 0]}, done.amount]}]},
+                        "balance_due": {"$max": [
+                            0,
+                            {"$subtract": [
+                                {"$ifNull": ["$line_total", 0]},
+                                {"$max": [0, {"$subtract": [{"$ifNull": ["$amount_paid", 0]}, done.amount]}]},
+                            ]},
+                        ]},
+                    }}],
+                )
+            await db.payments.delete_one({"id": pay_id})
+            raise HTTPException(409, "Invoice balance changed — reload and try again")
+        applied.append(a)
 
     refreshed = await _load_invoice(invoice_id, refresh_status=False)
     totals = _invoice_totals(
@@ -849,11 +904,15 @@ async def execute_refund(
             continue
         item = item_map.get(alloc["item_id"])
         if item:
-            new_paid = max(int(item.get("amount_paid", 0)) - rev, 0)
-            new_balance = int(item.get("line_total", 0)) - new_paid
             await db.invoice_items.update_one(
                 {"id": alloc["item_id"]},
-                {"$set": {"amount_paid": new_paid, "balance_due": new_balance}},
+                [{"$set": {
+                    "amount_paid": {"$max": [0, {"$subtract": [{"$ifNull": ["$amount_paid", 0]}, rev]}]},
+                    "balance_due": {"$max": [0, {"$subtract": [
+                        {"$ifNull": ["$line_total", 0]},
+                        {"$max": [0, {"$subtract": [{"$ifNull": ["$amount_paid", 0]}, rev]}]},
+                    ]}]},
+                }}],
             )
         reversed_allocs.append({"item_id": alloc["item_id"], "amount": rev})
         to_reverse -= rev
@@ -873,6 +932,7 @@ async def execute_refund(
         "created_at": now_utc().isoformat(),
     }
     await db.refunds.insert_one(refund)
+    refund.pop("_id", None)
 
     new_refunded = refunded_so_far + amount
     pay_status = "refunded" if new_refunded >= int(payment.get("amount", 0)) else "partially_refunded"
@@ -919,7 +979,7 @@ async def invoice_pdf(invoice_id: str):
     """Public PDF — invoice UUID acts as capability token."""
     inv = await _load_invoice(invoice_id)
     person = await db.people.find_one({"id": inv["person_id"]}, {"_id": 0}) or {}
-    pdf = _render_invoice_pdf(inv, person)
+    pdf = await run_in_threadpool(_render_invoice_pdf, inv, person)
     return Response(
         content=pdf,
         media_type="application/pdf",

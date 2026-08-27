@@ -1,9 +1,10 @@
 import re
+import secrets
 import uuid
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pymongo.errors import DuplicateKeyError
-from core import db, PersonCreate, PersonUpdate, get_current_user, assert_can_manage, assert_player_action, assert_perm, get_perm, is_admin, is_sports_admin, is_super_admin, is_teacher_user, now_utc, resolve_user_institution, person_entity_filter, derive_person_entities, assert_person_entity_access, coach_can, logger, merge_mongo_query, active_status_filter
+from core import db, PersonCreate, PersonUpdate, get_current_user, assert_can_manage, assert_player_action, assert_perm, get_perm, is_admin, is_sports_admin, is_super_admin, is_teacher_user, now_utc, resolve_user_institution, person_entity_filter, derive_person_entities, assert_person_entity_access, coach_can, logger, merge_mongo_query, active_status_filter, today_ist
 from routers.academic import (
     resolve_section_group,
     assert_teacher_section_access,
@@ -335,7 +336,7 @@ def _validate_player_centre_type(centre: Optional[str], ptype: Optional[str]):
 async def ensure_staff_user_account(person: dict) -> Optional[dict]:
     """Every STAFF person gets (and stays synced with) a login/user account so they
     automatically appear in the Permissions module for role & access assignment.
-    Email auto-generated from the name (@prarambhika.com); default password Staff@123
+    Email auto-generated from the name (@prarambhika.com); a random password that must be reset on first login
     with a forced change on first login."""
     if person.get("kind") != "staff":
         return None
@@ -361,8 +362,8 @@ async def ensure_staff_user_account(person: dict) -> Optional[dict]:
         "id": str(uuid.uuid4()),
         "person_id": person["id"],
         "email": email,
-        "password_hash": hash_password("Staff@123"),
-        "is_password_set": True,
+        "password_hash": hash_password(secrets.token_urlsafe(32)),
+        "is_password_set": False,
         "must_change_password": True,
         "name": person.get("name"),
         "role": "staff",
@@ -459,7 +460,7 @@ async def create_person(payload: PersonCreate, user: dict = Depends(get_current_
     await _assert_unique_ids(doc)
     if payload.kind == "student":
         doc.setdefault("organization", "PWS")
-        doc.setdefault("date_of_admission", now_utc().strftime("%Y-%m-%d"))
+        doc.setdefault("date_of_admission", today_ist())
     if payload.kind == "student" and payload.section_id:
         sid, label = await resolve_section_group(payload.section_id)
         doc["section_id"] = sid
@@ -662,6 +663,19 @@ async def update_person(person_id: str, payload: PersonUpdate, user: dict = Depe
     if merged.get("kind") == "player":
         _validate_player_centre_type(merged.get("centre"), merged.get("player_type"))
         upd.pop("assigned_coach_id", None)
+    if fee_pending_approval:
+        existing_pending = await db.approval_requests.find_one({
+            "type": "fee_override_admission",
+            "subject_id": person_id,
+            "status": "pending",
+        })
+        if existing_pending:
+            raise HTTPException(
+                400,
+                "A fee override approval is already pending for this person — "
+                "decide it before submitting another change.",
+            )
+
     await db.people.update_one({"id": person_id}, {"$set": upd})
     fresh = await db.people.find_one({"id": person_id}, {"_id": 0})
 
@@ -677,6 +691,15 @@ async def update_person(person_id: str, payload: PersonUpdate, user: dict = Depe
                 reason="Custom fee override requested on profile update",
             )
         except ValueError as e:
+            restore = {k: target.get(k) for k in upd if k in target}
+            drop = [k for k in upd if k not in target]
+            ops: dict = {}
+            if restore:
+                ops["$set"] = restore
+            if drop:
+                ops["$unset"] = {k: "" for k in drop}
+            if ops:
+                await db.people.update_one({"id": person_id}, ops)
             raise HTTPException(400, str(e)) from e
         return {
             "approval_required": True,
@@ -730,10 +753,10 @@ async def deactivate_person(person_id: str, user: dict = Depends(get_current_use
         raise HTTPException(403, "Not allowed to deactivate this person")
 
     kind = target.get("kind", "")
-    from routers.approvals import _can_approve, _approval_out, _insert_deactivation_approval
-    if not _can_approve(user):
+    from routers.approvals import can_approve_deactivation, _approval_out, _insert_deactivation_approval
+    if not can_approve_deactivation(user):
         entity = entity_from_person(target)
-        entity_id = "pws" if entity == "PWS" else "alpha" if entity == "ALPHA" else "pws"
+        entity_id = "pws" if entity == "PWS" else "alpha" if entity == "ALPHA" else "both"
         doc = await _insert_deactivation_approval(
             subject_id=person_id,
             subject_label=target.get("name") or person_id,
@@ -770,6 +793,27 @@ async def delete_person(person_id: str, user: dict = Depends(get_current_user)):
             assert_player_action(user, "edit")
     else:
         _assert_can_edit_kind(user, target["kind"])
+    if not is_super_admin(user):
+        raise HTTPException(403, "Only Super Admin can permanently delete a person")
+
+    for coll, field, label in (
+        ("fees", "player_id", "fee"),
+        ("attendance", "person_id", "attendance"),
+        ("invoices", "person_id", "invoice"),
+        ("academic_marks", "person_id", "marks"),
+        ("report_cards", "person_id", "report card"),
+    ):
+        if await db[coll].count_documents({field: person_id}, limit=1):
+            raise HTTPException(
+                409,
+                f"Person has {label} records — deactivate instead of deleting, "
+                "otherwise financial and attendance history is orphaned.",
+            )
+
+    await db.users.update_many(
+        {"linked_person_ids": person_id}, {"$pull": {"linked_person_ids": person_id}}
+    )
+    await db.users.delete_many({"person_id": person_id})
     await db.people.delete_one({"id": person_id})
     return {"ok": True}
 

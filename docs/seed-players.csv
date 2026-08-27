@@ -1,0 +1,6 @@
+Full Name *,Father's Name,Guardian Name,Guardian Phone,Age,Date of Birth,Mobile Number *,Email,Address,Locality,City,Centre *,Sport *,Player Type *,Slot *,Skill Level *,Date of Admission *,Transport Fee Monthly,Monthly Fee Override,Registration Fee Override,Hostel Fee Override,Boarding Class,Boarding Section,Status
+,,,,Ignored when Date of Birth is supplied,,,,,,,"One of: Balua, Harding Park","One of: Cricket, Football",Harding Park supports Daily only,"One of: Morning, Evening, Both","One of: Beginner, Intermediate, Advanced",,,,,,Only for Boarding players who also attend PWS,"One of: A, B, C, D, E, F","One of: active, deactivated"
+Rohan Mehta,Deepak Mehta,,,13,2012-08-19,9876500201,,,Kankarbagh,Patna,Balua,Cricket,Daily,Morning,Beginner,2026-04-10,,,,,,,
+Ananya Roy,,Sujata Roy,9876500212,,2010-11-05,9876500202,,,,Patna,Balua,Football,Hostel,Evening,Intermediate,10/04/2026,,,,,,,
+Aditya Nair,,,,,,9876500203,,,,Patna,Harding Park,Cricket,Daily,Both,Advanced,2026-04-12,,9000,,,,,
+Meera Joshi,,,,,,9876500204,,,,Patna,Balua,Football,Boarding,Morning,Beginner,2026-04-15,800,,,,Class VIII,A,

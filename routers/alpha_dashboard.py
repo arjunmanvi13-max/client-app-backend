@@ -7,7 +7,7 @@ so the UI can render quickly without further calls.
 from datetime import timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
-from core import db, get_current_user, is_admin, now_utc
+from core import db, get_current_user, is_admin, now_utc, today_ist
 
 router = APIRouter(prefix="/alpha-dashboard", tags=["alpha-dashboard"])
 
@@ -22,7 +22,7 @@ def _bucket_init():
 async def _financial_band(centre: Optional[str], sport: Optional[str], date_from: Optional[str], date_to: Optional[str]) -> dict:
     from routers.fees import ensure_all_players_monthly_fees
     await ensure_all_players_monthly_fees()
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
     this_month = today[:7]
     thirty_days_ago = (now_utc() - timedelta(days=30)).strftime("%Y-%m-%d")
 
@@ -31,7 +31,7 @@ async def _financial_band(centre: Optional[str], sport: Optional[str], date_from
     if sport: base["sport"] = sport
 
     # ----- A. Fees Collected Today -----
-    collected_filter = {**base, "status": "paid", "paid_at": {"$regex": f"^{today}"}}
+    collected_filter = {**base, "status": "paid", "paid_on": today}
     collected_today = await db.fees.aggregate([
         {"$match": collected_filter},
         {"$group": {"_id": None, "total": {"$sum": "$amount_due"}, "count": {"$sum": 1}}},
@@ -87,7 +87,7 @@ async def _financial_band(centre: Optional[str], sport: Optional[str], date_from
 
 
 async def _attendance_band(centre: Optional[str], sport: Optional[str]) -> dict:
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
 
     async def _group(kind: str, extra_match: dict | None = None):
         match: dict = {"date": today, "kind": kind}
