@@ -14,7 +14,7 @@ class CreateReq(BaseModel):
 
 
 def _can_approve(user: dict) -> bool:
-    return is_super_admin(user) or get_perm(user, "approve_requests") or get_perm(user, "approve_deactivation")
+    return is_super_admin(user) or get_perm(user, "approve_deactivation")
 
 
 def _legacy_from_approval(doc: dict) -> dict:
@@ -104,8 +104,7 @@ async def list_requests(status: Optional[str] = None, user: dict = Depends(get_c
     return [_legacy_from_approval(r) for r in rows]
 
 
-class DecisionIn(BaseModel):
-    note: Optional[str] = None
+from routers.approvals import DecisionIn
 
 
 @router.post("/{req_id}/approve")

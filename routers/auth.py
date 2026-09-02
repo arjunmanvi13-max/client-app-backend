@@ -11,28 +11,36 @@ Endpoints:
 - GET  /auth/me                — current user.
 - POST /auth/logout            — no-op (JWT is stateless).
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pymongo.errors import PyMongoError
 from core import (
-    db, LoginIn, ChangePasswordIn,
-    create_token, verify_password, hash_password, public_user, get_current_user, now_utc,
-    validate_domain_email, logger,
+    db, LoginIn, ChangePasswordIn, DUMMY_PASSWORD_HASH,
+    create_token, verify_password_async, hash_password_async, public_user, get_current_user, now_utc,
+    validate_domain_email, MIN_PASSWORD_LENGTH, validate_password_strength, logger,
 )
+from login_throttle import check_login_allowed, record_login_failure, reset_login_failures
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
 # ----------------- Email + password login -----------------
 @router.post("/login")
-async def login(payload: LoginIn):
+async def login(payload: LoginIn, request: Request):
     email = validate_domain_email(payload.email)
+    client_ip = (request.client.host if request.client else "") or "unknown"
+    check_login_allowed(email, client_ip)
+
     try:
         user = await db.users.find_one({"email": email}, {"_id": 0})
     except PyMongoError as exc:
         logger.error("Login DB unavailable for %s: %s", email, exc)
         raise HTTPException(503, "Login service temporarily unavailable. Please try again in a moment.")
-    if not user or not user.get("password_hash") or not verify_password(payload.password, user["password_hash"]):
+    stored_hash = (user or {}).get("password_hash") or DUMMY_PASSWORD_HASH
+    password_ok = await verify_password_async(payload.password, stored_hash)
+    if not user or not user.get("password_hash") or not password_ok:
+        record_login_failure(email, client_ip)
         raise HTTPException(401, "Invalid email or password")
+    reset_login_failures(email, client_ip)
     if user.get("status") == "deactivated":
         raise HTTPException(403, "Account deactivated. Contact your administrator.")
     if user.get("requires_user_type_review"):
@@ -40,7 +48,7 @@ async def login(payload: LoginIn):
             403,
             "Your account requires an approved user type assignment. Please contact the Super Admin.",
         )
-    token = create_token(user["id"], user.get("email") or "", user["role"])
+    token = create_token(user["id"], user.get("email") or "", user["role"], user.get("password_set_at"))
     return {
         "access_token": token,
         "token_type": "bearer",
@@ -52,17 +60,21 @@ async def login(payload: LoginIn):
 # ----------------- Change password (authed) -----------------
 @router.post("/password/change")
 async def change_password(payload: ChangePasswordIn, user: dict = Depends(get_current_user)):
-    if not user.get("password_hash") or not verify_password(payload.current_password, user["password_hash"]):
+    current_ok = await verify_password_async(
+        payload.current_password, user.get("password_hash") or DUMMY_PASSWORD_HASH
+    )
+    if not user.get("password_hash") or not current_ok:
         raise HTTPException(401, "Current password incorrect")
-    if len(payload.new_password) < 6:
-        raise HTTPException(400, "New password must be at least 6 characters")
+    validate_password_strength(payload.new_password)
+    password_set_at = now_utc().isoformat()
     await db.users.update_one({"id": user["id"]}, {"$set": {
-        "password_hash": hash_password(payload.new_password),
+        "password_hash": await hash_password_async(payload.new_password),
         "is_password_set": True,
         "must_change_password": False,
-        "password_set_at": now_utc().isoformat(),
+        "password_set_at": password_set_at,
     }})
-    return {"ok": True}
+    token = create_token(user["id"], user.get("email") or "", user["role"], password_set_at)
+    return {"ok": True, "access_token": token, "token_type": "bearer"}
 
 
 # ----------------- Me / Logout -----------------

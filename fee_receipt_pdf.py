@@ -158,9 +158,10 @@ def render_batch_receipt_pdf(
         period = format_month(f.get("period_month"))
         c.drawString(margin + 3 * mm, y, head)
         c.drawString(margin + 68 * mm, y, period)
-        c.drawRightString(margin + inner_w - 3 * mm, y, _rs(f.get("amount_due", 0)))
-        y -= ROW_H
         discount = int(f.get("discount_applied") or 0)
+        billed = int(f.get("amount_due") or 0) + discount
+        c.drawRightString(margin + inner_w - 3 * mm, y, _rs(billed))
+        y -= ROW_H
         if discount > 0:
             reason = (f.get("discount_reason") or "Concession").strip()[:16]
             c.setFillColorRGB(0.05, 0.46, 0.42)

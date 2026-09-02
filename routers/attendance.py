@@ -10,11 +10,12 @@ from core import (
     db, AttendanceBatch, AttendanceCorrectionIn, get_current_user, now_utc, is_admin,
     assert_perm, get_perm, resolve_user_institution, attendance_entity_filter,
     attendance_entity_for_kind, active_status_filter, merge_mongo_query,
-    is_teacher_user, assert_teacher_student_scope,
+    is_teacher_user, assert_teacher_student_scope, today_ist,
 )
 from academic_calendar import calendar_day_info, is_holiday_for_kind
 from rbac.authorization import normalize_role
 from rbac.enums import UserRole
+from pymongo.errors import DuplicateKeyError
 
 router = APIRouter(prefix="/attendance", tags=["attendance"])
 
@@ -130,7 +131,13 @@ async def upsert_attendance(
         rec["created_at"] = existing.get("created_at") or marked_at
     else:
         rec["created_at"] = marked_at
-    await db.attendance.update_one(filt, {"$set": rec}, upsert=True)
+    try:
+        await db.attendance.update_one(filt, {"$set": rec}, upsert=True)
+    except DuplicateKeyError:
+        rec.pop("created_at", None)
+        rec.pop("id", None)
+        await db.attendance.update_one(filt, {"$set": rec})
+        return await db.attendance.find_one(filt, {"_id": 0}) or rec
     return rec
 
 
@@ -284,16 +291,13 @@ async def list_staff_attendance(
     session: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
-    await _staff_query_for_user(user, centre=centre, organization=organization)
-    q: dict = {"kind": "staff"}
+    scoped = await _staff_query_for_user(user, centre=centre, organization=organization)
+    extra: dict = {}
     if date:
-        q["date"] = date
-    if organization:
-        q["organization"] = organization
-    if centre:
-        q["centre"] = centre
+        extra["date"] = date
     if session:
-        q["session"] = normalize_session(session, kind="staff")
+        extra["session"] = normalize_session(session, kind="staff")
+    q = merge_mongo_query(scoped, extra)
     return await db.attendance.find(q, {"_id": 0}).sort("date", -1).to_list(2000)
 
 
@@ -523,12 +527,11 @@ async def _validate_batch_marks(
                 "id",
                 {"kind": "student", "section_id": {"$in": assigned}, "status": {"$ne": "deactivated"}},
             ))
+        existing_ids = set(await db.people.distinct(
+            "id", {"id": {"$in": person_ids}, "kind": "student"}
+        ))
         for pid in person_ids:
-            person = await db.people.find_one(
-                {"id": pid, "kind": "student"},
-                {"_id": 0, "id": 1, "section_id": 1},
-            )
-            if not person:
+            if pid not in existing_ids:
                 raise HTTPException(404, f"Student not found: {pid}")
             if allowed_ids is not None and pid not in allowed_ids:
                 raise HTTPException(403, "Student is not in the selected section or group")
@@ -568,13 +571,24 @@ async def mark_attendance_batch(payload: AttendanceBatch, user: dict = Depends(g
     )
     from routers.parents import push_parent_notification
     records = []
-    today_str = now_utc().strftime("%Y-%m-%d")
+    today_str = today_ist()
     if payload.kind == "student":
         if payload.session and normalize_session(payload.session, kind="student") != "morning":
             raise HTTPException(400, "Student attendance is recorded once daily in the morning session")
         sess = "morning"
     else:
         sess = normalize_session(payload.session, kind=payload.kind)
+
+    name_by_person_id: dict = {}
+    if payload.date == today_str and payload.kind in ("student", "player"):
+        ids = [m.person_id for m in payload.marks]
+        name_by_person_id = {
+            p["id"]: p.get("name") or "Ward"
+            for p in await db.people.find(
+                {"id": {"$in": ids}}, {"_id": 0, "id": 1, "name": 1}
+            ).to_list(len(ids) or 1)
+        }
+
     for m in payload.marks:
         rec = await upsert_attendance(
             user,
@@ -591,8 +605,7 @@ async def mark_attendance_batch(payload: AttendanceBatch, user: dict = Depends(g
         )
         records.append(rec)
         if payload.date == today_str and payload.kind in ("student", "player"):
-            person = await db.people.find_one({"id": m.person_id}, {"_id": 0, "name": 1})
-            pname = (person or {}).get("name", "Ward")
+            pname = name_by_person_id.get(m.person_id, "Ward")
             try:
                 if m.status == "absent":
                     await push_parent_notification(
@@ -750,7 +763,7 @@ async def attendance_summary(
         else:
             raise HTTPException(403, "view_attendance permission required")
 
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
     if date:
         start_date = end_date = date
     if not start_date and not end_date:
@@ -873,7 +886,7 @@ async def export_attendance(
 ):
     if not _can_view_attendance(user):
         raise HTTPException(403, "view_attendance permission required")
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
     if not start_date:
         start_date = today
     if not end_date:

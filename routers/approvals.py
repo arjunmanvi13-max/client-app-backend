@@ -10,6 +10,8 @@ from core import (
     is_super_admin,
     is_admin,
     now_utc,
+    assert_entity_access,
+    user_entity_scope,
     CommentIn,
 )
 from notifications_service import send_notification, send_to_role
@@ -41,13 +43,40 @@ def _can_approve(user: dict) -> bool:
     return is_super_admin(user) or get_perm(user, "approve_requests") or get_perm(user, "approve_deactivation")
 
 
+def can_approve_deactivation(user: dict) -> bool:
+    """Deactivation is a dedicated lever — the generic approve_requests flag does not grant it."""
+    return is_super_admin(user) or get_perm(user, "approve_deactivation")
+
+
+def _assert_can_decide_type(user: dict, req: dict) -> None:
+    if req.get("type") in LEGACY_DEACTIVATION_TYPES and not can_approve_deactivation(user):
+        raise HTTPException(403, "Deactivation approvals require the approve_deactivation permission")
+
+
 def _can_view_approvals(user: dict) -> bool:
     return _can_approve(user) or is_admin(user) or get_perm(user, "edit_players") or get_perm(user, "edit_students") or get_perm(user, "edit_fees")
 
 
+def _assert_can_decide_entity(user: dict, req: dict) -> None:
+    """Approvals move money (concessions, refunds) and deactivate people, so a PWS
+    approver must not decide an ALPHA request or vice versa. Requests that are
+    genuinely cross-entity ('both'/unset) stay open to any approver."""
+    entity_id = (req.get("entity_id") or "").strip().lower()
+    if entity_id in ("pws", "alpha"):
+        assert_entity_access(user, entity_id)
+
+
+def _entity_visibility_clause(user: dict) -> dict:
+    """Limit a scoped approver's queue to their own entity (plus cross-entity items)."""
+    scope = user_entity_scope(user)
+    if scope == "both":
+        return {}
+    return {"entity_id": {"$in": [scope, "both", None]}}
+
+
 def _visibility_filter(user: dict) -> dict:
     if _can_approve(user) or is_admin(user):
-        return {}
+        return _entity_visibility_clause(user)
     return {"requested_by_id": user["id"]}
 
 
@@ -62,8 +91,21 @@ def _history_entry(action: str, user: dict, note: Optional[str] = None) -> dict:
     }
 
 
-def _approval_out(doc: dict) -> dict:
-    return enrich_approval(doc)
+def _approval_out(doc: dict, user: Optional[dict] = None) -> dict:
+    out = enrich_approval(doc)
+    if user is not None:
+        out["can_decide"] = _can_decide(user, doc)
+    return out
+
+
+def _can_decide(user: dict, req: dict) -> bool:
+    """Mirror of the decide-time gates so the client can hide dead buttons."""
+    for check in (_assert_can_decide_entity, _assert_can_decide_type):
+        try:
+            check(user, req)
+        except HTTPException:
+            return False
+    return True
 
 
 async def _insert_deactivation_approval(
@@ -260,6 +302,9 @@ async def _validate_create(payload: ApprovalCreate, user: dict) -> tuple[dict, s
         p.setdefault("discount_amount", discount_amount)
         p.setdefault("person_name", person_name)
         p.setdefault("original_amount_due", int(fee.get("amount_due") or 0))
+        if discount_amount > int(fee.get("amount_due") or 0):
+            raise HTTPException(400, "Discount cannot exceed the amount due")
+        p["new_amount_due"] = max(0, int(fee.get("amount_due") or 0) - discount_amount)
         if p.get("discount_percent"):
             p["discount_percent"] = float(p["discount_percent"])
         return fee, label, entity_id, p
@@ -324,17 +369,27 @@ async def _apply_approval(req: dict) -> None:
         if not fee:
             raise HTTPException(404, "Fee not found")
         discount_amount = int(p.get("discount_amount") or 0)
-        new_amt = p.get("new_amount_due")
-        if new_amt is None:
-            new_amt = max(0, int(fee.get("amount_due") or 0) - discount_amount)
-        await db.fees.update_one({"id": fee_id}, {"$set": {
-            "amount_due": new_amt,
-            "discount_applied": int(fee.get("discount_applied") or 0) + discount_amount,
-            "discount_reason": req.get("reason"),
-            "discounted_by_id": req.get("decided_by_id"),
-            "discounted_by_name": req.get("decided_by_name"),
-            "discounted_at": now_utc().isoformat(),
-        }})
+        res = await db.fees.update_one(
+            {
+                "id": fee_id,
+                "status": {"$ne": "paid"},
+                "amount_due": {"$gte": discount_amount},
+            },
+            {
+                "$inc": {
+                    "amount_due": -discount_amount,
+                    "discount_applied": discount_amount,
+                },
+                "$set": {
+                    "discount_reason": req.get("reason"),
+                    "discounted_by_id": req.get("decided_by_id"),
+                    "discounted_by_name": req.get("decided_by_name"),
+                    "discounted_at": now_utc().isoformat(),
+                },
+            },
+        )
+        if res.matched_count == 0:
+            raise HTTPException(409, "Fee was paid or its balance changed — concession not applied")
         return
 
     if t == "refund":
@@ -423,7 +478,7 @@ async def list_approvals(
     elif type:
         q["type"] = type
     rows = await db.approval_requests.find(q, {"_id": 0}).sort("requested_at", -1).to_list(500)
-    return [_approval_out(r) for r in rows]
+    return [_approval_out(r, user) for r in rows]
 
 
 @router.get("/{req_id}")
@@ -469,16 +524,20 @@ async def approve(req_id: str, payload: DecisionIn, user: dict = Depends(get_cur
         raise HTTPException(404, "Approval request not found")
     if req["status"] != "pending":
         raise HTTPException(400, f"Request already {req['status']}")
+    _assert_can_decide_entity(user, req)
+    _assert_can_decide_type(user, req)
 
     decided_at = now_utc().isoformat()
     entry = _history_entry("approved", user, payload.note)
-    await db.approval_requests.update_one({"id": req_id}, {"$set": {
+    claimed = await db.approval_requests.update_one({"id": req_id, "status": "pending"}, {"$set": {
         "status": "approved",
         "decided_by_id": user["id"],
         "decided_by_name": user["name"],
         "decided_at": decided_at,
         "decision_note": payload.note,
     }, "$push": {"history": entry}})
+    if claimed.matched_count == 0:
+        raise HTTPException(409, "Request is no longer pending")
 
     req["status"] = "approved"
     req["decided_by_id"] = user["id"]
@@ -490,18 +549,15 @@ async def approve(req_id: str, payload: DecisionIn, user: dict = Depends(get_cur
 
     try:
         await _apply_approval(req)
-    except HTTPException:
+    except Exception:
         await db.approval_requests.update_one({"id": req_id}, {"$set": {
             "status": "pending",
             "decided_by_id": None,
             "decided_by_name": None,
             "decided_at": None,
             "decision_note": None,
-        }})
+        }, "$pull": {"history": {"id": entry["id"]}}})
         raise
-    except Exception:
-        import logging
-        logging.getLogger("approvals").exception("Side-effect failed for approved request %s", req_id)
 
     notify_title, notify_message = _completion_notification(req, approved=True, decider_name=user["name"])
     await send_notification(
@@ -526,19 +582,33 @@ async def reject(req_id: str, payload: DecisionIn, user: dict = Depends(get_curr
         raise HTTPException(404, "Approval request not found")
     if req["status"] != "pending":
         raise HTTPException(400, f"Request already {req['status']}")
-
-    if req.get("type") == "fee_override_admission":
-        from fee_override_approval import apply_rejected_fee_override
-        await apply_rejected_fee_override(req)
+    _assert_can_decide_entity(user, req)
+    _assert_can_decide_type(user, req)
 
     entry = _history_entry("rejected", user, payload.note)
-    await db.approval_requests.update_one({"id": req_id}, {"$set": {
+    claimed = await db.approval_requests.update_one({"id": req_id, "status": "pending"}, {"$set": {
         "status": "rejected",
         "decided_by_id": user["id"],
         "decided_by_name": user["name"],
         "decided_at": now_utc().isoformat(),
         "decision_note": payload.note,
     }, "$push": {"history": entry}})
+    if claimed.matched_count == 0:
+        raise HTTPException(409, "Request is no longer pending")
+
+    if req.get("type") == "fee_override_admission":
+        from fee_override_approval import apply_rejected_fee_override
+        try:
+            await apply_rejected_fee_override(req)
+        except Exception:
+            await db.approval_requests.update_one({"id": req_id}, {"$set": {
+                "status": "pending",
+                "decided_by_id": None,
+                "decided_by_name": None,
+                "decided_at": None,
+                "decision_note": None,
+            }, "$pull": {"history": {"id": entry["id"]}}})
+            raise
 
     notify_title, notify_message = _completion_notification(req, approved=False, decider_name=user["name"])
     await send_notification(

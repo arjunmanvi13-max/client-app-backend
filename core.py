@@ -12,19 +12,21 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal, Dict
 
 import bcrypt
+from starlette.concurrency import run_in_threadpool
 import jwt
 from fastapi import Depends, HTTPException, Request
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, EmailStr, field_validator, model_validator
+from pydantic import BaseModel, EmailStr, Field, conint, field_validator, model_validator
 
 # ------------------ DB ------------------
 mongo_url = os.environ["MONGO_URL"]
-# Fail fast when Mongo is down so API clients (20–30s timeouts) get a real error
-# instead of hanging until the browser reports "Cannot reach the server".
 client = AsyncIOMotorClient(
     mongo_url,
-    serverSelectionTimeoutMS=5000,
-    connectTimeoutMS=5000,
+    maxPoolSize=int(os.getenv("MONGO_MAX_POOL_SIZE", "50")),
+    serverSelectionTimeoutMS=int(os.getenv("MONGO_SERVER_SELECTION_TIMEOUT_MS", "5000")),
+    connectTimeoutMS=int(os.getenv("MONGO_CONNECT_TIMEOUT_MS", "5000")),
+    socketTimeoutMS=int(os.getenv("MONGO_SOCKET_TIMEOUT_MS", "20000")),
+    retryWrites=True,
 )
 db = client[os.environ["DB_NAME"]]
 
@@ -55,6 +57,43 @@ def validate_domain_email(email: str) -> str:
 
 def now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+IST = timezone(timedelta(hours=5, minutes=30), "IST")
+
+def now_ist() -> datetime:
+    """Local wall-clock time. Both institutions operate only in India."""
+    return datetime.now(IST)
+
+def today_ist() -> str:
+    """Calendar date key (YYYY-MM-DD) in IST.
+
+    UTC is 5h30m behind, so between 00:00 and 05:30 IST the UTC date is still
+    yesterday. Attendance day-keys, "collected today" figures and monthly fee
+    rollover must use this, not the UTC date.
+    """
+    return now_ist().strftime("%Y-%m-%d")
+
+def current_month_ist() -> str:
+    """Month key (YYYY-MM) in IST."""
+    return now_ist().strftime("%Y-%m")
+
+def to_ist_day(value) -> str:
+    """Calendar date key in IST for a stored UTC timestamp or ISO string."""
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        s = str(value).strip()
+        if not s:
+            return ""
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except ValueError:
+            return s[:10]
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(IST).strftime("%Y-%m-%d")
 
 def format_date_display(value: Optional[str] = None) -> str:
     """User-facing date: dd/mm/yyyy."""
@@ -102,7 +141,38 @@ def verify_password(p: str, h: str) -> bool:
     except Exception:
         return False
 
-def create_token(user_id: str, email: str, role: str) -> str:
+async def hash_password_async(p: str) -> str:
+    return await run_in_threadpool(hash_password, p)
+
+async def verify_password_async(p: str, h: str) -> bool:
+    """bcrypt is CPU-bound and blocks the single uvicorn worker's event loop for
+    ~300ms, stalling every other in-flight request. Run it off the loop."""
+    return await run_in_threadpool(verify_password, p, h)
+
+DUMMY_PASSWORD_HASH = bcrypt.hashpw(b"~no-such-account~", bcrypt.gensalt()).decode()
+
+MIN_PASSWORD_LENGTH = 10
+
+def validate_password_strength(p: str) -> str:
+    """Accounts here move money and hold minors' records, so a 6-character
+    minimum with no composition rule is too weak."""
+    pw = p or ""
+    if len(pw) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(400, f"Password must be at least {MIN_PASSWORD_LENGTH} characters")
+    classes = sum([
+        any(c.islower() for c in pw),
+        any(c.isupper() for c in pw),
+        any(c.isdigit() for c in pw),
+        any(not c.isalnum() for c in pw),
+    ])
+    if classes < 3:
+        raise HTTPException(
+            400,
+            "Password must include at least three of: lowercase, uppercase, digit, symbol",
+        )
+    return pw
+
+def create_token(user_id: str, email: str, role: str, password_set_at: Optional[str] = None) -> str:
     payload = {
         "sub": user_id,
         "email": email,
@@ -110,6 +180,8 @@ def create_token(user_id: str, email: str, role: str) -> str:
         "exp": now_utc() + timedelta(hours=ACCESS_TOKEN_EXPIRES_HOURS),
         "iat": now_utc(),
     }
+    if password_set_at:
+        payload["pwd_at"] = password_set_at
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
 
 def directory_user(u: dict) -> dict:
@@ -178,8 +250,11 @@ async def get_current_user(request: Request) -> dict:
     user = await db.users.find_one({"id": payload["sub"]}, {"_id": 0})
     if not user:
         raise HTTPException(401, "User not found")
-    if user.get("status") == "deactivated":
+    if user.get("status") == "deactivated" or user.get("is_active") is False:
         raise HTTPException(403, "Account deactivated")
+    current_pwd_at = user.get("password_set_at")
+    if current_pwd_at and payload.get("pwd_at") != current_pwd_at:
+        raise HTTPException(401, "Session ended — password was changed")
     if user.get("requires_user_type_review"):
         raise HTTPException(
             403,
@@ -190,7 +265,7 @@ async def get_current_user(request: Request) -> dict:
 def require_roles(*roles):
     async def dep(user: dict = Depends(get_current_user)):
         if user["role"] not in roles and user["role"] != "super_admin":
-            raise HTTPException(403, f"Requires one of roles: {roles}")
+            raise HTTPException(403, "You do not have access to this section.")
         return user
     return dep
 
@@ -704,14 +779,6 @@ def attendance_entity_filter(inst: str) -> dict:
 
 
 # ------------------ Notifications (delegates to notifications_service) ------------------
-from notifications_service import (
-    NOTIFICATION_TYPES,
-    normalize_notification,
-    notification_filter_for_user,
-    send_notification,
-    send_to_role,
-    unread_count_for_user,
-)
 
 
 async def notify_user(
@@ -723,6 +790,8 @@ async def notify_user(
     ref_id: Optional[str] = None,
     entity_id: Optional[str] = None,
 ) -> str:
+    from notifications_service import send_notification
+
     return await send_notification(
         user_id,
         ntype=ntype,
@@ -742,6 +811,8 @@ async def notify_role(
     ref_id: Optional[str] = None,
     entity_id: Optional[str] = None,
 ) -> int:
+    from notifications_service import send_to_role
+
     return await send_to_role(
         role,
         ntype=ntype,
@@ -1014,16 +1085,16 @@ class PersonCreate(BaseModel):
     date_of_admission: Optional[str] = None  # ISO date string YYYY-MM-DD
     status: Literal["active", "deactivated"] = "active"
     parent_user_ids: List[str] = []  # parent users linked to this child
-    transport_fee_monthly: Optional[int] = 0   # ALPHA player optional monthly transport
+    transport_fee_monthly: Optional[int] = Field(default=0, ge=0, le=1_000_000)   # ALPHA player optional monthly transport
     # PWS 2026-27 fee profile
     pws_student_type: Optional[Literal["Day School", "Boarding", "Day Boarding"]] = None
     pws_class: Optional[str] = None
     transport_enabled: bool = False
     transport_distance: Optional[Literal["Up to 5 km", "Over 5 km"]] = None
-    pws_fee_overrides: Optional[Dict[str, int]] = None
-    hostel_fee_override: Optional[int] = None  # ALPHA hostel player optional manual override
-    monthly_fee_override: Optional[int] = None  # Super Admin only — override rate-card monthly at admission
-    registration_fee_override: Optional[int] = None  # Super Admin only — override rate-card registration
+    pws_fee_overrides: Optional[Dict[str, conint(ge=0, le=10_000_000)]] = None
+    hostel_fee_override: Optional[int] = Field(default=None, ge=0, le=10_000_000)  # ALPHA hostel player optional manual override
+    monthly_fee_override: Optional[int] = Field(default=None, ge=0, le=10_000_000)  # Super Admin only — override rate-card monthly at admission
+    registration_fee_override: Optional[int] = Field(default=None, ge=0, le=10_000_000)  # Super Admin only — override rate-card registration
     # Staff
     employee_id: Optional[str] = None
     department: Optional[str] = None
@@ -1059,15 +1130,15 @@ class PersonUpdate(BaseModel):
     date_of_admission: Optional[str] = None
     status: Optional[Literal["active", "deactivated"]] = None
     parent_user_ids: Optional[List[str]] = None
-    transport_fee_monthly: Optional[int] = None
+    transport_fee_monthly: Optional[int] = Field(default=None, ge=0, le=1_000_000)
     pws_student_type: Optional[Literal["Day School", "Boarding", "Day Boarding"]] = None
     pws_class: Optional[str] = None
     transport_enabled: Optional[bool] = None
     transport_distance: Optional[Literal["Up to 5 km", "Over 5 km"]] = None
-    pws_fee_overrides: Optional[Dict[str, int]] = None
-    hostel_fee_override: Optional[int] = None
-    monthly_fee_override: Optional[int] = None
-    registration_fee_override: Optional[int] = None
+    pws_fee_overrides: Optional[Dict[str, conint(ge=0, le=10_000_000)]] = None
+    hostel_fee_override: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    monthly_fee_override: Optional[int] = Field(default=None, ge=0, le=10_000_000)
+    registration_fee_override: Optional[int] = Field(default=None, ge=0, le=10_000_000)
     employee_id: Optional[str] = None
     department: Optional[str] = None
 
@@ -1116,14 +1187,14 @@ class AttendanceMark(BaseModel):
     status: Literal["present", "absent", "late", "leave"]
 
 class AttendanceBatch(BaseModel):
-    date: str
+    date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     kind: Literal["student", "player", "teacher", "coach", "staff"]
     group: Optional[str] = None
     section_id: Optional[str] = None
     sport: Optional[str] = None
     centre: Optional[str] = None
     session: Optional[str] = "morning"
-    marks: List[AttendanceMark]
+    marks: List[AttendanceMark] = Field(max_length=1000)
 
 class AttendanceCorrectionIn(BaseModel):
     record_id: str

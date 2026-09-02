@@ -1,7 +1,12 @@
 """Task workflow — visibility, statuses, comments."""
+import asyncio
 import os
+
 import pytest
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 BASE = (os.environ.get("EXPO_PUBLIC_BACKEND_URL") or os.environ.get("EXPO_BACKEND_URL") or "http://127.0.0.1:8000").rstrip("/")
 API = f"{BASE}/api"
@@ -13,10 +18,10 @@ CREDS = {
     "super_admin": ("superadmin@prarambhika.com", "Super@123"),
 }
 LEGACY_CREDS = {
-    "admin": ("admin@pws-alpha.com", "Admin@123"),
-    "teacher": ("teacher@pws-alpha.com", "Teacher@123"),
-    "principal": ("admin@pws-alpha.com", "Admin@123"),
-    "super_admin": ("super@pws-alpha.com", "Super@123"),
+    "admin": ("admin@prarambhika.com", "Admin@123"),
+    "teacher": ("teacher@prarambhika.com", "Teacher@123"),
+    "principal": ("admin@prarambhika.com", "Admin@123"),
+    "super_admin": ("super@prarambhika.com", "Super@123"),
 }
 TOKENS = {}
 
@@ -49,6 +54,24 @@ def _api_up():
         pytest.skip("API not reachable")
 
 
+@pytest.fixture(scope="module", autouse=True)
+def purge_test_tasks():
+    yield
+
+    async def _purge():
+        from motor.motor_asyncio import AsyncIOMotorClient
+
+        mongo_url = os.environ.get("MONGO_URL")
+        db_name = os.environ.get("DB_NAME")
+        if not (mongo_url and db_name):
+            return
+        c = AsyncIOMotorClient(mongo_url)
+        await c[db_name].tasks.delete_many({"title": {"$regex": "^TEST_"}})
+        c.close()
+
+    asyncio.new_event_loop().run_until_complete(_purge())
+
+
 class TestTaskWorkflow:
     def test_create_with_workflow_fields(self):
         users = requests.get(f"{API}/users?role=teacher", headers=_hdr("admin"), timeout=15)
@@ -70,12 +93,21 @@ class TestTaskWorkflow:
         assert t["assignee_id"] == teacher_id
         assert t["due_date"]
 
-    def test_teacher_visibility_mine_only(self):
+    def test_teacher_visibility_scoped(self):
+        me = requests.get(f"{API}/auth/me", headers=_hdr("teacher"), timeout=15).json()
+        uid = me["id"]
+        supervises = bool((me.get("permissions") or {}).get("supervise_tasks"))
         r = requests.get(f"{API}/tasks", headers=_hdr("teacher"), timeout=15)
         assert r.status_code == 200
         for t in r.json():
-            uid = requests.get(f"{API}/auth/me", headers=_hdr("teacher"), timeout=15).json()["id"]
-            assert t.get("created_by") == uid or uid in (t.get("assignee_ids") or []) or t.get("assignee_id") == uid
+            if supervises:
+                assert t.get("entity_id") in ("pws", "both", None), t
+            else:
+                assert (
+                    t.get("created_by") == uid
+                    or uid in (t.get("assignee_ids") or [])
+                    or t.get("assignee_id") == uid
+                ), t
 
     def test_principal_supervise_sees_all(self):
         admin_list = requests.get(f"{API}/tasks", headers=_hdr("admin"), timeout=15)

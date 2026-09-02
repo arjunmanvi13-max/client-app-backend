@@ -249,7 +249,24 @@ async def update_year_status(year_id: str, payload: YearStatusIn, user: dict = D
     _assert_manage_academic(user)
     year = await _year_by_id(year_id)
     if year.get("status") == "archived":
-        raise HTTPException(403, "Archived years cannot be modified")
+        if not (is_super_admin(user) and payload.status in ("open", "closed")):
+            raise HTTPException(
+                403,
+                "Archived years cannot be modified. Only a Super Admin can reopen an "
+                "archived year.",
+            )
+        if payload.status == "open":
+            other_open = await db.academic_years.find_one({
+                "entity_id": year.get("entity_id"),
+                "status": "open",
+                "id": {"$ne": year_id},
+            })
+            if other_open:
+                raise HTTPException(
+                    400,
+                    f"Close {other_open.get('name')} before reopening {year.get('name')} — "
+                    "only one year can be open at a time.",
+                )
     if payload.status == "open":
         await db.academic_years.update_many(
             {"entity_id": year.get("entity_id", ENTITY_PWS), "status": "open", "id": {"$ne": year_id}},

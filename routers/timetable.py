@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from core import db, get_current_user, now_utc
+from core import db, get_current_user, now_utc, today_ist
 from notifications_service import send_notification
 from timetable.constants import DAYS_OF_WEEK, ENTITY_PWS, DEFAULT_MAX_WEEKLY_PERIODS, day_of_week_for_date
 from timetable.permissions import (
@@ -207,7 +207,7 @@ async def list_slots(
         q["status"] = {"$in": ["DRAFT", "PUBLISHED"]}
 
     slots = await db.timetable_slots.find(q, {"_id": 0}).to_list(2000)
-    date_key = (date or now_utc().strftime("%Y-%m-%d"))[:10]
+    date_key = (date or today_ist())[:10]
     for slot in slots:
         slot["substitution"] = await db.timetable_substitutions.find_one({
             "slot_id": slot["id"],
@@ -229,7 +229,7 @@ async def create_slot(payload: SlotIn, request: Request, user: dict = Depends(ge
         period_id=payload.period_id,
         subject_id=payload.subject_id,
         teacher_id=payload.teacher_id,
-        date_iso=payload.allocation_date or now_utc().strftime("%Y-%m-%d"),
+        date_iso=payload.allocation_date or today_ist(),
     )
     doc = {
         "id": str(uuid.uuid4()),
@@ -244,7 +244,7 @@ async def create_slot(payload: SlotIn, request: Request, user: dict = Depends(ge
         "room": payload.room,
         "notes": payload.notes,
         "status": "DRAFT",
-        "effective_from": now_utc().strftime("%Y-%m-%d"),
+        "effective_from": today_ist(),
         "effective_to": None,
         "created_at": now_utc().isoformat(),
         "updated_at": now_utc().isoformat(),
@@ -282,7 +282,7 @@ async def update_slot(slot_id: str, payload: SlotPatch, request: Request, user: 
         period_id=existing["period_id"],
         subject_id=merged.get("subject_id"),
         teacher_id=merged.get("teacher_id"),
-        date_iso=payload.allocation_date or now_utc().strftime("%Y-%m-%d"),
+        date_iso=payload.allocation_date or today_ist(),
         exclude_slot_id=slot_id,
     )
     patch = {k: v for k, v in payload.dict(exclude_none=True).items() if k != "allocation_date"}
@@ -312,7 +312,7 @@ async def delete_slot(slot_id: str, request: Request, user: dict = Depends(get_c
         raise HTTPException(404, "Slot not found")
     await assert_year_writable(existing["academic_year_id"])
     await db.timetable_slots.update_one({"id": slot_id}, {"$set": {
-        "effective_to": now_utc().strftime("%Y-%m-%d"),
+        "effective_to": today_ist(),
         "updated_at": now_utc().isoformat(),
         "updated_by": user["id"],
     }})
@@ -430,7 +430,7 @@ async def teacher_availability(
     period = await db.timetable_periods.find_one({"id": period_id}, {"_id": 0})
     if not period:
         raise HTTPException(404, "Period not found")
-    date_key = (date or now_utc().strftime("%Y-%m-%d"))[:10]
+    date_key = (date or today_ist())[:10]
     day_name = day_of_week_for_date(date_key)
     if not day_name:
         return {"available": [], "unavailable": []}
@@ -586,7 +586,7 @@ async def my_schedule(date: Optional[str] = None, academic_year_id: Optional[str
         year_id = year["id"] if year else None
     if not year_id:
         return []
-    date_key = (date or now_utc().strftime("%Y-%m-%d"))[:10]
+    date_key = (date or today_ist())[:10]
     day_name = day_of_week_for_date(date_key)
     if not day_name:
         return {"date": date_key, "periods": [], "duties": [], "note": "No timetable on Sunday"}

@@ -15,12 +15,12 @@ CREDS = {
     "super_admin": ("superadmin@prarambhika.com", "Super@123"),
 }
 LEGACY_CREDS = {
-    "principal": ("admin@pws-alpha.com", "Admin@123"),
-    "teacher": ("teacher@pws-alpha.com", "Teacher@123"),
-    "coach": ("coach@pws-alpha.com", "Coach@123"),
-    "warden": ("warden@pws-alpha.com", "Warden@123"),
-    "admin": ("admin@pws-alpha.com", "Admin@123"),
-    "super_admin": ("super@pws-alpha.com", "Super@123"),
+    "principal": ("admin@prarambhika.com", "Admin@123"),
+    "teacher": ("teacher@prarambhika.com", "Teacher@123"),
+    "coach": ("coach@prarambhika.com", "Coach@123"),
+    "warden": ("warden@prarambhika.com", "Warden@123"),
+    "admin": ("admin@prarambhika.com", "Admin@123"),
+    "super_admin": ("super@prarambhika.com", "Super@123"),
 }
 TOKENS = {}
 
@@ -124,9 +124,20 @@ class TestAttendanceMVP:
         )
         assert r.status_code in (200, 400), r.text
 
-    def test_coach_cannot_export_attendance_without_perm(self):
-        r = requests.get(f"{API}/attendance/export", headers=_hdr("coach"), timeout=15)
-        assert r.status_code == 403
+    def test_coach_export_is_roster_scoped(self):
+        import csv as _csv
+        import io as _io
+
+        roster = requests.get(f"{API}/coach/players", headers=_hdr("coach"), timeout=15)
+        if roster.status_code != 200:
+            pytest.skip("Coach roster unavailable")
+        roster_ids = {p["id"] for p in (roster.json().get("players") or [])}
+        r = requests.get(f"{API}/attendance/export", headers=_hdr("coach"),
+                         params={"start_date": "2000-01-01", "end_date": "2100-01-01"}, timeout=30)
+        assert r.status_code == 200, r.text
+        rows = list(_csv.DictReader(_io.StringIO(r.text)))
+        leaked = [row["person_id"] for row in rows if row["person_id"] not in roster_ids]
+        assert not leaked, f"coach export leaked non-roster people: {leaked[:5]}"
 
     def test_warden_hostel_roll_call(self):
         res = requests.get(f"{API}/people", headers=_hdr("warden"), params={"resident": True}, timeout=15)

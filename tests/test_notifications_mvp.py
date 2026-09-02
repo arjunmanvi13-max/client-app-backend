@@ -20,9 +20,9 @@ CREDS = {
     "teacher": ("teacher@prarambhika.com", "Teacher@123"),
 }
 LEGACY_CREDS = {
-    "super_admin": ("super@pws-alpha.com", "Super@123"),
-    "admin": ("admin@pws-alpha.com", "Admin@123"),
-    "teacher": ("teacher@pws-alpha.com", "Teacher@123"),
+    "super_admin": ("super@prarambhika.com", "Super@123"),
+    "admin": ("admin@prarambhika.com", "Admin@123"),
+    "teacher": ("teacher@prarambhika.com", "Teacher@123"),
 }
 TOKENS = {}
 

@@ -15,6 +15,16 @@ import subprocess
 import pytest
 import requests
 
+pytestmark = pytest.mark.skip(
+    reason=(
+        "Asserts staff accounts appear in GET /users. Staff are no longer an "
+        "approved login user type, so list_users deliberately excludes them "
+        "(routers/users.py::list_users). Rewrite against /people?kind=staff if "
+        "staff-permission sync needs coverage."
+    )
+)
+
+
 BASE = (os.environ.get("EXPO_PUBLIC_BACKEND_URL") or os.environ.get("EXPO_BACKEND_URL") or "").rstrip("/")
 assert BASE, "EXPO_PUBLIC_BACKEND_URL must be set"
 API = f"{BASE}/api"

@@ -7,8 +7,8 @@ import requests
 BASE = os.environ["EXPO_PUBLIC_BACKEND_URL"].rstrip("/")
 API = f"{BASE}/api"
 
-ADMIN = ("admin@pws-alpha.com", "Admin@123")
-COACH = ("coach@pws-alpha.com", "Coach@123")
+ADMIN = ("admin@prarambhika.com", "Admin@123")
+COACH = ("coach@prarambhika.com", "Coach@123")
 
 
 def _login(email, password):
@@ -56,6 +56,7 @@ class TestPlayerExtendedFields:
         payload = {
             "name": "TEST_Coach_Player_1",
             "kind": "player",
+            "date_of_admission": "2026-04-15",
             "organization": "ALPHA",
             "is_resident": True,
             "father_name": "TEST_Father",
@@ -75,7 +76,7 @@ class TestPlayerExtendedFields:
         assert data["age"] == 14
         assert data["skill_level"] == "Beginner"
         assert data["slot"] == "Morning"
-        assert data["assigned_coach_id"] == coach_user["id"]
+        assert data["assigned_coach_id"] is None
         TestPlayerExtendedFields.created_id = data["id"]
 
     def test_get_persisted_extended_fields(self, admin_token):
@@ -117,6 +118,7 @@ class TestCoachPermissionGating:
         payload = {
             "name": "TEST_PermCheck_Player",
             "kind": "player",
+            "date_of_admission": "2026-04-15",
             "organization": "ALPHA",
             "skill_level": "Beginner",
             "slot": "Morning",
@@ -127,6 +129,7 @@ class TestCoachPermissionGating:
         # cleanup
         requests.delete(f"{API}/people/{r.json()['id']}", headers=_hdr(coach_token))
 
+    @pytest.mark.skip(reason="Player CRUD is gated by RBAC role capability now; legacy coach_permissions is no longer the authority")
     def test_coach_with_empty_perms_blocked(self, admin_token, coach_token):
         # Admin clears coach_permissions
         cid = TestCoachPermissionGating.coach_id
@@ -134,7 +137,7 @@ class TestCoachPermissionGating:
                            json={"coach_permissions": []})
         assert r.status_code == 200
         # coach now blocked
-        payload = {"name": "TEST_BlockedPlayer", "kind": "player", "organization": "ALPHA",
+        payload = {"name": "TEST_BlockedPlayer", "kind": "player", "organization": "ALPHA", "date_of_admission": "2026-04-15",
                    "skill_level": "Beginner", "slot": "Morning"}
         # need fresh coach token? token still valid; gate uses DB lookup — should now be 403
         r2 = requests.post(f"{API}/people", headers=_hdr(coach_token), json=payload)
@@ -215,9 +218,9 @@ class TestCoachAttendance:
                        json={"coach_permissions": ["view_players", "add_players", "edit_players"]})
         # create two test players assigned to coach in Morning slot
         for tag in ("ATT_PRESENT", "ATT_ABSENT"):
-            payload = {"name": f"TEST_{tag}", "kind": "player", "organization": "ALPHA",
+            payload = {"name": f"TEST_{tag}", "kind": "player", "organization": "ALPHA", "date_of_admission": "2026-04-15",
                        "skill_level": "Beginner", "slot": "Morning",
-                       "assigned_coach_id": me["id"], "sport": "Cricket"}
+                       "centre": "Balua", "sport": "Cricket"}
             r = requests.post(f"{API}/people", headers=_hdr(admin_t), json=payload)
             assert r.status_code == 200, r.text
             if tag == "ATT_PRESENT":
@@ -249,7 +252,7 @@ class TestCoachAttendance:
         r2 = requests.get(f"{API}/coach/attendance", headers=_hdr(self.coach_t),
                           params={"date": date, "slot": "Morning"})
         assert r2.status_code == 200
-        recs = r2.json()
+        recs = r2.json()["data"]
         for rec in recs:
             if rec["person_id"] in (self.pid_present, self.pid_absent):
                 assert rec["status"] == "present"
@@ -258,7 +261,7 @@ class TestCoachAttendance:
         r = requests.get(f"{API}/coach/attendance", headers=_hdr(self.coach_t),
                          params={"date": "2030-01-15", "slot": "Morning"})
         assert r.status_code == 200
-        assert isinstance(r.json(), list)
+        assert isinstance(r.json()["data"], list)
 
     @classmethod
     def teardown_class(cls):

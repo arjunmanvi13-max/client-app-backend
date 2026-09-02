@@ -1,4 +1,5 @@
 """Player assessment — deep technical sub-parameters, 4-term layout, PDF export."""
+import re
 import io
 import uuid
 import zipfile
@@ -30,6 +31,7 @@ from assessment_schema import (
 )
 from core import db, get_current_user, get_perm, is_admin, is_super_admin, now_utc, format_date_display, format_datetime_display
 from routers.coach import _coach_visibility_filter, _coach_assignment_lists
+from starlette.concurrency import run_in_threadpool
 
 router = APIRouter(prefix="/coach-assessments", tags=["coach-assessments"])
 
@@ -220,7 +222,7 @@ async def _players_filtered(
     if player_type == "Daily":
         q["slot"] = session
     if player_search and player_search.strip():
-        q["name"] = {"$regex": player_search.strip(), "$options": "i"}
+        q["name"] = {"$regex": re.escape(player_search.strip()), "$options": "i"}
     players = await db.people.find(
         q,
         {"_id": 0, "id": 1, "name": 1, "age": 1, "skill_level": 1, "player_type": 1, "status": 1, "slot": 1, "date_of_admission": 1},
@@ -1151,7 +1153,7 @@ async def export_player_report_pdf(
     }
     year = assessment_year_from_date(payload.date)
     year_records = await _year_assessments_for_player(payload.entry.player_id, year, payload.sport)
-    pdf = _render_assessment_pdf(record, year_records)
+    pdf = await run_in_threadpool(_render_assessment_pdf, record, year_records)
     name = (person.get("name") or "player").replace(" ", "_")
     return Response(
         content=pdf,
@@ -1217,7 +1219,7 @@ async def export_assessment_pdf(
     if len(rows) == 1:
         row = await _enrich_record_for_pdf(rows[0], sport)
         year_records = await _year_assessments_for_player(row["player_id"], year, sport)
-        pdf = _render_assessment_pdf(row, year_records)
+        pdf = await run_in_threadpool(_render_assessment_pdf, row, year_records)
         name = (row.get("player_name") or "player").replace(" ", "_")
         return Response(
             content=pdf,
@@ -1230,7 +1232,7 @@ async def export_assessment_pdf(
         for row in rows:
             enriched = await _enrich_record_for_pdf(row, sport)
             year_records = await _year_assessments_for_player(enriched["player_id"], year, sport)
-            pdf = _render_assessment_pdf(enriched, year_records)
+            pdf = await run_in_threadpool(_render_assessment_pdf, enriched, year_records)
             name = (enriched.get("player_name") or enriched["player_id"]).replace(" ", "_")
             zf.writestr(f"assessment-{name}-{date}.pdf", pdf)
     zip_buf.seek(0)

@@ -1,0 +1,5 @@
+Full Name *,Employee ID,Organization *,Department,Designation,Gender,Date of Birth,Date of Joining,Primary Mobile *,Email,Address,Locality,City,Guardian Name,Guardian Phone,Centre,Status
+,Must be unique; leave blank to skip,"One of: PWS, ALPHA, BOTH",,Stored as the staff grouping label,"One of: Male, Female, Other",,,10-digit Indian mobile,,,,,,,ALPHA staff only,"One of: active, deactivated"
+Sanjay Prasad,SEED-EMP-001,PWS,Administration,Office Assistant,Male,,2026-04-01,9876500301,,,,Patna,,,,
+Rekha Devi,SEED-EMP-002,ALPHA,Grounds,Groundskeeper,Female,,2026-04-03,9876500302,,,,Patna,,,Balua,
+Imran Ali,SEED-EMP-003,BOTH,Transport,Driver,Male,,2026-04-05,9876500303,,,,Patna,,,,

@@ -21,13 +21,13 @@ CREDS = {
     "parent_pws": ("parent_pws@prarambhika.com", "Parent@123"),
 }
 LEGACY_CREDS = {
-    "super_admin": ("super@pws-alpha.com", "Super@123"),
-    "principal": ("admin@pws-alpha.com", "Admin@123"),
-    "admin": ("admin@pws-alpha.com", "Admin@123"),
-    "teacher": ("teacher@pws-alpha.com", "Teacher@123"),
-    "coach": ("coach@pws-alpha.com", "Coach@123"),
-    "warden": ("warden@pws-alpha.com", "Warden@123"),
-    "parent_pws": ("parent@pws-alpha.com", "Parent@123"),
+    "super_admin": ("super@prarambhika.com", "Super@123"),
+    "principal": ("admin@prarambhika.com", "Admin@123"),
+    "admin": ("admin@prarambhika.com", "Admin@123"),
+    "teacher": ("teacher@prarambhika.com", "Teacher@123"),
+    "coach": ("coach@prarambhika.com", "Coach@123"),
+    "warden": ("warden@prarambhika.com", "Warden@123"),
+    "parent_pws": ("parent_pws@prarambhika.com", "Parent@123"),
 }
 TOKENS = {}
 
@@ -158,13 +158,15 @@ class TestAuthBoundaries:
 class TestEntityIsolationBoundaries:
     def test_principal_cannot_list_alpha_players(self):
         r = requests.get(f"{API}/people", headers=_hdr("principal"), params={"kind": "player"}, timeout=15)
-        assert r.status_code == 200, r.text
-        assert r.json() == [], "PWS principal must not see ALPHA players"
+        assert r.status_code in (200, 403), r.text
+        if r.status_code == 200:
+            assert r.json() == [], "PWS principal must not see ALPHA players"
 
     def test_admin_cannot_list_pws_students(self):
         r = requests.get(f"{API}/people", headers=_hdr("admin"), params={"kind": "student"}, timeout=15)
-        assert r.status_code == 200, r.text
-        assert r.json() == [], "Sports admin must not see PWS students"
+        assert r.status_code in (200, 403), r.text
+        if r.status_code == 200:
+            assert r.json() == [], "Sports admin must not see PWS students"
 
     def test_principal_cannot_collect_alpha_fees(self):
         r = requests.get(f"{API}/fees", headers=_hdr("principal"), timeout=15)
@@ -175,8 +177,12 @@ class TestEntityIsolationBoundaries:
     def test_cross_entity_attendance_list_blocked(self):
         pr = requests.get(f"{API}/attendance", headers=_hdr("principal"), params={"kind": "player"}, timeout=15)
         ad = requests.get(f"{API}/attendance", headers=_hdr("admin"), params={"kind": "student"}, timeout=15)
-        assert pr.status_code == 200 and pr.json() == []
-        assert ad.status_code == 200 and ad.json() == []
+        assert pr.status_code in (200, 403), pr.text
+        assert ad.status_code in (200, 403), ad.text
+        if pr.status_code == 200:
+            assert pr.json() == []
+        if ad.status_code == 200:
+            assert ad.json() == []
 
 
 # ---------------------------------------------------------------------------
@@ -281,10 +287,22 @@ class TestTeacherAssignmentBoundaries:
 
     def test_teacher_marks_grid_unassigned_section_forbidden(self):
         ten_b = _unassigned_section()
+        listing = requests.get(
+            f"{API}/marks/assessments",
+            headers=_hdr("principal"),
+            params={"section_id": ten_b["id"]},
+            timeout=15,
+        )
+        if listing.status_code != 200:
+            pytest.skip("Assessments unavailable for the unassigned section")
+        rows = listing.json()
+        rows = rows if isinstance(rows, list) else rows.get("assessments", [])
+        if not rows:
+            pytest.skip("No assessment exists on an unassigned section")
         r = requests.get(
             f"{API}/marks/grid",
             headers=_hdr("teacher"),
-            params={"section_id": ten_b["id"]},
+            params={"assessment_id": rows[0]["id"]},
             timeout=15,
         )
         assert r.status_code == 403, r.text
@@ -391,8 +409,16 @@ class TestApprovalsAuditBoundaries:
         if r.status_code == 409:
             pytest.skip("Duplicate pending approval exists")
         data = r.json()
-        history = data.get("history") or []
-        assert any(h.get("action") == "submitted" for h in history), "Approval create must append submitted history"
+        try:
+            history = data.get("history") or []
+            assert any(h.get("action") == "submitted" for h in history), "Approval create must append submitted history"
+        finally:
+            requests.post(
+                f"{API}/approval-requests/{data['id']}/reject",
+                headers=_hdr("super_admin"),
+                json={"note": "security-test cleanup"},
+                timeout=15,
+            )
 
     def test_parent_cannot_list_approval_requests(self):
         r = requests.get(f"{API}/approval-requests", headers=_hdr("parent_pws"), timeout=15)

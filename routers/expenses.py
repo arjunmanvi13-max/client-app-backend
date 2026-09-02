@@ -115,7 +115,7 @@ async def _monthly_spent(head_id: str, expense_date: str) -> int:
         {"$match": {
             "expense_head_id": head_id,
             "status": {"$in": ["pending", "approved"]},
-            "expense_date": {"$regex": f"^{month}"},
+            "expense_date": {"$regex": f"^{re.escape(month)}"},
         }},
         {"$group": {"_id": None, "total": {"$sum": "$amount"}}},
     ]
@@ -131,7 +131,7 @@ async def _budget_alert(head: dict, expense_date: str, extra_amount: int = 0, ex
     q: Dict[str, Any] = {
         "expense_head_id": head["id"],
         "status": {"$in": ["pending", "approved"]},
-        "expense_date": {"$regex": f"^{month}"},
+        "expense_date": {"$regex": f"^{re.escape(month)}"},
     }
     if exclude_id:
         q["id"] = {"$ne": exclude_id}
@@ -153,7 +153,7 @@ async def _budget_alert(head: dict, expense_date: str, extra_amount: int = 0, ex
 async def _next_category_code(entity_id: str, main_category: str) -> str:
     abbr = re.sub(r"[^A-Za-z]", "", main_category)[:3].upper() or "GEN"
     prefix = f"{entity_id.upper()}-{abbr}-"
-    existing = await db.expense_heads.find({"category_code": {"$regex": f"^{prefix}"}}, {"category_code": 1}).to_list(500)
+    existing = await db.expense_heads.find({"category_code": {"$regex": f"^{re.escape(prefix)}"}}, {"category_code": 1}).to_list(500)
     nums = []
     for h in existing:
         m = re.search(r"-(\d+)$", h.get("category_code") or "")
@@ -728,13 +728,15 @@ async def approve_expense_entry(entry_id: str, user: dict = Depends(get_current_
         raise HTTPException(400, "Entry is not pending")
     log = _audit_entry("approved", user, "Expense approved")
     now = now_utc().isoformat()
-    await db.expense_entries.update_one({"id": entry_id}, {"$set": {
+    claimed = await db.expense_entries.update_one({"id": entry_id, "status": "pending"}, {"$set": {
         "status": "approved",
         "approved_at": now,
         "approved_by_id": user["id"],
         "approved_by_name": user["name"],
         "updated_at": now,
     }, "$push": {"audit_trail": log}})
+    if claimed.matched_count == 0:
+        raise HTTPException(409, "Entry is no longer pending")
     await _write_audit_log(entry_id, log)
     await send_notification(entry["created_by_id"], ntype="expense_approved", title="Expense approved",
                             message=f"{entry['request_id']} approved for ₹{entry['amount']:,}", ref_id=entry_id, ref_type="expense")
@@ -753,7 +755,7 @@ async def reject_expense_entry(entry_id: str, payload: RejectIn, user: dict = De
         raise HTTPException(400, "Entry is not pending")
     log = _audit_entry("rejected", user, payload.reason.strip())
     now = now_utc().isoformat()
-    await db.expense_entries.update_one({"id": entry_id}, {"$set": {
+    claimed = await db.expense_entries.update_one({"id": entry_id, "status": "pending"}, {"$set": {
         "status": "rejected",
         "rejection_reason": payload.reason.strip(),
         "rejected_at": now,
@@ -761,6 +763,8 @@ async def reject_expense_entry(entry_id: str, payload: RejectIn, user: dict = De
         "rejected_by_name": user["name"],
         "updated_at": now,
     }, "$push": {"audit_trail": log}})
+    if claimed.matched_count == 0:
+        raise HTTPException(409, "Entry is no longer pending")
     await _write_audit_log(entry_id, log)
     await send_notification(entry["created_by_id"], ntype="expense_rejected", title="Expense rejected",
                             message=f"{entry['request_id']}: {payload.reason.strip()}", ref_id=entry_id, ref_type="expense")
@@ -781,13 +785,15 @@ async def bulk_approve_expenses(payload: BulkApproveIn, user: dict = Depends(get
                 continue
             log = _audit_entry("approved", user, "Bulk approval")
             now = now_utc().isoformat()
-            await db.expense_entries.update_one({"id": eid}, {"$set": {
+            claimed = await db.expense_entries.update_one({"id": eid, "status": "pending"}, {"$set": {
                 "status": "approved",
                 "approved_at": now,
                 "approved_by_id": user["id"],
                 "approved_by_name": user["name"],
                 "updated_at": now,
             }, "$push": {"audit_trail": log}})
+            if claimed.matched_count == 0:
+                continue
             await _write_audit_log(eid, log)
             await send_notification(entry["created_by_id"], ntype="expense_approved", title="Expense approved",
                                     message=f"{entry['request_id']} approved", ref_id=eid, ref_type="expense")

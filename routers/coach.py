@@ -3,7 +3,7 @@ from collections import defaultdict
 from typing import Optional, List, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from core import db, get_current_user, now_utc, coach_can, is_admin
+from core import db, get_current_user, now_utc, coach_can, is_admin, today_ist
 
 router = APIRouter(prefix="/coach", tags=["coach"])
 
@@ -95,7 +95,7 @@ async def coach_dashboard(user: dict = Depends(get_current_user)):
         by_slot[p.get("slot") or "Unassigned"] += 1
         by_skill[p.get("skill_level") or "Unassigned"] += 1
 
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_ist()
     today_records = await db.attendance.find(
         {"date": today, "kind": "player", "marked_by": user["id"]},
         {"_id": 0},
@@ -184,7 +184,7 @@ async def coach_mark_attendance(payload: CoachAttendanceIn, user: dict = Depends
         if pid not in roster_ids:
             raise HTTPException(403, "Player is not in your assigned roster")
     absent_set = set(payload.absent_player_ids or [])
-    today_str = now_utc().strftime("%Y-%m-%d")
+    today_str = today_ist()
     sess = normalize_session(None, slot=payload.slot, kind="player")
     for p in players:
         status = "absent" if p["id"] in absent_set else "present"

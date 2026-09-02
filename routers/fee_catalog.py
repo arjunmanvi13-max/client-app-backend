@@ -391,35 +391,6 @@ async def create_fee_plan(payload: FeePlanIn, user: dict = Depends(get_current_u
     return await _hydrate_plan_items(doc)
 
 
-@router.get("/plans/{plan_id}")
-async def get_fee_plan(plan_id: str, user: dict = Depends(get_current_user)):
-    _assert_view(user)
-    doc = await db.fee_plans.find_one({"id": plan_id}, {"_id": 0})
-    if not doc:
-        raise HTTPException(404, "Fee plan not found")
-    return await _hydrate_plan_items(doc)
-
-
-@router.patch("/plans/{plan_id}")
-async def patch_fee_plan(plan_id: str, payload: FeePlanPatch, user: dict = Depends(get_current_user)):
-    _assert_manage(user)
-    doc = await db.fee_plans.find_one({"id": plan_id}, {"_id": 0})
-    if not doc:
-        raise HTTPException(404, "Fee plan not found")
-    patch = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
-    ts = now_utc().isoformat()
-    patch["updated_at"] = ts
-    patch["updated_by"] = user["id"]
-    if patch.get("is_default"):
-        await db.fee_plans.update_many(
-            {"entity_id": doc["entity_id"], "is_default": True, "id": {"$ne": plan_id}},
-            {"$set": {"is_default": False, "updated_at": ts}},
-        )
-    await db.fee_plans.update_one({"id": plan_id}, {"$set": patch})
-    updated = await db.fee_plans.find_one({"id": plan_id}, {"_id": 0})
-    return await _hydrate_plan_items(updated)
-
-
 @router.get("/plans/resolve")
 async def resolve_fee_plan(
     entity_id: Optional[Literal["alpha", "pws"]] = None,
@@ -468,3 +439,32 @@ async def resolve_fee_plan(
         "plan": plan,
         "rates": (plan or {}).get("rates") or {},
     }
+
+
+@router.get("/plans/{plan_id}")
+async def get_fee_plan(plan_id: str, user: dict = Depends(get_current_user)):
+    _assert_view(user)
+    doc = await db.fee_plans.find_one({"id": plan_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Fee plan not found")
+    return await _hydrate_plan_items(doc)
+
+
+@router.patch("/plans/{plan_id}")
+async def patch_fee_plan(plan_id: str, payload: FeePlanPatch, user: dict = Depends(get_current_user)):
+    _assert_manage(user)
+    doc = await db.fee_plans.find_one({"id": plan_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Fee plan not found")
+    patch = {k: v for k, v in payload.model_dump(exclude_unset=True).items() if v is not None}
+    ts = now_utc().isoformat()
+    patch["updated_at"] = ts
+    patch["updated_by"] = user["id"]
+    if patch.get("is_default"):
+        await db.fee_plans.update_many(
+            {"entity_id": doc["entity_id"], "is_default": True, "id": {"$ne": plan_id}},
+            {"$set": {"is_default": False, "updated_at": ts}},
+        )
+    await db.fee_plans.update_one({"id": plan_id}, {"$set": patch})
+    updated = await db.fee_plans.find_one({"id": plan_id}, {"_id": 0})
+    return await _hydrate_plan_items(updated)

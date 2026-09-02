@@ -4,7 +4,7 @@ from __future__ import annotations
 import uuid
 from typing import Optional, Literal
 
-from core import db, now_utc, resolve_user_institution, logger
+import core
 
 # Canonical MVP notification types
 NOTIFICATION_TYPES = (
@@ -86,7 +86,7 @@ def notification_filter_for_user(user: dict) -> dict:
         clauses.append({"audience_role": role, "user_id": {"$exists": False}})
     clauses.append({"audience_user": uid})
     base = {"$or": clauses}
-    inst = resolve_user_institution(user)
+    inst = core.resolve_user_institution(user)
     if inst == "BOTH":
         return base
     ent = "pws" if inst == "PWS" else "alpha"
@@ -103,7 +103,7 @@ def notification_filter_for_user(user: dict) -> dict:
 async def _deliver_in_app(doc: dict) -> None:
     """In-app channel — document is already persisted."""
     delivery = doc.setdefault("delivery", {})
-    delivery["in_app"] = {"status": "delivered", "at": now_utc().isoformat()}
+    delivery["in_app"] = {"status": "delivered", "at": core.now_utc().isoformat()}
 
 
 async def _enqueue_external(doc: dict) -> None:
@@ -119,12 +119,12 @@ async def _enqueue_external(doc: dict) -> None:
                 "title": doc.get("title"),
                 "message": doc.get("message"),
                 "status": "pending",
-                "created_at": now_utc().isoformat(),
+                "created_at": core.now_utc().isoformat(),
             }
             try:
-                await db.notification_outbox.insert_one(outbox)
+                await core.db.notification_outbox.insert_one(outbox)
             except Exception as exc:
-                logger.warning("Could not queue %s notification: %s", channel, exc)
+                core.logger.warning("Could not queue %s notification: %s", channel, exc)
 
 
 async def send_notification(
@@ -142,8 +142,8 @@ async def send_notification(
     """Create and deliver a notification to one user."""
     ctype = canonical_type(ntype)
     if dedupe_today and ref_id:
-        today = now_utc().strftime("%Y-%m-%d")
-        existing = await db.notifications.find_one({
+        today = core.today_ist()
+        existing = await core.db.notifications.find_one({
             "user_id": user_id,
             "type": {"$in": [ctype, ntype]},
             "ref_id": ref_id,
@@ -153,7 +153,7 @@ async def send_notification(
             return existing["id"]
 
     if dedupe_today is False and ref_id and ctype in ("invoice_overdue", "invoice_issued", "report_card_published"):
-        existing = await db.notifications.find_one({
+        existing = await core.db.notifications.find_one({
             "user_id": user_id,
             "type": ctype,
             "ref_id": ref_id,
@@ -175,7 +175,7 @@ async def send_notification(
         "message": message,
         "read": False,
         "read_at": None,
-        "created_at": now_utc().isoformat(),
+        "created_at": core.now_utc().isoformat(),
         "channels": channels,
         "delivery": {},
     }
@@ -186,7 +186,7 @@ async def send_notification(
     if entity_id:
         doc["entity_id"] = entity_id.lower()
 
-    await db.notifications.insert_one(doc)
+    await core.db.notifications.insert_one(doc)
     await _deliver_in_app(doc)
     await _enqueue_external(doc)
     return doc["id"]
@@ -203,14 +203,14 @@ async def send_to_role(
     entity_id: Optional[str] = None,
 ) -> int:
     """Fan out one notification per active user with the given role (entity-scoped)."""
-    users = await db.users.find(
+    users = await core.db.users.find(
         {"role": role, "status": {"$ne": "deactivated"}},
         {"id": 1, "organization": 1},
     ).to_list(500)
     count = 0
     for u in users:
         if entity_id:
-            inst = resolve_user_institution(u)
+            inst = core.resolve_user_institution(u)
             want = entity_id.lower()
             if inst == "PWS" and want not in ("pws", "both"):
                 continue
@@ -240,7 +240,7 @@ async def notify_person_parents(
     dedupe_today: bool = True,
 ) -> int:
     """Notify all linked parent accounts for a student/player."""
-    person = await db.people.find_one({"id": person_id}, {"_id": 0, "parent_user_ids": 1, "entities": 1, "organization": 1})
+    person = await core.db.people.find_one({"id": person_id}, {"_id": 0, "parent_user_ids": 1, "entities": 1, "organization": 1})
     if not person:
         return 0
     parent_ids = person.get("parent_user_ids") or []
@@ -270,22 +270,22 @@ async def notify_person_parents(
 
 async def unread_count_for_user(user: dict) -> int:
     filt = {**notification_filter_for_user(user), "read": False}
-    return await db.notifications.count_documents(filt)
+    return await core.db.notifications.count_documents(filt)
 
 
 async def mark_read(user: dict, notification_id: str) -> bool:
     filt = {**notification_filter_for_user(user), "id": notification_id}
-    result = await db.notifications.update_one(
+    result = await core.db.notifications.update_one(
         filt,
-        {"$set": {"read": True, "read_at": now_utc().isoformat()}},
+        {"$set": {"read": True, "read_at": core.now_utc().isoformat()}},
     )
     return result.matched_count > 0
 
 
 async def mark_all_read(user: dict) -> int:
     filt = {**notification_filter_for_user(user), "read": False}
-    result = await db.notifications.update_many(
+    result = await core.db.notifications.update_many(
         filt,
-        {"$set": {"read": True, "read_at": now_utc().isoformat()}},
+        {"$set": {"read": True, "read_at": core.now_utc().isoformat()}},
     )
     return result.modified_count
