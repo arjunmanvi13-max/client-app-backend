@@ -4,7 +4,7 @@ import uuid
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pymongo.errors import DuplicateKeyError
-from core import db, PersonCreate, PersonUpdate, get_current_user, assert_can_manage, assert_player_action, assert_perm, get_perm, is_admin, is_sports_admin, is_super_admin, is_teacher_user, now_utc, resolve_user_institution, person_entity_filter, derive_person_entities, assert_person_entity_access, coach_can, logger, merge_mongo_query, active_status_filter, today_ist
+from core import db, PersonCreate, PersonUpdate, get_current_user, assert_can_manage, assert_player_action, assert_perm, get_perm, is_admin, is_sports_admin, is_super_admin, is_teacher_user, now_utc, resolve_user_institution, person_entity_filter, derive_person_entities, assert_person_entity_access, coach_can, logger, merge_mongo_query, active_status_filter, today_ist, DAILY_ONLY_CENTRES
 from routers.academic import (
     resolve_section_group,
     assert_teacher_section_access,
@@ -328,8 +328,8 @@ async def get_person(person_id: str, user: dict = Depends(get_current_user)):
     return person
 
 def _validate_player_centre_type(centre: Optional[str], ptype: Optional[str]):
-    if centre == "Harding Park" and ptype and ptype != "Daily":
-        raise HTTPException(400, "Harding Park centre allows Daily players only")
+    if centre in DAILY_ONLY_CENTRES and ptype and ptype != "Daily":
+        raise HTTPException(400, f"{centre} centre allows Daily players only")
     # Balua allows Daily, Day Boarding, Hostel/Hostel Only, Boarding — all valid
 
 

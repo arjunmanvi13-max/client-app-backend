@@ -46,6 +46,10 @@ ROLES = [
 ]
 MANAGE_KINDS = {"student", "player", "teacher", "coach", "staff"}
 
+AlphaCentre = Literal["Balua", "Harding Park", "Defense Colony"]
+ALPHA_CENTRES: List[str] = ["Balua", "Harding Park", "Defense Colony"]
+DAILY_ONLY_CENTRES = frozenset({"Harding Park", "Defense Colony"})
+
 # All login emails MUST belong to this domain (org policy).
 ALLOWED_EMAIL_DOMAIN = "@prarambhika.com"
 
@@ -940,7 +944,7 @@ class UserCreate(BaseModel):
     coach_permissions: List[Literal["view_players", "add_players", "edit_players"]] = []
     coach_type: Optional[Literal["head", "assistant"]] = None
     assigned_sport: Optional[str] = None
-    assigned_centres: List[Literal["Balua", "Harding Park"]] = []
+    assigned_centres: List[AlphaCentre] = []
     assigned_sports: List[Literal["Cricket", "Football"]] = []
     linked_person_ids: List[str] = []
     permissions: Optional[dict] = None
@@ -1034,7 +1038,7 @@ class UserUpdate(BaseModel):
     coach_permissions: Optional[List[Literal["view_players", "add_players", "edit_players"]]] = None
     coach_type: Optional[Literal["head", "assistant"]] = None
     assigned_sport: Optional[str] = None
-    assigned_centres: Optional[List[Literal["Balua", "Harding Park"]]] = None
+    assigned_centres: Optional[List[AlphaCentre]] = None
     assigned_sports: Optional[List[Literal["Cricket", "Football"]]] = None
     linked_person_ids: Optional[List[str]] = None
     permissions: Optional[dict] = None
@@ -1080,7 +1084,7 @@ class PersonCreate(BaseModel):
     slot: Optional[Literal["Morning", "Evening", "Both"]] = None
     player_id: Optional[str] = None
     assigned_coach_id: Optional[str] = None  # deprecated — players are centre-based
-    centre: Optional[Literal["Balua", "Harding Park"]] = None
+    centre: Optional[AlphaCentre] = None
     player_type: Optional[Literal["Daily", "Day Boarding", "Hostel", "Hostel Only", "Boarding"]] = None
     date_of_admission: Optional[str] = None  # ISO date string YYYY-MM-DD
     status: Literal["active", "deactivated"] = "active"
@@ -1125,7 +1129,7 @@ class PersonUpdate(BaseModel):
     slot: Optional[Literal["Morning", "Evening", "Both"]] = None
     player_id: Optional[str] = None
     assigned_coach_id: Optional[str] = None  # deprecated
-    centre: Optional[Literal["Balua", "Harding Park"]] = None
+    centre: Optional[AlphaCentre] = None
     player_type: Optional[Literal["Daily", "Day Boarding", "Hostel", "Hostel Only", "Boarding"]] = None
     date_of_admission: Optional[str] = None
     status: Optional[Literal["active", "deactivated"]] = None

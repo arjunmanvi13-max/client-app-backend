@@ -217,7 +217,7 @@ async def _staff_query_for_user(user: dict, centre: Optional[str] = None, organi
 class StaffAttendanceIn(BaseModel):
     date: str
     organization: Optional[Literal["PWS", "ALPHA"]] = None
-    centre: Optional[Literal["Balua", "Harding Park"]] = None
+    centre: Optional[Literal["Balua", "Harding Park", "Defense Colony"]] = None
     absent_staff_ids: List[str] = []
     session: Optional[str] = "morning"
 

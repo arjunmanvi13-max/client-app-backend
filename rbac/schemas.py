@@ -59,7 +59,7 @@ class UserDocument(BaseModel):
 
     coach_type: Optional[Literal["head", "assistant"]] = None
     assigned_sport: Optional[str] = None
-    assigned_centres: list[Literal["Balua", "Harding Park"]] = Field(default_factory=list)
+    assigned_centres: list[Literal["Balua", "Harding Park", "Defense Colony"]] = Field(default_factory=list)
     assigned_sports: list[Literal["Cricket", "Football"]] = Field(default_factory=list)
 
     linked_person_ids: list[str] = Field(default_factory=list)
@@ -99,7 +99,7 @@ class PersonDocument(BaseModel):
     date_of_admission: Optional[str] = None
 
     # Player mapping (venue / sport / category)
-    centre: Optional[Literal["Balua", "Harding Park"]] = None
+    centre: Optional[Literal["Balua", "Harding Park", "Defense Colony"]] = None
     sport: Optional[Literal["Cricket", "Football"]] = None
     slot: Optional[Literal["Morning", "Evening", "Both"]] = None
     player_type: Optional[
@@ -161,7 +161,7 @@ class CoachSportAssignment(BaseModel):
     id: str
     coach_user_id: str
     sport: Literal["Cricket", "Football"]
-    centre: Literal["Balua", "Harding Park"]
+    centre: Literal["Balua", "Harding Park", "Defense Colony"]
     coach_type: Literal["head", "assistant"] = "assistant"
     is_active: bool = True
     created_at: str
@@ -193,7 +193,7 @@ class PlayerEnrollment(BaseModel):
 
     id: str
     player_person_id: str
-    centre: Literal["Balua", "Harding Park"]
+    centre: Literal["Balua", "Harding Park", "Defense Colony"]
     sport: Literal["Cricket", "Football"]
     player_type: Literal["Daily", "Day Boarding", "Hostel", "Hostel Only", "Boarding"]
     slot: Optional[Literal["Morning", "Evening", "Both"]] = None

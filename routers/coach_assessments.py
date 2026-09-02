@@ -41,7 +41,7 @@ AssessmentStage = Literal[
     "assessment_1", "assessment_2", "assessment_3", "assessment_4",
     "week_1_baseline", "week_4_progress", "week_8_12_final",
 ]
-Centre = Literal["Balua", "Harding Park"]
+Centre = Literal["Balua", "Harding Park", "Defense Colony"]
 Sport = Literal["Cricket", "Football"]
 Session = Literal["Morning", "Evening"]
 PlayerType = Literal["Daily", "Day Boarding", "Hostel", "Boarding"]
@@ -293,9 +293,9 @@ async def _batch_status(
 @router.get("/metadata")
 async def assessment_metadata(user: dict = Depends(get_current_user)):
     _assert_enter(user)
-    centres, sports = _coach_assignment_lists(user) if user.get("role") == "coach" else (["Balua", "Harding Park"], ["Cricket", "Football"])
+    centres, sports = _coach_assignment_lists(user) if user.get("role") == "coach" else (["Balua", "Harding Park", "Defense Colony"], ["Cricket", "Football"])
     if not centres:
-        centres = ["Balua", "Harding Park"]
+        centres = ["Balua", "Harding Park", "Defense Colony"]
     if not sports:
         sports = ["Cricket", "Football"]
     return {

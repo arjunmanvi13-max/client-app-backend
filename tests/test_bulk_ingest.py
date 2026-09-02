@@ -155,6 +155,12 @@ class TestValidation:
         assert body["status"] == "validation_failed"
         assert "Harding Park" in body["errors"][0]["errors"][0]
 
+    def test_defense_colony_daily_only(self, headers):
+        data = _player_sheet([_row("Defense Hostel", centre="Defense Colony", ptype="Hostel")])
+        body = _upload(headers, data).json()
+        assert body["status"] == "validation_failed"
+        assert "Defense Colony" in body["errors"][0]["errors"][0]
+
     def test_negative_money_is_rejected(self, headers):
         data = _player_sheet([_row("Neg Money", override="-500")])
         body = _upload(headers, data).json()

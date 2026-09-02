@@ -23,7 +23,8 @@ from pws_fee_structure import (
 
 SECTION_LETTERS = ("A", "B", "C", "D", "E", "F")
 GENDERS = ("Male", "Female", "Other")
-CENTRES = ("Balua", "Harding Park")
+CENTRES = ("Balua", "Harding Park", "Defense Colony")
+DAILY_ONLY_CENTRES = frozenset({"Harding Park", "Defense Colony"})
 SPORTS = ("Cricket", "Football")
 PLAYER_TYPES = ("Daily", "Day Boarding", "Hostel", "Boarding")
 SLOTS = ("Morning", "Evening", "Both")
@@ -305,7 +306,7 @@ PLAYER_SPEC = SheetSpec(
         _enum(CENTRES, label="Centre", target="centre", required=True, example="Balua"),
         _enum(SPORTS, label="Sport", target="sport", required=True, example="Cricket"),
         _enum(PLAYER_TYPES, label="Player Type", target="player_type", required=True,
-              example="Daily", note="Harding Park supports Daily only"),
+              example="Daily", note="Harding Park and Defense Colony support Daily only"),
         _enum(SLOTS, label="Slot", target="slot", required=True, example="Morning"),
         _enum(SKILL_LEVELS, label="Skill Level", target="skill_level", required=True,
               example="Beginner"),
@@ -338,6 +339,14 @@ PLAYER_SPEC = SheetSpec(
             "Centre": "Harding Park", "Sport": "Football", "Player Type": "Daily",
             "Slot": "Evening", "Skill Level": "Beginner",
             "Date of Admission": "2026-05-02", "Status": "active",
+        },
+        {
+            "Full Name": "Mohit Yadav", "Father's Name": "Rajesh Yadav",
+            "Guardian Phone": "9876543224", "Age": "14",
+            "Mobile Number": "9876543225", "Locality": "Defense Colony", "City": "Patna",
+            "Centre": "Defense Colony", "Sport": "Cricket", "Player Type": "Daily",
+            "Slot": "Morning", "Skill Level": "Beginner",
+            "Date of Admission": "2026-05-05", "Status": "active",
         },
     ],
 )
@@ -473,8 +482,9 @@ def _cross_field_errors(spec: SheetSpec, v: Dict[str, Any]) -> List[str]:
     """Rules that need more than one cell to evaluate."""
     errs: List[str] = []
     if spec.kind == "player":
-        if v.get("centre") == "Harding Park" and v.get("player_type") not in (None, "Daily"):
-            errs.append("Player Type: Harding Park supports Daily only")
+        centre = v.get("centre")
+        if centre in DAILY_ONLY_CENTRES and v.get("player_type") not in (None, "Daily"):
+            errs.append(f"Player Type: {centre} supports Daily only")
     if spec.kind == "student":
         if v.get("transport_enabled") and not v.get("transport_distance"):
             errs.append("Transport Distance: required when Transport Enabled is Yes")

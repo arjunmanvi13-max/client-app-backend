@@ -10,7 +10,7 @@ router = APIRouter(prefix="/coach", tags=["coach"])
 class CoachAttendanceIn(BaseModel):
     date: str
     slot: Literal["Morning", "Evening"]
-    centre: Optional[Literal["Balua", "Harding Park"]] = None
+    centre: Optional[Literal["Balua", "Harding Park", "Defense Colony"]] = None
     sport: Optional[Literal["Cricket", "Football"]] = None
     absent_player_ids: List[str] = []
 
@@ -126,7 +126,7 @@ async def coach_dashboard(user: dict = Depends(get_current_user)):
 
 @router.get("/players")
 async def coach_players(
-    centre: Optional[Literal["Balua", "Harding Park"]] = None,
+    centre: Optional[Literal["Balua", "Harding Park", "Defense Colony"]] = None,
     sport: Optional[Literal["Cricket", "Football"]] = None,
     slot: Optional[Literal["Morning", "Evening"]] = None,
     user: dict = Depends(get_current_user),
@@ -260,5 +260,6 @@ async def list_centres(_user: dict = Depends(get_current_user)):
         "centres": [
             {"name": "Balua", "sports": ["Cricket", "Football"], "player_types": ["Daily", "Hostel"]},
             {"name": "Harding Park", "sports": ["Cricket", "Football"], "player_types": ["Daily"]},
+            {"name": "Defense Colony", "sports": ["Cricket", "Football"], "player_types": ["Daily"]},
         ],
     }

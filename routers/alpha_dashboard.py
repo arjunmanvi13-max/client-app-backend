@@ -7,11 +7,10 @@ so the UI can render quickly without further calls.
 from datetime import timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
-from core import db, get_current_user, is_admin, now_utc, today_ist
+from core import db, get_current_user, is_admin, now_utc, today_ist, ALPHA_CENTRES
 
 router = APIRouter(prefix="/alpha-dashboard", tags=["alpha-dashboard"])
 
-ALPHA_CENTRES = ["Balua", "Harding Park"]
 ALPHA_SPORTS = ["Cricket", "Football"]
 
 

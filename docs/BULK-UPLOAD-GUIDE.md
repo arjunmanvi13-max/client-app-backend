@@ -59,8 +59,8 @@ The seed rows use mobile numbers in the `98765001xx`–`98765004xx` range and ID
 | Row | Error |
 |-----|-------|
 | 3 | `Mobile Number: must be a 10-digit Indian mobile number` |
-| 4 | `Centre: must be one of: Balua, Harding Park` |
-| 5 | `Player Type: Harding Park supports Daily only` (cross-field rule) |
+| 4 | `Centre: must be one of: Balua, Harding Park, Defense Colony` |
+| 5 | `Player Type: Harding Park supports Daily only` (cross-field rule; Defense Colony is the same) |
 | 6 | `Full Name: required` |
 | 7 | `Monthly Fee Override: must not be negative` |
 
@@ -93,11 +93,11 @@ Optional: Father's Name, Guardian Name, Guardian Phone, Age, Date of Birth, Emai
 Address, Locality, City, Transport Fee Monthly, Monthly/Registration/Hostel Fee Override,
 Boarding Class, Boarding Section, Status
 
-Allowed values — Centre: `Balua, Harding Park` · Sport: `Cricket, Football` ·
+Allowed values — Centre: `Balua, Harding Park, Defense Colony` · Sport: `Cricket, Football` ·
 Player Type: `Daily, Day Boarding, Hostel, Boarding` · Slot: `Morning, Evening, Both` ·
 Skill Level: `Beginner, Intermediate, Advanced`
 
-Cross-field rule: **Harding Park supports Daily only.**
+Cross-field rule: **Harding Park and Defense Colony support Daily only.**
 
 ### Staff — 17 columns
 
@@ -106,7 +106,7 @@ Required: **Full Name**, **Organization**, **Primary Mobile**
 Optional: Employee ID, Department, Designation, Gender, Date of Birth, Date of Joining,
 Email, Address, Locality, City, Guardian Name, Guardian Phone, Centre, Status
 
-Allowed values — Organization: `PWS, ALPHA, BOTH` · Centre: `Balua, Harding Park`
+Allowed values — Organization: `PWS, ALPHA, BOTH` · Centre: `Balua, Harding Park, Defense Colony`
 
 ### Teachers — 17 columns
 

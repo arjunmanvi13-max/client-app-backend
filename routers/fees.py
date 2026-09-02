@@ -2,7 +2,7 @@
 
 Auto-create Registration + first Monthly fee on player/student creation.
 Rate cards:
-- Daily players (Balua / Harding Park):
+- Daily players (Balua / Harding Park / Defense Colony):
     Cricket Reg ₹3000 (one-time), Monthly ₹2500
     Football Reg ₹3000 (one-time), Monthly ₹2000
 - Balua Hostel:
@@ -26,7 +26,7 @@ from core import (
     db, get_current_user, is_admin, is_super_admin, assert_perm, now_utc, get_perm, notify_role,
     resolve_user_institution, fee_entity_filter, derive_person_entities, person_entity_filter,
     is_sports_admin, format_date_display, format_datetime_display, format_month_display, logger,
-    assert_entity_access, today_ist, current_month_ist,
+    assert_entity_access, today_ist, current_month_ist, ALPHA_CENTRES,
 
     to_ist_day,
 )
@@ -750,7 +750,7 @@ async def fees_dashboard(
     show_alpha = entity_id != "pws" and inst in ("ALPHA", "BOTH")
     show_pws = entity_id != "alpha" and inst in ("PWS", "BOTH")
     if show_alpha:
-        centres = [centre] if centre else ["Balua", "Harding Park"]
+        centres = [centre] if centre else list(ALPHA_CENTRES)
         for c in centres:
             base = {"centre": c, "$or": [{"entity_id": "alpha"}, {"entity_id": {"$exists": False}}]}
             out["by_centre"][c] = await _aggregate_fee_bucket(base, today, this_month)

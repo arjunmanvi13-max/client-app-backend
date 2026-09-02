@@ -92,7 +92,7 @@ def _write_readme(wb, kinds: Sequence[str], *, include_samples: bool) -> None:
         ("• Mobile numbers must be 10 digits starting 6-9. +91 and leading 0 are stripped.", False),
         ("• Yes/No columns accept Yes, No, Y, N, true, false, 1, 0.", False),
         ("• Money columns must be whole rupees, not negative.", False),
-        ("• Harding Park supports Daily players only.", False),
+        ("• Harding Park and Defense Colony support Daily players only.", False),
         ("• A student with Transport Enabled must have a Transport Distance.", False),
         ("• Duplicate name + date of birth is rejected, both within the file and against existing records.", False),
         ("• Enrollment IDs (APL - N) are allocated by the server; there is no column for them.", False),

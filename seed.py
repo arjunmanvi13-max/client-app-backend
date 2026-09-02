@@ -526,6 +526,8 @@ async def _seed_people_and_links() -> None:
         ("Neha Sharma", "U-17 Football", "Football", "Balua", "Day Boarding", "Intermediate", "Evening"),
         ("Rahul Kumar", "U-19 Cricket", "Cricket", "Harding Park", "Daily", "Advanced", "Morning"),
         ("Simran Gupta", "U-19 Football", "Football", "Harding Park", "Daily", "Intermediate", "Evening"),
+        ("Mohit Yadav", "U-15 Cricket", "Cricket", "Defense Colony", "Daily", "Beginner", "Morning"),
+        ("Ananya Bose", "U-17 Football", "Football", "Defense Colony", "Daily", "Intermediate", "Evening"),
     ]
     six_months_ago = (now_utc() - timedelta(days=183)).strftime("%Y-%m-%d")
     for name, batch, sport, centre, ptype, skill, slot in sample_players:
@@ -574,6 +576,7 @@ async def _seed_people_and_links() -> None:
         ("Alok Singh", "Groundsman", "ALPHA", "Balua"),
         ("Neeraj Raj", "Kit Manager", "ALPHA", "Balua"),
         ("Sunita Das", "Physio", "ALPHA", "Harding Park"),
+        ("Pankaj Das", "Groundsman", "ALPHA", "Defense Colony"),
     ]
     for name, role_title, org, centre in sample_staff:
         existing = await db.people.find_one({"name": name, "kind": "staff"})
