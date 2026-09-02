@@ -19,7 +19,13 @@ from pydantic import BaseModel, EmailStr, field_validator, model_validator
 
 # ------------------ DB ------------------
 mongo_url = os.environ["MONGO_URL"]
-client = AsyncIOMotorClient(mongo_url)
+# Fail fast when Mongo is down so API clients (20–30s timeouts) get a real error
+# instead of hanging until the browser reports "Cannot reach the server".
+client = AsyncIOMotorClient(
+    mongo_url,
+    serverSelectionTimeoutMS=5000,
+    connectTimeoutMS=5000,
+)
 db = client[os.environ["DB_NAME"]]
 
 # ------------------ Logging ------------------

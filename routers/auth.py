@@ -12,10 +12,11 @@ Endpoints:
 - POST /auth/logout            — no-op (JWT is stateless).
 """
 from fastapi import APIRouter, Depends, HTTPException
+from pymongo.errors import PyMongoError
 from core import (
     db, LoginIn, ChangePasswordIn,
     create_token, verify_password, hash_password, public_user, get_current_user, now_utc,
-    validate_domain_email,
+    validate_domain_email, logger,
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -25,7 +26,11 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 @router.post("/login")
 async def login(payload: LoginIn):
     email = validate_domain_email(payload.email)
-    user = await db.users.find_one({"email": email}, {"_id": 0})
+    try:
+        user = await db.users.find_one({"email": email}, {"_id": 0})
+    except PyMongoError as exc:
+        logger.error("Login DB unavailable for %s: %s", email, exc)
+        raise HTTPException(503, "Login service temporarily unavailable. Please try again in a moment.")
     if not user or not user.get("password_hash") or not verify_password(payload.password, user["password_hash"]):
         raise HTTPException(401, "Invalid email or password")
     if user.get("status") == "deactivated":
