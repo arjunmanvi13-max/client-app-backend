@@ -2,9 +2,11 @@
 
 Auto-create Registration + first Monthly fee on player/student creation.
 Rate cards:
-- Daily players (Balua / Harding Park / Defense Colony):
+- Daily players (Balua / Harding Park):
     Cricket Reg ₹3000 (one-time), Monthly ₹2500
     Football Reg ₹3000 (one-time), Monthly ₹2000
+- Defense Colony Daily (all sports), by skill:
+    Registration ₹7500; Beginner/Intermediate monthly ₹3500; Advanced monthly ₹8000
 - Balua Hostel:
     Cricket Reg ₹20000, Monthly ₹12000
     Football Reg ₹20000, Monthly ₹15000
@@ -34,6 +36,7 @@ from rbac.guards import can_collect_fees_for
 
 logger = logging.getLogger("pws-alpha.fees")
 
+from alpha_centre_rules import apply_defense_colony_rates_for_person
 from fees_collection_utils import compute_player_fee_status
 from starlette.concurrency import run_in_threadpool
 from pymongo.errors import DuplicateKeyError
@@ -107,7 +110,7 @@ async def _rates_for_person(person: dict) -> dict:
         from routers.fee_catalog import resolve_rates_for_person
         catalog = await resolve_rates_for_person(person)
         if catalog:
-            return catalog
+            return apply_defense_colony_rates_for_person(person, catalog)
     except Exception:
         logger.exception(
             "Fee catalogue lookup failed for person %s — refusing to bill from the "
@@ -119,7 +122,7 @@ async def _rates_for_person(person: dict) -> dict:
         return get_pws_fee_rates(_pws_category(person))
     category = _canonical_category(person.get("player_type") or "Daily")
     sport = person.get("sport") or ""
-    return get_fee_rates(category, sport)
+    return apply_defense_colony_rates_for_person(person, get_fee_rates(category, sport))
 
 
 async def _recurring_amounts_async(person: dict) -> dict:
@@ -182,7 +185,7 @@ def _alpha_monthly_amounts(player: dict) -> tuple:
     """(monthly_amount, transport_amount) honouring per-player overrides."""
     sport = player.get("sport") or ""
     category = _canonical_category(player.get("player_type") or "Daily")
-    rates = get_fee_rates(category, sport)
+    rates = apply_defense_colony_rates_for_person(player, get_fee_rates(category, sport))
     if not rates:
         return 0, 0
     override = int(player.get("monthly_fee_override") or 0) or 0

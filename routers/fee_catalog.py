@@ -203,6 +203,8 @@ def _match_plan(plan: dict, person: dict, academic_year_id: Optional[str] = None
         return False
     if m.get("centre") and (person.get("centre") or "") != m["centre"]:
         return False
+    if m.get("skill_level") and (person.get("skill_level") or "") != m["skill_level"]:
+        return False
     if m.get("player_type"):
         pt = person.get("player_type") or _pws_category(person)
         want = m["player_type"]
@@ -218,6 +220,19 @@ def _match_plan(plan: dict, person: dict, academic_year_id: Optional[str] = None
     return True
 
 
+def _plan_match_specificity(plan: dict) -> int:
+    """Prefer plans that pin more match fields (e.g. centre + skill over sport-only)."""
+    m = plan.get("match") or {}
+    score = 0
+    for value in m.values():
+        if value is None or value == "":
+            continue
+        if isinstance(value, (list, dict, tuple, set)) and not value:
+            continue
+        score += 1
+    return score
+
+
 async def find_plan_for_person(person: dict, academic_year_id: Optional[str] = None) -> Optional[dict]:
     if person.get("fee_plan_id"):
         plan = await db.fee_plans.find_one({"id": person["fee_plan_id"], "active": True}, {"_id": 0})
@@ -226,9 +241,11 @@ async def find_plan_for_person(person: dict, academic_year_id: Optional[str] = N
     entity = _person_entity(person)
     plans = await db.fee_plans.find({"entity_id": entity, "active": True}, {"_id": 0}).to_list(200)
     defaults = [p for p in plans if p.get("is_default") and _match_plan(p, person, academic_year_id)]
+    defaults.sort(key=_plan_match_specificity, reverse=True)
     if defaults:
         return await _hydrate_plan_items(defaults[0])
     matched = [p for p in plans if _match_plan(p, person, academic_year_id)]
+    matched.sort(key=_plan_match_specificity, reverse=True)
     if matched:
         return await _hydrate_plan_items(matched[0])
     return None

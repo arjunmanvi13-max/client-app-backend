@@ -20,6 +20,12 @@ def test_fee_related_keys_changed_ignores_unchanged():
     assert fee_related_keys_changed(upd, target) == set()
 
 
+def test_fee_related_keys_changed_detects_skill_and_centre():
+    target = {"centre": "Balua", "skill_level": "Beginner", "sport": "Cricket"}
+    upd = {"centre": "Defense Colony", "skill_level": "Advanced"}
+    assert fee_related_keys_changed(upd, target) == {"centre", "skill_level"}
+
+
 def test_compute_amount_due_first_month_discount():
     person = {"date_of_admission": "2026-04-20"}
     fee = {"fee_type": "Monthly", "period_month": "2026-04", "amount": 2000, "amount_due": 1000}

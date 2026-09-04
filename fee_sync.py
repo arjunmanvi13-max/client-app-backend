@@ -21,6 +21,9 @@ FEE_PROFILE_KEYS = FEE_OVERRIDE_KEYS + (
     "pws_student_type",
     "player_type",
     "date_of_admission",
+    "centre",
+    "sport",
+    "skill_level",
 )
 
 

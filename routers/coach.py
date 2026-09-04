@@ -260,6 +260,13 @@ async def list_centres(_user: dict = Depends(get_current_user)):
         "centres": [
             {"name": "Balua", "sports": ["Cricket", "Football"], "player_types": ["Daily", "Hostel"]},
             {"name": "Harding Park", "sports": ["Cricket", "Football"], "player_types": ["Daily"]},
-            {"name": "Defense Colony", "sports": ["Cricket", "Football"], "player_types": ["Daily"]},
+            {
+                "name": "Defense Colony",
+                "sports": ["Cricket", "Football"],
+                "player_types": ["Daily"],
+                "registration": 7500,
+                "monthly_by_skill": {"Beginner": 3500, "Intermediate": 3500, "Advanced": 8000},
+                "advanced_slots": ["Morning"],
+            },
         ],
     }

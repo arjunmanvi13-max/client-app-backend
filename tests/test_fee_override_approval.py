@@ -42,6 +42,28 @@ async def test_player_default_fees_no_override():
 
 
 @pytest.mark.asyncio
+async def test_defense_colony_default_fees_by_skill():
+    beginner = {
+        "kind": "player",
+        "player_type": "Daily",
+        "sport": "Cricket",
+        "centre": "Defense Colony",
+        "skill_level": "Beginner",
+        "transport_fee_monthly": 0,
+    }
+    differs, defaults, custom = await analyze_fee_overrides(beginner)
+    assert differs is False
+    assert custom == {}
+    assert defaults.get("registration") == 7500
+    assert defaults.get("monthly") == 3500
+
+    advanced = {**beginner, "skill_level": "Advanced", "sport": "Football"}
+    _, adv_defaults, _ = await analyze_fee_overrides(advanced)
+    assert adv_defaults.get("registration") == 7500
+    assert adv_defaults.get("monthly") == 8000
+
+
+@pytest.mark.asyncio
 async def test_student_pws_override_detected():
     person = {
         "kind": "student",

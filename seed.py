@@ -1326,6 +1326,57 @@ async def _seed_fee_catalog():
             "created_by": "seed",
         })
 
+    from alpha_centre_rules import (
+        DEFENSE_COLONY_CENTRE,
+        DEFENSE_COLONY_MONTHLY_BY_SKILL,
+        DEFENSE_COLONY_REGISTRATION,
+    )
+    dc_reg_id = await _upsert_item(
+        "alpha", "alpha_reg_daily_defense_colony",
+        "ALPHA Registration (Daily · Defense Colony)",
+        "registration", DEFENSE_COLONY_REGISTRATION, "one_time",
+        {"categories": ["Daily"], "sports": [], "centres": [DEFENSE_COLONY_CENTRE], "grades": [], "section_ids": []},
+    )
+    for skill, monthly in DEFENSE_COLONY_MONTHLY_BY_SKILL.items():
+        skill_slug = skill.lower()
+        coach_id = await _upsert_item(
+            "alpha", f"alpha_coaching_daily_defense_colony_{skill_slug}",
+            f"ALPHA Coaching (Daily · Defense Colony · {skill})",
+            "coaching", monthly, "monthly",
+            {
+                "categories": ["Daily"],
+                "sports": [],
+                "centres": [DEFENSE_COLONY_CENTRE],
+                "grades": [],
+                "section_ids": [],
+            },
+        )
+        plan_name = f"ALPHA Daily — Defense Colony {skill}"
+        if await db.fee_plans.find_one({"entity_id": "alpha", "name": plan_name}):
+            continue
+        await db.fee_plans.insert_one({
+            "id": str(uuid.uuid4()),
+            "entity_id": "alpha",
+            "name": plan_name,
+            "academic_year_id": None,
+            "description": f"Defense Colony Daily {skill} (all sports)",
+            "items": [
+                {"catalogue_item_id": dc_reg_id},
+                {"catalogue_item_id": coach_id},
+            ],
+            "match": {
+                "kind": "player",
+                "player_type": "Daily",
+                "centre": DEFENSE_COLONY_CENTRE,
+                "skill_level": skill,
+            },
+            "is_default": True,
+            "active": True,
+            "created_at": ts,
+            "updated_at": ts,
+            "created_by": "seed",
+        })
+
     # Ad-hoc catalogue heads (inactive until admin enables)
     for entity, code, name, fee_type in [
         ("pws", "pws_uniform", "School Uniform", "uniform"),

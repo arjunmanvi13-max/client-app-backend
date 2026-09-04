@@ -4,6 +4,7 @@ import uuid
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pymongo.errors import DuplicateKeyError
+from alpha_centre_rules import defense_colony_advanced_slot_error
 from core import db, PersonCreate, PersonUpdate, get_current_user, assert_can_manage, assert_player_action, assert_perm, get_perm, is_admin, is_sports_admin, is_super_admin, is_teacher_user, now_utc, resolve_user_institution, person_entity_filter, derive_person_entities, assert_person_entity_access, coach_can, logger, merge_mongo_query, active_status_filter, today_ist, DAILY_ONLY_CENTRES
 from routers.academic import (
     resolve_section_group,
@@ -333,6 +334,18 @@ def _validate_player_centre_type(centre: Optional[str], ptype: Optional[str]):
     # Balua allows Daily, Day Boarding, Hostel/Hostel Only, Boarding — all valid
 
 
+def _validate_player_centre_rules(
+    centre: Optional[str],
+    ptype: Optional[str],
+    skill_level: Optional[str] = None,
+    slot: Optional[str] = None,
+):
+    _validate_player_centre_type(centre, ptype)
+    slot_err = defense_colony_advanced_slot_error(centre, skill_level, slot)
+    if slot_err:
+        raise HTTPException(400, slot_err)
+
+
 async def ensure_staff_user_account(person: dict) -> Optional[dict]:
     """Every STAFF person gets (and stays synced with) a login/user account so they
     automatically appear in the Permissions module for role & access assignment.
@@ -433,7 +446,9 @@ def _normalize_pws_student(doc: dict) -> dict:
 async def create_person(payload: PersonCreate, user: dict = Depends(get_current_user)):
     if payload.kind == "player":
         assert_player_action(user, "add")
-        _validate_player_centre_type(payload.centre, payload.player_type)
+        _validate_player_centre_rules(
+            payload.centre, payload.player_type, payload.skill_level, payload.slot,
+        )
         if not payload.date_of_admission:
             raise HTTPException(400, "Date of admission is required for players")
         if user.get("role") == "coach":
@@ -661,7 +676,12 @@ async def update_person(person_id: str, payload: PersonUpdate, user: dict = Depe
     upd["entities"] = derive_person_entities(merged)
     merged = {**target, **upd}
     if merged.get("kind") == "player":
-        _validate_player_centre_type(merged.get("centre"), merged.get("player_type"))
+        _validate_player_centre_rules(
+            merged.get("centre"),
+            merged.get("player_type"),
+            merged.get("skill_level"),
+            merged.get("slot"),
+        )
         upd.pop("assigned_coach_id", None)
     if fee_pending_approval:
         existing_pending = await db.approval_requests.find_one({

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from alpha_centre_rules import defense_colony_advanced_slot_error
 from pws_fee_structure import (
     FEE_CATEGORIES,
     PWS_CLASSES,
@@ -307,7 +308,8 @@ PLAYER_SPEC = SheetSpec(
         _enum(SPORTS, label="Sport", target="sport", required=True, example="Cricket"),
         _enum(PLAYER_TYPES, label="Player Type", target="player_type", required=True,
               example="Daily", note="Harding Park and Defense Colony support Daily only"),
-        _enum(SLOTS, label="Slot", target="slot", required=True, example="Morning"),
+        _enum(SLOTS, label="Slot", target="slot", required=True, example="Morning",
+              note="Defense Colony Advanced players must use Morning"),
         _enum(SKILL_LEVELS, label="Skill Level", target="skill_level", required=True,
               example="Beginner"),
         Column("Date of Admission", "date_of_admission", coerce_date, required=True,
@@ -485,6 +487,9 @@ def _cross_field_errors(spec: SheetSpec, v: Dict[str, Any]) -> List[str]:
         centre = v.get("centre")
         if centre in DAILY_ONLY_CENTRES and v.get("player_type") not in (None, "Daily"):
             errs.append(f"Player Type: {centre} supports Daily only")
+        slot_err = defense_colony_advanced_slot_error(centre, v.get("skill_level"), v.get("slot"))
+        if slot_err:
+            errs.append(f"Slot: {slot_err}")
     if spec.kind == "student":
         if v.get("transport_enabled") and not v.get("transport_distance"):
             errs.append("Transport Distance: required when Transport Enabled is Yes")
