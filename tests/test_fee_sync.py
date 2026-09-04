@@ -5,7 +5,7 @@ os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017/test")
 os.environ.setdefault("DB_NAME", "test")
 os.environ.setdefault("JWT_SECRET", "test-secret")
 
-from fee_sync import compute_amount_due, fee_related_keys_changed
+from fee_sync import compute_amount_due, fee_related_keys_changed, unpaid_fee_is_before_admission
 
 
 def test_fee_related_keys_changed_detects_override():
@@ -50,3 +50,21 @@ def test_compute_amount_due_applies_discount():
         "discount_applied": 500,
     }
     assert compute_amount_due(fee, 2000, person) == 1500
+
+
+def test_unpaid_fee_is_before_admission_month():
+    person_adm = "2026-06-10"
+    assert unpaid_fee_is_before_admission(
+        {"fee_type": "Monthly", "period_month": "2015-06"}, person_adm
+    )
+    assert unpaid_fee_is_before_admission(
+        {"fee_type": "Registration", "period_month": "2015-06", "due_date": "2015-06-05"},
+        person_adm,
+    )
+    assert not unpaid_fee_is_before_admission(
+        {"fee_type": "Monthly", "period_month": "2026-06"}, person_adm
+    )
+    assert not unpaid_fee_is_before_admission(
+        {"fee_type": "Monthly", "period_month": "2026-07"}, person_adm
+    )
+

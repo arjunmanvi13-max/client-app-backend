@@ -39,6 +39,91 @@ def _month_key(date_iso: str) -> str:
     return date_iso[:7]
 
 
+def unpaid_fee_is_before_admission(fee: dict, admission_iso: str) -> bool:
+    """True when an unpaid ledger row is dated before the admission month."""
+    start = (admission_iso or "")[:7]
+    period = (fee.get("period_month") or fee.get("due_date") or "")[:7]
+    return bool(start) and bool(period) and period < start
+
+
+async def drop_unpaid_fees_before_admission(
+    person: dict,
+    audit_buffer: Optional[List[dict]] = None,
+) -> int:
+    """Remove unpaid rate-card fees whose period is before date_of_admission.
+
+    Paid rows are left untouched. Unpaid Registration is moved to the admission
+    month when possible so the one-time charge still exists after a date correction.
+    """
+    person_id = person.get("id")
+    if not person_id:
+        return 0
+    admission = person.get("date_of_admission") or today_ist()
+    start_month = _month_key(admission)
+    if len(start_month) < 7:
+        return 0
+
+    changed = 0
+    buffer = audit_buffer if audit_buffer is not None else []
+
+    regs = await db.fees.find({
+        "player_id": person_id,
+        "fee_type": "Registration",
+        "status": {"$ne": "paid"},
+        "period_month": {"$lt": start_month},
+    }).to_list(50)
+    dest_reg = await db.fees.find_one({
+        "player_id": person_id,
+        "fee_type": "Registration",
+        "period_month": start_month,
+    })
+    for fee in regs:
+        if dest_reg:
+            await db.fees.delete_one({"id": fee["id"]})
+            action = "removed_before_admission"
+        else:
+            await db.fees.update_one({"id": fee["id"]}, {"$set": {
+                "period_month": start_month,
+                "due_date": admission if len(admission) >= 10 else f"{start_month}-01",
+                "fee_synced_at": now_utc().isoformat(),
+            }})
+            dest_reg = {**fee, "period_month": start_month}
+            action = "moved_to_admission_month"
+        buffer.append({
+            "fee_id": fee["id"],
+            "fee_type": "Registration",
+            "period_month": start_month if action == "moved_to_admission_month" else fee.get("period_month"),
+            "previous_amount": int(fee.get("amount") or 0),
+            "new_amount": int(fee.get("amount") or 0) if action == "moved_to_admission_month" else 0,
+            "previous_amount_due": int(fee.get("amount_due") or 0),
+            "new_amount_due": int(fee.get("amount_due") or 0) if action == "moved_to_admission_month" else 0,
+            "action": action,
+        })
+        changed += 1
+
+    cursor = db.fees.find({
+        "player_id": person_id,
+        "status": {"$ne": "paid"},
+        "period_month": {"$lt": start_month},
+        "is_adhoc": {"$ne": True},
+        "fee_type": {"$ne": "Registration"},
+    })
+    async for fee in cursor:
+        await db.fees.delete_one({"id": fee["id"]})
+        buffer.append({
+            "fee_id": fee["id"],
+            "fee_type": fee.get("fee_type"),
+            "period_month": fee.get("period_month"),
+            "previous_amount": int(fee.get("amount") or 0),
+            "new_amount": 0,
+            "previous_amount_due": int(fee.get("amount_due") or 0),
+            "new_amount_due": 0,
+            "action": "removed_before_admission",
+        })
+        changed += 1
+    return changed
+
+
 def _first_month_amount(monthly: int, admission_iso: str) -> int:
     from datetime import datetime
 
@@ -207,6 +292,7 @@ async def _reconcile_pws_student(person: dict, audit_buffer: List[dict]) -> dict
     from routers.pws_fees import sync_pws_fees_for_student
 
     profile = pws_student_profile_from_person(person)
+    dropped = await drop_unpaid_fees_before_admission(person, audit_buffer)
     schedule = build_pws_fee_schedule(
         profile["pws_class"],
         profile["date_of_admission"],
@@ -217,7 +303,7 @@ async def _reconcile_pws_student(person: dict, audit_buffer: List[dict]) -> dict
     schedule_map = {(item.fee_type, item.period_month): item.amount for item in schedule}
     updated = await _reconcile_from_schedule(person, schedule_map, audit_buffer)
     created = await sync_pws_fees_for_student(person)
-    return {"updated": updated, "inserted": len(created)}
+    return {"updated": updated, "inserted": len(created), "removed_before_admission": dropped}
 
 
 async def _reconcile_alpha_player(person: dict, audit_buffer: List[dict]) -> dict:
@@ -233,6 +319,7 @@ async def _reconcile_alpha_player(person: dict, audit_buffer: List[dict]) -> dic
     if not rates:
         return {"skipped": True, "reason": "no_rates"}
 
+    dropped = await drop_unpaid_fees_before_admission(person, audit_buffer)
     reg_amt = int(person.get("registration_fee_override") or 0) or int(rates.get("registration") or 0)
     reg_fee = await db.fees.find_one({
         "player_id": person["id"],
@@ -248,7 +335,7 @@ async def _reconcile_alpha_player(person: dict, audit_buffer: List[dict]) -> dic
 
     await auto_create_fees_for_player(person)
     created = await ensure_monthly_fees_up_to_current(person["id"])
-    return {"updated": updated, "inserted": len(created)}
+    return {"updated": updated, "inserted": len(created), "removed_before_admission": dropped}
 
 
 async def _reconcile_legacy_pws_student(person: dict, audit_buffer: List[dict]) -> dict:
@@ -262,6 +349,8 @@ async def _reconcile_legacy_pws_student(person: dict, audit_buffer: List[dict]) 
     rates = await _rates_for_person(person)
     if not rates:
         return {"skipped": True, "reason": "no_rates"}
+
+    dropped = await drop_unpaid_fees_before_admission(person, audit_buffer)
 
     reg_amt = int(person.get("registration_fee_override") or 0) or int(rates.get("registration") or 0)
     reg_fee = await db.fees.find_one({
@@ -278,7 +367,7 @@ async def _reconcile_legacy_pws_student(person: dict, audit_buffer: List[dict]) 
 
     await auto_create_fees_for_student(person)
     created = await ensure_monthly_fees_up_to_current(person["id"])
-    return {"updated": updated, "inserted": len(created)}
+    return {"updated": updated, "inserted": len(created), "removed_before_admission": dropped}
 
 
 async def _write_audit_logs(person_id: str, user: dict, entries: List[dict]) -> None:

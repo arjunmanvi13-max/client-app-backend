@@ -388,9 +388,13 @@ async def ensure_monthly_fees_up_to_current(player_id: str) -> List[dict]:
     if not player:
         return []
     if player.get("kind") == "student" and player.get("organization") == "PWS":
+        from fee_sync import drop_unpaid_fees_before_admission
+        await drop_unpaid_fees_before_admission(player)
         return await _ensure_pws_recurring_fees(player)
     if player.get("organization") != "ALPHA":
         return []
+    from fee_sync import drop_unpaid_fees_before_admission
+    await drop_unpaid_fees_before_admission(player)
     sport = player.get("sport") or ""
     category = _canonical_category(player.get("player_type") or "Daily")
     rates = await _rates_for_person(player)
@@ -852,7 +856,7 @@ async def get_player_dues(player_id: str, user: dict = Depends(get_current_user)
         raise HTTPException(400, "Fee dues are only available for PWS students")
     # Back-fill any missing recurring fees
     await ensure_monthly_fees_up_to_current(player_id)
-    fees = await db.fees.find({"player_id": player_id}, {"_id": 0}).sort("due_date", 1).to_list(500)
+    fees = await db.fees.find({"player_id": player_id}, {"_id": 0}).sort("due_date", 1).to_list(5000)
     current_month = current_month_ist()
     fy_start = f"{now_utc().year - (0 if now_utc().month >= 4 else 1)}-04"
 
@@ -952,7 +956,8 @@ async def collect_multi(payload: MultiCollectIn, user: dict = Depends(get_curren
         raise HTTPException(400, "Select at least one fee")
     if payload.payment_mode in ("Online", "UPI") and not (payload.reference_id or "").strip():
         raise HTTPException(400, "Reference ID required for Online/UPI payments")
-    fees = await db.fees.find({"id": {"$in": payload.fee_ids}}, {"_id": 0}).to_list(100) if payload.fee_ids else []
+    id_limit = max(len(payload.fee_ids), 1)
+    fees = await db.fees.find({"id": {"$in": payload.fee_ids}}, {"_id": 0}).to_list(id_limit) if payload.fee_ids else []
     if len(fees) != len(payload.fee_ids):
         raise HTTPException(404, "One or more fees not found")
     player_ids = {f["player_id"] for f in fees}
@@ -1057,12 +1062,12 @@ async def collect_multi(payload: MultiCollectIn, user: dict = Depends(get_curren
         raise HTTPException(409, "Some fees were already collected — reload and try again")
 
     # Reload the fees with the update applied so we can render the receipt
-    fees_after = await db.fees.find({"id": {"$in": all_ids}}, {"_id": 0}).sort("period_month", 1).to_list(100)
+    fees_after = await db.fees.find({"id": {"$in": all_ids}}, {"_id": 0}).sort("period_month", 1).to_list(max(len(all_ids), 1))
     total_amount = sum(int(f.get("amount_due") or 0) for f in fees_after)
     remaining = await db.fees.find(
         {"player_id": player_id, "status": {"$ne": "paid"}},
         {"_id": 0, "amount_due": 1},
-    ).to_list(500)
+    ).to_list(5000)
     balance_after = sum(int(f.get("amount_due") or 0) for f in remaining)
 
     section_label = None
@@ -1200,7 +1205,7 @@ async def receipt_pdf(batch_id: str):
     PUBLIC endpoint — the batch_id is an unguessable UUID that acts as the
     capability token, so parents can open a shared receipt link without login.
     """
-    fees = await db.fees.find({"batch_id": batch_id, "status": "paid"}, {"_id": 0}).sort("period_month", 1).to_list(100)
+    fees = await db.fees.find({"batch_id": batch_id, "status": "paid"}, {"_id": 0}).sort("period_month", 1).to_list(5000)
     if not fees:
         raise HTTPException(404, "Receipt not found")
     player = await db.people.find_one({"id": fees[0]["player_id"]}, {"_id": 0}) or {}
