@@ -123,6 +123,79 @@ def _subtitle(entity: str, filters: dict, user: dict) -> str:
     return " · ".join(parts)
 
 
+def _filter_filename_parts(filters: dict) -> List[str]:
+    """Stable, human-readable filter tokens for download names."""
+    order = (
+        ("centre", "Centre"),
+        ("sport", "Sport"),
+        ("player_type", "Category"),
+        ("grade", "Grade"),
+        ("pws_student_type", "Type"),
+        ("status", "Status"),
+        ("department", "Dept"),
+        ("designation", "Role"),
+        ("fee_collection_type", "FeeType"),
+        ("payment_method", "Pay"),
+        ("shift", "Shift"),
+        ("date_from", "From"),
+        ("date_to", "To"),
+    )
+    parts: List[str] = []
+    for key, label in order:
+        raw = filters.get(key)
+        if raw is None or raw == "":
+            continue
+        value = str(raw).strip()
+        if not value or value.lower() == "all":
+            continue
+        if key in ("date_from", "date_to"):
+            value = value[:10]
+        token = re.sub(r"[^A-Za-z0-9]+", "-", value).strip("-")
+        if token:
+            parts.append(f"{label}-{token}")
+    return parts
+
+
+def export_download_filename(
+    report_id: str,
+    title: str,
+    filters: Optional[dict] = None,
+    ext: str = "pdf",
+    as_of: Optional[str] = None,
+) -> str:
+    """Players_2026-09-06_Centre-HardingPark_Sport-Cricket.pdf"""
+    labels = {
+        "students": "Students",
+        "players": "Players",
+        "staff": "Staff",
+        "attendance-summary": "Attendance-Summary",
+        "attendance-detail": "Attendance-Detail",
+        "fee-collection": "Fee-Collection",
+        "outstanding-invoices": "Outstanding-Invoices",
+        "payment-receipts": "Payment-Receipts",
+        "marks-summary": "Marks-Summary",
+        "report-card-status": "Report-Card-Status",
+    }
+    kind = labels.get(report_id) or re.sub(r"[^A-Za-z0-9]+", "-", (title or report_id)).strip("-") or "Report"
+    day = (as_of or today_ist())[:10]
+    filt = dict(filters or {})
+    if report_id in ("students", "players", "staff", "outstanding-invoices", "marks-summary", "report-card-status"):
+        filt.pop("date_from", None)
+        filt.pop("date_to", None)
+    bits = [kind, day, *_filter_filename_parts(filt)]
+    stem = "_".join(bits)
+    safe_ext = (ext or "pdf").lstrip(".").lower()
+    return f"{stem}.{safe_ext}"
+
+
+def _amount_column(col: str) -> bool:
+    return bool(re.search(r"amount|total|paid|balance|collected", col or "", re.I))
+
+
+def _status_column(col: str) -> bool:
+    return (col or "").strip().lower() == "status"
+
+
 def export_excel(title: str, columns: List[str], rows: List[List[Any]], subtitle: str, filename: str) -> StreamingResponse:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
@@ -163,40 +236,185 @@ def export_excel(title: str, columns: List[str], rows: List[List[Any]], subtitle
 
 
 def export_pdf(title: str, columns: List[str], rows: List[List[Any]], subtitle: str, filename: str) -> StreamingResponse:
+    """Landscape table PDF matching the on-screen Reports data table."""
+    from reportlab.lib import colors as rl_colors
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
     from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import ParagraphStyle
     from reportlab.lib.units import mm
-    from reportlab.pdfgen import canvas as pdfcanvas
+    from reportlab.platypus import (
+        LongTable,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        TableStyle,
+    )
 
     buf = io.BytesIO()
-    c = pdfcanvas.Canvas(buf, pagesize=landscape(A4))
-    W, H = landscape(A4)
-    y = H - 20 * mm
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(20 * mm, y, title)
-    y -= 8 * mm
-    c.setFont("Helvetica", 8)
-    c.drawString(20 * mm, y, subtitle[:120])
-    y -= 10 * mm
-    col_w = (W - 40 * mm) / max(len(columns), 1)
-    c.setFont("Helvetica-Bold", 8)
-    for i, col in enumerate(columns):
-        c.drawString(20 * mm + i * col_w, y, str(col)[:18])
-    y -= 6 * mm
-    c.setFont("Helvetica", 7)
-    for row in rows[:500]:
-        if y < 15 * mm:
-            c.showPage()
-            y = H - 20 * mm
-            c.setFont("Helvetica", 7)
-        for i, val in enumerate(row):
-            c.drawString(20 * mm + i * col_w, y, str(val)[:22] if val is not None else "")
-        y -= 5 * mm
-    c.save()
-    buf.seek(0)
-    return StreamingResponse(
+    page = landscape(A4)
+    page_w, page_h = page
+    left = right = 12 * mm
+    usable = page_w - left - right
+
+    header_style = ParagraphStyle(
+        "ReportTh",
+        fontName="Helvetica-Bold",
+        fontSize=8,
+        leading=10,
+        textColor=rl_colors.HexColor("#475569"),
+        alignment=TA_CENTER,
+    )
+    header_left = ParagraphStyle("ReportThLeft", parent=header_style, alignment=TA_LEFT)
+    cell_left = ParagraphStyle(
+        "ReportTdLeft",
+        fontName="Helvetica",
+        fontSize=8,
+        leading=11,
+        textColor=rl_colors.HexColor("#0F172A"),
+        alignment=TA_LEFT,
+    )
+    cell_center = ParagraphStyle("ReportTdCenter", parent=cell_left, alignment=TA_CENTER)
+    cell_right = ParagraphStyle("ReportTdRight", parent=cell_left, alignment=TA_RIGHT, fontName="Helvetica")
+    cell_name = ParagraphStyle("ReportTdName", parent=cell_left, fontName="Helvetica-Bold")
+    status_active = ParagraphStyle(
+        "ReportStatusActive",
+        parent=cell_center,
+        textColor=rl_colors.HexColor("#047857"),
+        fontName="Helvetica-Bold",
+    )
+    status_idle = ParagraphStyle(
+        "ReportStatusIdle",
+        parent=cell_center,
+        textColor=rl_colors.HexColor("#64748B"),
+        fontName="Helvetica-Bold",
+    )
+    title_style = ParagraphStyle(
+        "ReportTitle",
+        fontName="Helvetica-Bold",
+        fontSize=14,
+        leading=18,
+        textColor=rl_colors.HexColor("#0F172A"),
+    )
+    sub_style = ParagraphStyle(
+        "ReportSub",
+        fontName="Helvetica",
+        fontSize=8,
+        leading=11,
+        textColor=rl_colors.HexColor("#64748B"),
+    )
+
+    n = max(len(columns), 1)
+    weights = []
+    for col in columns:
+        cl = (col or "").lower()
+        if "name" in cl:
+            weights.append(2.2)
+        elif cl in ("entity",):
+            weights.append(1.05)
+        elif "id" in cl or "admission" in cl or "player id" in cl:
+            weights.append(1.25)
+        elif _amount_column(col):
+            weights.append(1.2)
+        elif _status_column(col):
+            weights.append(1.0)
+        else:
+            weights.append(1.15)
+    total_w = sum(weights) or 1
+    col_widths = [usable * (w / total_w) for w in weights]
+
+    def _cell_style(col_idx: int, col_name: str, is_header: bool, raw: Any):
+        if is_header:
+            return header_left if col_idx <= 1 else header_style
+        if _status_column(col_name):
+            text = str(raw or "").strip().lower()
+            return status_active if text in ("active",) else status_idle
+        if _amount_column(col_name):
+            return cell_right
+        if col_idx == 1 or "name" in (col_name or "").lower():
+            return cell_name
+        if col_idx == 0:
+            return cell_left
+        return cell_center
+
+    def _as_para(col_idx: int, col_name: str, raw: Any, is_header: bool = False) -> Paragraph:
+        text = "" if raw is None else str(raw)
+        if is_header:
+            text = text.upper()
+        if not text:
+            text = "—"
+        # Escape XML for Paragraph
+        text = (
+            text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+        return Paragraph(text, _cell_style(col_idx, col_name, is_header, raw))
+
+    header_row = [_as_para(i, columns[i], columns[i], True) for i in range(n)]
+    data = [header_row]
+    for row in rows:
+        padded = list(row) + [""] * (n - len(row))
+        data.append([_as_para(i, columns[i], padded[i]) for i in range(n)])
+
+    table = LongTable(data, colWidths=col_widths, repeatRows=1)
+    style_cmds = [
+        ("BACKGROUND", (0, 0), (-1, 0), rl_colors.HexColor("#EEF3F9")),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("TEXTCOLOR", (0, 0), (-1, 0), rl_colors.HexColor("#475569")),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("GRID", (0, 0), (-1, -1), 0.4, rl_colors.HexColor("#E2E8F0")),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.8, rl_colors.HexColor("#E2E8F0")),
+        ("BOX", (0, 0), (-1, -1), 0.6, rl_colors.HexColor("#E2E8F0")),
+    ]
+    for ri in range(1, len(data)):
+        if ri % 2 == 0:
+            style_cmds.append(("BACKGROUND", (0, ri), (-1, ri), rl_colors.HexColor("#F8FAFC")))
+        for ci, col in enumerate(columns):
+            if _status_column(col):
+                raw = rows[ri - 1][ci] if ri - 1 < len(rows) and ci < len(rows[ri - 1]) else ""
+                text = str(raw or "").strip().lower()
+                if text == "active":
+                    style_cmds.append(("BACKGROUND", (ci, ri), (ci, ri), rl_colors.HexColor("#ECFDF5")))
+                elif text in ("deactivated", "inactive"):
+                    style_cmds.append(("BACKGROUND", (ci, ri), (ci, ri), rl_colors.HexColor("#F1F5F9")))
+    table.setStyle(TableStyle(style_cmds))
+
+    def _on_page(canvas, doc):
+        canvas.saveState()
+        canvas.setFillColor(rl_colors.HexColor("#64748B"))
+        canvas.setFont("Helvetica", 8)
+        canvas.drawString(left, 8 * mm, f"Page {doc.page}")
+        canvas.drawRightString(page_w - right, 8 * mm, filename)
+        canvas.restoreState()
+
+    doc = SimpleDocTemplate(
         buf,
+        pagesize=page,
+        leftMargin=left,
+        rightMargin=right,
+        topMargin=14 * mm,
+        bottomMargin=14 * mm,
+        title=title,
+    )
+    story = [
+        Paragraph(title or "Report", title_style),
+        Spacer(1, 3 * mm),
+        Paragraph(subtitle or "", sub_style),
+        Spacer(1, 5 * mm),
+        table,
+    ]
+    doc.build(story, onFirstPage=_on_page, onLaterPages=_on_page)
+    payload = buf.getvalue()
+    safe_name = filename.replace('"', "")
+    return StreamingResponse(
+        iter([payload]),
         media_type="application/pdf",
-        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
     )
 
 

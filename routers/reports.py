@@ -16,6 +16,7 @@ from reports_engine import (
     RUNNERS,
     export_excel,
     export_pdf,
+    export_download_filename,
     dict_rows_to_matrix,
     _subtitle,
 )
@@ -1063,8 +1064,7 @@ async def export_mvp_report(
     columns, matrix = dict_rows_to_matrix(meta)
     subtitle = _subtitle(inst, filters, user)
     fmt = (format or "xlsx").lower()
-    stamp = now_utc().strftime("%Y%m%d-%H%M")
-    fname = f"{report_id}-{stamp}.{fmt}"
+    fname = export_download_filename(report_id, meta.get("title") or report_id, filters, fmt)
     if fmt == "pdf":
         return await run_in_threadpool(export_pdf, meta["title"], columns, matrix, subtitle, fname)
     if fmt == "xlsx":
