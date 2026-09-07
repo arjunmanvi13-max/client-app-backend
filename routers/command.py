@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta
 from collections import defaultdict
 from fastapi import APIRouter, Depends, HTTPException
-from core import db, get_current_user, can_access_org_dashboard, now_utc, active_status_filter, merge_mongo_query, today_ist
+from core import db, get_current_user, can_access_org_dashboard, now_utc, active_status_filter, merge_mongo_query, today_ist, ALPHA_CENTRES
 
 router = APIRouter(tags=["command"])
 
@@ -105,6 +105,71 @@ async def _kpis(att: dict, tasks: dict) -> dict:
         "task_completion_pct": tasks["completion_pct"],
     }
 
+
+async def _attendance_by_campus(sports_only: bool) -> list:
+    """Live check-in counts per campus for today's attendance."""
+    today = today_ist()
+    campuses: dict = {}
+
+    def _ensure(name: str, organization: str, roster: int = 0):
+        if name not in campuses:
+            campuses[name] = {
+                "campus": name,
+                "organization": organization,
+                "roster": roster,
+                "present": 0,
+                "late": 0,
+                "absent": 0,
+                "leave": 0,
+                "checkins": 0,
+            }
+        elif roster:
+            campuses[name]["roster"] = roster
+        return campuses[name]
+
+    if not sports_only:
+        student_roster = await db.people.count_documents({"kind": "student", "status": {"$ne": "deactivated"}})
+        _ensure("PWS", "PWS", student_roster)
+
+    player_rows = await db.people.aggregate([
+        {"$match": {"kind": "player", "status": {"$ne": "deactivated"}}},
+        {"$group": {"_id": "$centre", "count": {"$sum": 1}}},
+    ]).to_list(20)
+    roster_by_centre = {(r["_id"] or "Unassigned"): r["count"] for r in player_rows}
+    for centre in ALPHA_CENTRES:
+        _ensure(centre, "ALPHA", roster_by_centre.get(centre, 0))
+    for centre, count in roster_by_centre.items():
+        if centre not in campuses:
+            _ensure(centre, "ALPHA", count)
+
+    att_rows = await db.attendance.aggregate([
+        {"$match": {"date": today, "kind": {"$in": ["student", "player"]}}},
+        {"$group": {"_id": {"kind": "$kind", "centre": "$centre", "status": "$status"}, "count": {"$sum": 1}}},
+    ]).to_list(200)
+    for r in att_rows:
+        kind = (r["_id"] or {}).get("kind")
+        status = (r["_id"] or {}).get("status") or "present"
+        n = r["count"]
+        if kind == "student":
+            if sports_only:
+                continue
+            bucket = _ensure("PWS", "PWS")
+        else:
+            centre = (r["_id"] or {}).get("centre") or "Unassigned"
+            bucket = _ensure(centre, "ALPHA")
+        if status in bucket:
+            bucket[status] += n
+        if status in ("present", "late"):
+            bucket["checkins"] += n
+
+    order = (["PWS"] if not sports_only else []) + list(ALPHA_CENTRES)
+    out = [campuses[name] for name in order if name in campuses]
+    for name, row in campuses.items():
+        if name not in order:
+            out.append(row)
+    return out
+
+
 def _require_admin(user: dict):
     if not can_access_org_dashboard(user):
         raise HTTPException(403, "Organisation dashboard access required")
@@ -121,6 +186,7 @@ async def command_center(user: dict = Depends(get_current_user)):
     tasks = await _task_snapshot()
     alerts = await _alerts()
     kpis = await _kpis(att, tasks)
+    attendance_by_campus = await _attendance_by_campus(sports_only)
 
     # Per-entity counts — Sports Admin sees ALPHA only
     if sports_only:
@@ -173,6 +239,7 @@ async def command_center(user: dict = Depends(get_current_user)):
         "tasks": tasks,
         "alerts": alerts,
         "kpis": kpis,
+        "attendance_by_campus": attendance_by_campus,
         "departments": departments,
     }
 

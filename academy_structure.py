@@ -9,6 +9,7 @@ from core import (
     person_entity_filter,
     fee_entity_filter,
     is_super_admin, today_ist,
+    ALPHA_CENTRES,
 )
 
 ACADEMY_CATEGORIES = ["Day Boarding", "Boarding", "Hostel", "Daily Players"]
@@ -281,6 +282,108 @@ async def _count_enrollment(inst: str) -> Dict[str, int]:
     return counts
 
 
+def _utilization(enrolled: int, capacity: int) -> Optional[float]:
+    if capacity <= 0:
+        return None
+    return round((enrolled / capacity) * 100, 1)
+
+
+async def _campus_sport_capacity(
+    inst: str,
+    pws_enrollment: List[dict],
+    alpha_baselines: Dict[str, Dict[str, int]],
+) -> List[dict]:
+    """Current enrollments vs capacity by campus and sport (PWS classes + ALPHA centres)."""
+    rows: List[dict] = []
+    if inst in ("PWS", "BOTH"):
+        for item in pws_enrollment:
+            enrolled = int(item.get("active") or 0)
+            capacity = int(item.get("baseline") or 0)
+            if enrolled <= 0 and capacity <= 0:
+                continue
+            rows.append({
+                "key": f"pws-{item.get('key')}",
+                "campus": "PWS",
+                "sport": item.get("label") or item.get("key"),
+                "enrolled": enrolled,
+                "capacity": capacity,
+                "utilization_pct": _utilization(enrolled, capacity),
+                "entity": "PWS",
+                "is_batch": False,
+            })
+
+    if inst in ("ALPHA", "BOTH"):
+        sport_labels = ["Cricket", "Football"]
+        enrolled_map = {c: {s: 0 for s in sport_labels} for c in ALPHA_CENTRES}
+        batch_map: Dict[tuple, int] = {}
+        base_q: dict = {"status": {"$ne": "deactivated"}, "kind": "player"}
+        ent_f = person_entity_filter("ALPHA")
+        if ent_f:
+            base_q = {"$and": [base_q, ent_f]}
+        players = await db.people.find(
+            base_q,
+            {"_id": 0, "centre": 1, "sport": 1, "player_type": 1},
+        ).to_list(5000)
+        for row in players:
+            centre = row.get("centre") or "Unassigned"
+            sport = row.get("sport") or "Unknown"
+            ptype = row.get("player_type") or "Unassigned"
+            if centre in enrolled_map and sport in enrolled_map[centre]:
+                enrolled_map[centre][sport] += 1
+            batch_key = (centre, sport, ptype)
+            batch_map[batch_key] = batch_map.get(batch_key, 0) + 1
+
+        sport_cap = {
+            "Cricket": sum(int((alpha_baselines.get(c) or {}).get("cricket") or 0) for c in ALPHA_CATEGORY_KEYS),
+            "Football": sum(int((alpha_baselines.get(c) or {}).get("football") or 0) for c in ALPHA_CATEGORY_KEYS),
+        }
+        for centre in ALPHA_CENTRES:
+            for sport in sport_labels:
+                enrolled = enrolled_map[centre][sport]
+                total_enrolled = sum(enrolled_map[c][sport] for c in ALPHA_CENTRES)
+                cap_total = sport_cap[sport]
+                if cap_total and total_enrolled:
+                    capacity = max(enrolled, round(cap_total * enrolled / total_enrolled)) if enrolled else round(cap_total / max(len(ALPHA_CENTRES), 1))
+                elif cap_total:
+                    capacity = round(cap_total / max(len(ALPHA_CENTRES), 1))
+                else:
+                    capacity = enrolled
+                if capacity < enrolled:
+                    capacity = enrolled
+                rows.append({
+                    "key": f"alpha-{centre}-{sport}".lower().replace(" ", "-"),
+                    "campus": centre,
+                    "sport": sport,
+                    "enrolled": enrolled,
+                    "capacity": capacity,
+                    "utilization_pct": _utilization(enrolled, capacity),
+                    "entity": "ALPHA",
+                    "is_batch": False,
+                })
+
+        for (centre, sport, ptype), count in batch_map.items():
+            cat_key = PLAYER_TYPE_TO_ALPHA_KEY.get(ptype)
+            sport_key = SPORT_DB_TO_KEY.get(sport)
+            if not cat_key or not sport_key:
+                continue
+            capacity = int((alpha_baselines.get(cat_key) or {}).get(sport_key) or 0)
+            util = _utilization(count, capacity)
+            if not capacity or util is None or util < 90:
+                continue
+            rows.append({
+                "key": f"batch-{centre}-{sport}-{ptype}".lower().replace(" ", "-"),
+                "campus": centre,
+                "sport": f"{sport} · {ptype}",
+                "enrolled": count,
+                "capacity": capacity,
+                "utilization_pct": util,
+                "entity": "ALPHA",
+                "is_batch": True,
+            })
+
+    return rows
+
+
 async def _fee_base_match(inst: str) -> dict:
     base: dict = {}
     ent_f = fee_entity_filter(inst)
@@ -541,6 +644,8 @@ async def build_super_admin_metrics(entity: Optional[str]) -> dict:
             "sports": sports,
         })
 
+    campus_capacity = await _campus_sport_capacity(inst, pws_enrollment, alpha_baselines)
+
     open_statuses = ["open", "in_progress", "blocked", "assigned", "delayed"]
     task_q: dict = {"status": {"$in": open_statuses}}
     task_ent = _task_entity_filter(inst)
@@ -558,6 +663,8 @@ async def build_super_admin_metrics(entity: Optional[str]) -> dict:
         "enrollment": enrollment,
         "pws_enrollment": pws_enrollment,
         "alpha_enrollment": alpha_enrollment,
+        "campus_capacity": [row for row in campus_capacity if not row.get("is_batch")],
+        "capacity_alerts": [row for row in campus_capacity if (row.get("utilization_pct") or 0) >= 90],
         "pws_total_baseline": sum(pws_baselines.values()),
         "pws_total_active": sum(pws_active.values()),
         "alpha_totals": {

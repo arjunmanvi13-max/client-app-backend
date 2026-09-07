@@ -60,6 +60,20 @@ class TestSuperAdminDashboard:
         assert r.status_code == 200
         assert r.json()["entity"] == "PWS"
 
+    def test_super_admin_metrics_capacity(self):
+        r = requests.get(
+            f"{API}/dashboard/super-admin-metrics",
+            headers=_hdr("super_admin"),
+            params={"entity": "both"},
+            timeout=20,
+        )
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert "campus_capacity" in d
+        assert "capacity_alerts" in d
+        assert isinstance(d["campus_capacity"], list)
+        assert isinstance(d["capacity_alerts"], list)
+
 
 class TestTeacherDashboard:
     def test_teacher_mvp(self):
