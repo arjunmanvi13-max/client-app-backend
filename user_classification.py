@@ -16,7 +16,97 @@ APPROVED_LOGIN_USER_TYPES: Tuple[str, ...] = (
     UserRole.ALPHA_COACH.value,
 )
 
+LOGIN_TIERS: Tuple[str, ...] = ("super_admin", "admin", "staff")
+
 PWS_ADMIN_DESIGNATIONS = ("PRINCIPAL", "VICE_PRINCIPAL", "ACADEMIC_HEAD", "EVENT_COORDINATOR")
+
+PWS_DESIGNATIONS = (
+    "PRINCIPAL",
+    "VICE_PRINCIPAL",
+    "ACADEMIC_HEAD",
+    "EVENT_COORDINATOR",
+    "PWS_OFFICE_STAFF",
+    "PWS_ACCOUNTS",
+    "HOD",
+    "TEACHER",
+)
+ALPHA_DESIGNATIONS = (
+    "WARDEN",
+    "COACH",
+    "ALPHA_ACCOUNTS",
+    "ALPHA_OFFICE_STAFF",
+)
+ALL_DESIGNATIONS = PWS_DESIGNATIONS + ALPHA_DESIGNATIONS
+
+DESIGNATION_LABELS = {
+    "PRINCIPAL": "Principal",
+    "VICE_PRINCIPAL": "Vice Principal",
+    "ACADEMIC_HEAD": "Academic Head",
+    "EVENT_COORDINATOR": "Event Co-ordinator",
+    "PWS_OFFICE_STAFF": "PWS Office Staff",
+    "PWS_ACCOUNTS": "PWS Accounts",
+    "HOD": "HOD",
+    "TEACHER": "Teacher",
+    "WARDEN": "Warden",
+    "COACH": "Coaches",
+    "ALPHA_ACCOUNTS": "ALPHA Accounts",
+    "ALPHA_OFFICE_STAFF": "ALPHA Office Staff",
+}
+
+# Designation → canonical user_type used by existing RBAC.
+DESIGNATION_TO_USER_TYPE: Dict[str, str] = {
+    "PRINCIPAL": UserRole.PWS_ADMIN.value,
+    "VICE_PRINCIPAL": UserRole.PWS_ADMIN.value,
+    "ACADEMIC_HEAD": UserRole.PWS_ADMIN.value,
+    "EVENT_COORDINATOR": UserRole.PWS_ADMIN.value,
+    "PWS_OFFICE_STAFF": UserRole.PWS_ADMIN.value,
+    "PWS_ACCOUNTS": UserRole.PWS_ACCOUNTS.value,
+    "HOD": UserRole.PWS_TEACHER.value,
+    "TEACHER": UserRole.PWS_TEACHER.value,
+    "WARDEN": UserRole.ALPHA_ADMIN.value,
+    "COACH": UserRole.ALPHA_COACH.value,
+    "ALPHA_ACCOUNTS": UserRole.ALPHA_ACCOUNTS.value,
+    "ALPHA_OFFICE_STAFF": UserRole.ALPHA_ADMIN.value,
+}
+
+USER_TYPE_TO_LOGIN_TIER: Dict[str, str] = {
+    UserRole.SUPER_ADMIN.value: "super_admin",
+    UserRole.PWS_ADMIN.value: "admin",
+    UserRole.ALPHA_ADMIN.value: "admin",
+    UserRole.PWS_ACCOUNTS.value: "admin",
+    UserRole.ALPHA_ACCOUNTS.value: "admin",
+    UserRole.PWS_TEACHER.value: "staff",
+    UserRole.ALPHA_COACH.value: "staff",
+}
+
+LOGIN_TIER_CATALOG: List[Dict[str, Any]] = [
+    {
+        "code": "super_admin",
+        "displayName": "Super Admin",
+        "description": "Full system control across PWS and ALPHA",
+        "manageDescription": "Platform owner — all modules, both entities",
+        "icon": "shield",
+        "tint": "#0F172A",
+    },
+    {
+        "code": "login_admin",
+        "tier": "admin",
+        "displayName": "Admin",
+        "description": "Entity administrators with designation-based access",
+        "manageDescription": "Assign entity, designation, and module access",
+        "icon": "briefcase",
+        "tint": "#1B3B6F",
+    },
+    {
+        "code": "login_staff",
+        "tier": "staff",
+        "displayName": "Staff",
+        "description": "Operational staff with scoped module access",
+        "manageDescription": "Assign entity, designation, and module access",
+        "icon": "users",
+        "tint": "#00A8E8",
+    },
+]
 
 USER_TYPE_CATALOG: List[Dict[str, Any]] = [
     {
@@ -137,7 +227,69 @@ DESIGNATION_TO_LEGACY_ROLE: Dict[str, str] = {
     "VICE_PRINCIPAL": "vice_principal",
     "ACADEMIC_HEAD": "pws_admin",
     "EVENT_COORDINATOR": "pws_admin",
+    "PWS_OFFICE_STAFF": "pws_admin",
+    "PWS_ACCOUNTS": "pws_accounts",
+    "HOD": "teacher",
+    "TEACHER": "teacher",
+    "WARDEN": "admin",
+    "COACH": "coach",
+    "ALPHA_ACCOUNTS": "alpha_accounts",
+    "ALPHA_OFFICE_STAFF": "admin",
 }
+
+
+def designations_for_entity(entity: Optional[str]) -> Tuple[str, ...]:
+    key = (entity or "").upper()
+    if key == "PWS":
+        return PWS_DESIGNATIONS
+    if key == "ALPHA":
+        return ALPHA_DESIGNATIONS
+    return ALL_DESIGNATIONS
+
+
+def user_type_from_designation(designation: Optional[str], *, login_tier: Optional[str] = None) -> str:
+    if login_tier == "super_admin":
+        return UserRole.SUPER_ADMIN.value
+    code = (designation or "").upper()
+    if code in DESIGNATION_TO_USER_TYPE:
+        return DESIGNATION_TO_USER_TYPE[code]
+    if login_tier == "staff":
+        return UserRole.PWS_TEACHER.value
+    return UserRole.PWS_ADMIN.value
+
+
+def resolve_login_tier(user: dict) -> str:
+    stored = (user.get("login_tier") or "").strip().lower()
+    if stored in LOGIN_TIERS:
+        return stored
+    ut = resolve_user_type(user)
+    if ut:
+        return USER_TYPE_TO_LOGIN_TIER.get(ut, "staff")
+    return "staff"
+
+
+def login_tier_list_query(tier: str) -> dict:
+    """Mongo filter for a login-tier list (Admin / Staff / Super Admin)."""
+    t = (tier or "").strip().lower()
+    if t in ("login_admin", "org_admin"):
+        t = "admin"
+    if t in ("login_staff",):
+        t = "staff"
+    if t == "super_admin":
+        return {
+            "$or": [
+                {"login_tier": "super_admin"},
+                {"user_type": UserRole.SUPER_ADMIN.value},
+                {"role": "super_admin"},
+            ]
+        }
+    types = [code for code, mapped in USER_TYPE_TO_LOGIN_TIER.items() if mapped == t]
+    return {
+        "$or": [
+            {"login_tier": t},
+            {"user_type": {"$in": types}},
+        ]
+    }
 
 
 def is_approved_login_user_type(user_type: Optional[str]) -> bool:
@@ -173,6 +325,10 @@ def organization_for_user_type(user_type: str) -> str:
 
 
 def legacy_role_for_user_type(user_type: str, designation: Optional[str] = None) -> str:
+    if designation:
+        mapped = DESIGNATION_TO_LEGACY_ROLE.get(designation.upper())
+        if mapped:
+            return mapped
     if user_type == UserRole.PWS_ADMIN.value and designation:
         return DESIGNATION_TO_LEGACY_ROLE.get(designation.upper(), "principal")
     return USER_TYPE_TO_LEGACY_ROLE.get(user_type, user_type)
@@ -198,24 +354,38 @@ def migrate_legacy_role(role: str) -> Tuple[Optional[str], Optional[str], bool]:
     return None, None, True
 
 
-def apply_user_type_fields(doc: dict, *, user_type: str, designation: Optional[str] = None) -> dict:
+def apply_user_type_fields(
+    doc: dict,
+    *,
+    user_type: str,
+    designation: Optional[str] = None,
+    entity_scope: Optional[str] = None,
+    login_tier: Optional[str] = None,
+) -> dict:
     if not is_approved_login_user_type(user_type):
         raise ValueError(f"Invalid user type: {user_type}")
     meta = CATALOG_BY_CODE[user_type]
     doc["user_type"] = user_type
-    doc["organization"] = organization_for_user_type(user_type)
-    doc["entity_scope"] = meta["entityScope"]
-    doc["role"] = legacy_role_for_user_type(user_type, designation)
-    if user_type == UserRole.PWS_ADMIN.value:
-        doc["designation"] = (designation or "PRINCIPAL").upper()
-        if doc["designation"] not in PWS_ADMIN_DESIGNATIONS:
-            raise ValueError(
-                "PWS Admin designation must be one of: "
-                + ", ".join(PWS_ADMIN_DESIGNATIONS)
-            )
-        doc["role"] = legacy_role_for_user_type(user_type, doc["designation"])
+    scope = (entity_scope or "").upper() if entity_scope else meta["entityScope"]
+    if scope not in ("PWS", "ALPHA", "BOTH"):
+        scope = meta["entityScope"]
+    doc["organization"] = scope
+    doc["entity_scope"] = scope
+    doc["login_tier"] = (login_tier or USER_TYPE_TO_LOGIN_TIER.get(user_type, "staff")).lower()
+    if doc["login_tier"] not in LOGIN_TIERS:
+        doc["login_tier"] = USER_TYPE_TO_LOGIN_TIER.get(user_type, "staff")
+    desig = (designation or "").upper() or None
+    if desig:
+        allowed = designations_for_entity(scope)
+        if desig not in allowed and desig not in ALL_DESIGNATIONS:
+            raise ValueError(f"Invalid designation for entity {scope}: {desig}")
+        doc["designation"] = desig
+    elif user_type == UserRole.PWS_ADMIN.value:
+        doc["designation"] = "PRINCIPAL"
+        desig = "PRINCIPAL"
     else:
         doc.pop("designation", None)
+    doc["role"] = legacy_role_for_user_type(user_type, desig)
     doc["requires_user_type_review"] = False
     if not doc.get("legacy_role"):
         doc["legacy_role"] = doc.get("role")
@@ -228,16 +398,27 @@ def validate_user_type_payload(
     designation: Optional[str] = None,
     assigned_sports: Optional[List[str]] = None,
     organization: Optional[str] = None,
+    entity_scope: Optional[str] = None,
 ) -> None:
     if not is_approved_login_user_type(user_type):
         raise ValueError(
             f"User type must be one of: {', '.join(APPROVED_LOGIN_USER_TYPES)}"
         )
-    expected_org = organization_for_user_type(user_type)
-    if organization and organization != expected_org:
-        raise ValueError(
-            f"User type {user_type} requires organization {expected_org}, not {organization}"
-        )
+    scope = (entity_scope or organization or "").upper() or None
+    if scope and scope not in ("PWS", "ALPHA", "BOTH"):
+        raise ValueError(f"Invalid entity: {scope}")
+    if designation:
+        allowed = designations_for_entity(scope or "BOTH")
+        if designation.upper() not in allowed:
+            raise ValueError(
+                f"Designation {designation} is not valid for entity {scope or 'BOTH'}"
+            )
+    if not entity_scope:
+        expected_org = organization_for_user_type(user_type)
+        if organization and organization != expected_org:
+            raise ValueError(
+                f"User type {user_type} requires organization {expected_org}, not {organization}"
+            )
     meta = CATALOG_BY_CODE[user_type]
     if meta.get("requiresAssignedSport"):
         sports = [s for s in (assigned_sports or []) if s]
@@ -247,3 +428,17 @@ def validate_user_type_payload(
 
 def catalog_export() -> List[Dict[str, Any]]:
     return list(USER_TYPE_CATALOG)
+
+
+def login_tier_catalog_export() -> Dict[str, Any]:
+    return {
+        "loginTiers": list(LOGIN_TIER_CATALOG),
+        "pwsDesignations": [{"code": c, "label": DESIGNATION_LABELS[c]} for c in PWS_DESIGNATIONS],
+        "alphaDesignations": [{"code": c, "label": DESIGNATION_LABELS[c]} for c in ALPHA_DESIGNATIONS],
+        "accessLevels": [
+            {"code": "none", "label": "No Access"},
+            {"code": "view", "label": "View Only"},
+            {"code": "edit", "label": "Edit / Manage"},
+            {"code": "admin", "label": "Full Admin"},
+        ],
+    }

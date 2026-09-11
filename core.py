@@ -877,6 +877,9 @@ def public_user(u: dict) -> dict:
         "sport_assignment_status": u.get("sport_assignment_status"),
         "user_type": u.get("user_type") or resolve_user_type_safe(u),
         "designation": u.get("designation"),
+        "login_tier": u.get("login_tier"),
+        "entity_scope": u.get("entity_scope") or u.get("organization"),
+        "module_access": u.get("module_access"),
         "teacher_designation": u.get("teacher_designation"),
         "date_of_joining": u.get("date_of_joining"),
         "date_of_birth": u.get("date_of_birth"),
@@ -931,11 +934,14 @@ class UserCreate(BaseModel):
     password: Optional[str] = None
     name: str
     mobile: Optional[str] = None
-    user_type: Literal[
+    user_type: Optional[Literal[
         "super_admin", "pws_admin", "alpha_admin",
         "pws_accounts", "alpha_accounts", "pws_teacher", "alpha_coach",
-    ]
-    designation: Optional[Literal["PRINCIPAL", "VICE_PRINCIPAL", "ACADEMIC_HEAD", "EVENT_COORDINATOR"]] = None
+    ]] = None
+    designation: Optional[str] = None
+    login_tier: Optional[Literal["super_admin", "admin", "staff"]] = None
+    entity_scope: Optional[Literal["PWS", "ALPHA", "BOTH"]] = None
+    module_access: Optional[dict] = None
     role: Optional[str] = None  # ignored — derived from user_type
     organization: Optional[Literal["PWS", "ALPHA", "BOTH"]] = None
     department: Optional[str] = None
@@ -1028,7 +1034,10 @@ class UserUpdate(BaseModel):
         "super_admin", "pws_admin", "alpha_admin",
         "pws_accounts", "alpha_accounts", "pws_teacher", "alpha_coach",
     ]] = None
-    designation: Optional[Literal["PRINCIPAL", "VICE_PRINCIPAL", "ACADEMIC_HEAD", "EVENT_COORDINATOR"]] = None
+    designation: Optional[str] = None
+    login_tier: Optional[Literal["super_admin", "admin", "staff"]] = None
+    entity_scope: Optional[Literal["PWS", "ALPHA", "BOTH"]] = None
+    module_access: Optional[dict] = None
     role: Optional[str] = None  # ignored when user_type supplied
     organization: Optional[Literal["PWS", "ALPHA", "BOTH"]] = None
     department: Optional[str] = None

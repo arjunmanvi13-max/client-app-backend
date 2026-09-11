@@ -94,6 +94,33 @@ def test_resolve_user_type_prefers_user_type_field():
     assert resolve_user_type({"role": "teacher", "user_type": UserRole.PWS_TEACHER.value}) == UserRole.PWS_TEACHER.value
 
 
+def test_login_tier_and_designation_mapping():
+    from user_classification import (
+        designations_for_entity, user_type_from_designation, USER_TYPE_TO_LOGIN_TIER,
+    )
+    pws = designations_for_entity("PWS")
+    assert "PRINCIPAL" in pws and "TEACHER" in pws and "COACH" not in pws
+    alpha = designations_for_entity("ALPHA")
+    assert "WARDEN" in alpha and "COACH" in alpha and "PRINCIPAL" not in alpha
+    both = designations_for_entity("BOTH")
+    assert "PRINCIPAL" in both and "COACH" in both
+    assert user_type_from_designation("ALPHA_ACCOUNTS") == UserRole.ALPHA_ACCOUNTS.value
+    assert user_type_from_designation("TEACHER") == UserRole.PWS_TEACHER.value
+    assert USER_TYPE_TO_LOGIN_TIER[UserRole.PWS_ADMIN.value] == "admin"
+    assert USER_TYPE_TO_LOGIN_TIER[UserRole.ALPHA_COACH.value] == "staff"
+
+
+def test_designation_preset_accounts_full_fees():
+    from designation_access import preset_for_designation, permissions_from_module_access
+    preset = preset_for_designation("ALPHA_ACCOUNTS")
+    assert preset["fees"] == "admin"
+    assert preset["directory"] == "view"
+    perms = permissions_from_module_access(preset)
+    assert perms["edit_fees"] is True
+    assert perms["view_students"] is True
+    assert perms["add_students"] is False
+
+
 def test_rejects_unknown_user_type():
     assert not is_approved_login_user_type("parent")
     assert not is_approved_login_user_type("admin")

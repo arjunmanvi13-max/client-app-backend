@@ -16,8 +16,11 @@ from user_classification import (
     apply_user_type_fields,
     catalog_export,
     legacy_role_for_user_type,
+    login_tier_catalog_export,
+    login_tier_list_query,
     migrate_legacy_role,
     resolve_user_type,
+    user_type_from_designation,
     validate_user_type_payload,
     CATALOG_BY_CODE,
 )
@@ -189,7 +192,14 @@ def _apply_coach_assignment_fields(doc: dict) -> None:
 @router.get("/classification")
 async def user_classification_catalog(_user: dict = Depends(get_current_user)):
     """Approved login user types — server-owned catalog for UI."""
-    return {"userTypes": catalog_export(), "approvedCodes": list(APPROVED_LOGIN_USER_TYPES)}
+    from designation_access import MODULE_MATRIX, DESIGNATION_PRESETS
+    return {
+        "userTypes": catalog_export(),
+        "approvedCodes": list(APPROVED_LOGIN_USER_TYPES),
+        **login_tier_catalog_export(),
+        "modules": MODULE_MATRIX,
+        "designationPresets": DESIGNATION_PRESETS,
+    }
 
 
 APPROVED_LEGACY_ROLES = (
@@ -201,13 +211,16 @@ APPROVED_LEGACY_ROLES = (
 @router.get("")
 async def list_users(
     user_type: Optional[str] = None,
+    login_tier: Optional[str] = None,
     role: Optional[str] = None,
     include_deactivated: bool = False,
     user: dict = Depends(get_current_user),
 ):
     """Login account listing — Super Admin, or PWS teacher provisioning when permitted."""
     assert_can_list_login_users(user, user_type, role=role)
-    if user_type:
+    if login_tier:
+        q = login_tier_list_query(login_tier)
+    elif user_type:
         if user_type not in APPROVED_LOGIN_USER_TYPES:
             raise HTTPException(400, f"Invalid user type: {user_type}")
         q = _user_type_list_query(user_type)
@@ -261,10 +274,15 @@ async def directory(
 
 @router.post("")
 async def create_user(payload: UserCreate, user: dict = Depends(get_current_user)):
-    assert_can_create_login_user(user, payload.user_type)
-    if payload.user_type == UserRole.SUPER_ADMIN.value:
+    user_type = payload.user_type
+    if payload.login_tier and payload.login_tier != "super_admin" and payload.designation:
+        user_type = user_type_from_designation(payload.designation, login_tier=payload.login_tier)
+    if not user_type:
+        raise HTTPException(400, "user_type or login_tier + designation is required")
+    assert_can_create_login_user(user, user_type)
+    if user_type == UserRole.SUPER_ADMIN.value:
         raise HTTPException(403, "Super Admin accounts are seed-managed and cannot be created via API")
-    if payload.user_type == UserRole.PWS_TEACHER.value:
+    if user_type == UserRole.PWS_TEACHER.value and not payload.login_tier:
         raise HTTPException(
             400,
             "PWS teachers must be created from Directory → Teachers. Use POST /users/directory-teachers.",
@@ -286,16 +304,18 @@ async def create_user(payload: UserCreate, user: dict = Depends(get_current_user
 
     try:
         validate_user_type_payload(
-            payload.user_type,
+            user_type,
             designation=payload.designation,
             assigned_sports=payload.assigned_sports,
-            organization=payload.organization,
+            organization=payload.organization or payload.entity_scope,
+            entity_scope=payload.entity_scope,
         )
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
 
-    legacy_role = legacy_role_for_user_type(payload.user_type, payload.designation)
+    legacy_role = legacy_role_for_user_type(user_type, payload.designation)
     rbac_overrides: dict = {}
+    module_access = payload.module_access
     if payload.permissions:
         perms = {k: bool(payload.permissions.get(k, False)) for k in PERMISSION_KEYS}
         granted_beyond_self = sorted(k for k, v in perms.items() if v and not get_perm(user, k))
@@ -304,14 +324,22 @@ async def create_user(payload: UserCreate, user: dict = Depends(get_current_user
                 403,
                 "You cannot grant permissions you do not hold: " + ", ".join(granted_beyond_self),
             )
+    elif module_access:
+        from designation_access import permissions_from_module_access
+        perms = permissions_from_module_access(module_access)
     else:
-        from category_permissions_service import permissions_for_user_type
-        cat_perms = await permissions_for_user_type(payload.user_type)
-        if cat_perms:
-            perms = {k: bool(cat_perms["permissions"].get(k, False)) for k in PERMISSION_KEYS}
-            rbac_overrides = dict(cat_perms.get("permissions_rbac") or {})
+        from designation_access import permissions_from_module_access, preset_for_designation
+        if payload.designation:
+            module_access = preset_for_designation(payload.designation)
+            perms = permissions_from_module_access(module_access)
         else:
-            perms = default_permissions(legacy_role, payload.coach_type)
+            from category_permissions_service import permissions_for_user_type
+            cat_perms = await permissions_for_user_type(user_type)
+            if cat_perms:
+                perms = {k: bool(cat_perms["permissions"].get(k, False)) for k in PERMISSION_KEYS}
+                rbac_overrides = dict(cat_perms.get("permissions_rbac") or {})
+            else:
+                perms = default_permissions(legacy_role, payload.coach_type)
 
     doc = {
         "id": str(uuid.uuid4()),
@@ -332,10 +360,17 @@ async def create_user(payload: UserCreate, user: dict = Depends(get_current_user
         "permissions": perms,
         "permissions_rbac": rbac_overrides,
         "legacy_role": legacy_role,
+        "module_access": module_access,
         "created_at": now_utc().isoformat(),
         "status": "active",
     }
-    apply_user_type_fields(doc, user_type=payload.user_type, designation=payload.designation)
+    apply_user_type_fields(
+        doc,
+        user_type=user_type,
+        designation=payload.designation,
+        entity_scope=payload.entity_scope or payload.organization,
+        login_tier=payload.login_tier,
+    )
     _apply_teacher_profile_fields(
         doc,
         {
@@ -343,7 +378,7 @@ async def create_user(payload: UserCreate, user: dict = Depends(get_current_user
             "address": payload.address,
             "teacher_designation": payload.teacher_designation,
         },
-        user_type=payload.user_type,
+        user_type=user_type,
     )
     _apply_coach_assignment_fields(doc)
     if doc.get("user_type") == UserRole.ALPHA_COACH.value:
@@ -446,7 +481,7 @@ async def update_user(user_id: str, payload: UserUpdate, user: dict = Depends(ge
         raise HTTPException(403, "You cannot change your own user type or designation")
 
     body = payload.dict(exclude_none=True)
-    is_type_change = "user_type" in body or "designation" in body
+    is_type_change = any(k in body for k in ("user_type", "designation", "login_tier", "entity_scope"))
     if is_type_change and not is_super_admin(user):
         raise HTTPException(403, "Only Super Admin can change user type")
 
@@ -494,12 +529,20 @@ async def update_user(user_id: str, payload: UserUpdate, user: dict = Depends(ge
             if v not in TEACHER_DESIGNATIONS:
                 raise HTTPException(400, "Teacher designation must be CLASS_TEACHER or TEACHER")
             upd[k] = v
-        elif k not in ("user_type", "designation", "role"):
+        elif k == "module_access":
+            from designation_access import permissions_from_module_access
+            upd["module_access"] = v
+            upd["permissions"] = permissions_from_module_access(v)
+        elif k not in ("user_type", "designation", "role", "login_tier", "entity_scope"):
             upd[k] = v
 
     merged = {**target, **upd, **body}
     new_user_type = body.get("user_type") or prev_user_type
     new_designation = body.get("designation", target.get("designation"))
+    new_login_tier = body.get("login_tier", target.get("login_tier"))
+    new_entity_scope = body.get("entity_scope") or body.get("organization") or target.get("entity_scope")
+    if new_login_tier and new_designation:
+        new_user_type = user_type_from_designation(new_designation, login_tier=new_login_tier)
     teacher_field_keys = (
         "date_of_joining", "date_of_birth", "address", "teacher_designation",
         "personal_email", "aadhaar_number", "qualification", "qualification_other",
@@ -511,18 +554,25 @@ async def update_user(user_id: str, payload: UserUpdate, user: dict = Depends(ge
             if k in merged:
                 upd[k] = merged[k]
 
-    if body.get("user_type") or body.get("designation"):
+    if body.get("user_type") or body.get("designation") or body.get("login_tier") or body.get("entity_scope"):
         try:
             validate_user_type_payload(
                 new_user_type,
                 designation=new_designation,
                 assigned_sports=merged.get("assigned_sports"),
-                organization=body.get("organization"),
+                organization=new_entity_scope,
+                entity_scope=new_entity_scope,
             )
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
-        apply_user_type_fields(merged, user_type=new_user_type, designation=new_designation)
-        for k in ("user_type", "designation", "role", "organization", "entity_scope", "requires_user_type_review"):
+        apply_user_type_fields(
+            merged,
+            user_type=new_user_type,
+            designation=new_designation,
+            entity_scope=new_entity_scope,
+            login_tier=new_login_tier,
+        )
+        for k in ("user_type", "designation", "role", "organization", "entity_scope", "login_tier", "requires_user_type_review"):
             upd[k] = merged[k]
 
     if not upd:
