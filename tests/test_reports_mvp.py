@@ -20,7 +20,7 @@ TOKENS = {}
 
 REPORT_IDS = [
     "students", "players", "staff", "attendance-summary", "attendance-detail",
-    "fee-collection", "outstanding-invoices", "payment-receipts",
+    "fee-collection", "fee-setup", "outstanding-invoices", "payment-receipts",
     "marks-summary", "report-card-status",
 ]
 
@@ -64,6 +64,7 @@ class TestReportsCatalog:
         assert "Combined" in data["entity_options"]
         assert "xlsx" in data["export_formats"]
         assert "pdf" in data["export_formats"]
+        assert "csv" in data["export_formats"]
 
 
 class TestReportsRun:

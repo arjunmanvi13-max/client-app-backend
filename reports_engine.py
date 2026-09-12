@@ -32,6 +32,7 @@ REPORT_IDS = (
     "attendance-summary",
     "attendance-detail",
     "fee-collection",
+    "fee-setup",
     "outstanding-invoices",
     "payment-receipts",
     "marks-summary",
@@ -112,10 +113,13 @@ def build_meta(
 
 def _subtitle(entity: str, filters: dict, user: dict) -> str:
     parts = [f"Entity: {ENTITY_LABELS.get(entity.lower(), entity)}"]
-    for k in ("date_from", "date_to", "grade", "section", "sport", "centre", "status", "player_type", "fee_collection_type", "payment_method", "pws_student_type"):
+    for k in ("date_from", "date_to", "grade", "section", "sport", "centre", "status", "player_type", "fee_collection_type", "payment_method", "pws_student_type", "person_ids"):
         v = filters.get(k)
         if v:
-            if k in ("date_from", "date_to"):
+            if k == "person_ids":
+                n = len([x for x in str(v).split(",") if x.strip()])
+                parts.append(f"people: {n}")
+            elif k in ("date_from", "date_to"):
                 parts.append(f"{k}: {format_date_display(v)}")
             else:
                 parts.append(f"{k}: {v}")
@@ -171,6 +175,7 @@ def export_download_filename(
         "attendance-summary": "Attendance-Summary",
         "attendance-detail": "Attendance-Detail",
         "fee-collection": "Fee-Collection",
+        "fee-setup": "Fee-Setup",
         "outstanding-invoices": "Outstanding-Invoices",
         "payment-receipts": "Payment-Receipts",
         "marks-summary": "Marks-Summary",
@@ -179,7 +184,7 @@ def export_download_filename(
     kind = labels.get(report_id) or re.sub(r"[^A-Za-z0-9]+", "-", (title or report_id)).strip("-") or "Report"
     day = (as_of or today_ist())[:10]
     filt = dict(filters or {})
-    if report_id in ("students", "players", "staff", "outstanding-invoices", "marks-summary", "report-card-status"):
+    if report_id in ("students", "players", "staff", "outstanding-invoices", "marks-summary", "report-card-status", "fee-setup"):
         filt.pop("date_from", None)
         filt.pop("date_to", None)
     bits = [kind, day, *_filter_filename_parts(filt)]
@@ -189,7 +194,7 @@ def export_download_filename(
 
 
 def _amount_column(col: str) -> bool:
-    return bool(re.search(r"amount|total|paid|balance|collected", col or "", re.I))
+    return bool(re.search(r"amount|total|paid|balance|collected|fee|payable|discount", col or "", re.I))
 
 
 def _status_column(col: str) -> bool:
@@ -231,6 +236,25 @@ def export_excel(title: str, columns: List[str], rows: List[List[Any]], subtitle
     return StreamingResponse(
         buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def export_csv(title: str, columns: List[str], rows: List[List[Any]], subtitle: str, filename: str) -> StreamingResponse:
+    import csv
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([title])
+    writer.writerow([subtitle])
+    writer.writerow([])
+    writer.writerow(columns)
+    for row in rows:
+        writer.writerow(row)
+    payload = buf.getvalue().encode("utf-8-sig")
+    return StreamingResponse(
+        iter([payload]),
+        media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
@@ -924,6 +948,9 @@ RUNNERS: Dict[str, Callable[..., Awaitable[dict]]] = {
     "report-card-status": run_report_card_status,
 }
 
+from reports_fee_setup import run_fee_setup  # noqa: E402
+RUNNERS["fee-setup"] = run_fee_setup
+
 
 REPORT_CATALOG = [
     {"id": "students", "title": "Student List", "category": "People", "filters": ["entity", "grade", "section", "status"]},
@@ -932,6 +959,7 @@ REPORT_CATALOG = [
     {"id": "attendance-summary", "title": "Attendance Summary", "category": "Attendance", "filters": ["entity", "date_range", "grade", "section", "centre", "sport"]},
     {"id": "attendance-detail", "title": "Attendance Detail", "category": "Attendance", "filters": ["entity", "date_range", "centre", "sport", "status"]},
     {"id": "fee-collection", "title": "Fee Collection", "category": "Finance", "filters": ["entity", "date_range", "centre", "sport"]},
+    {"id": "fee-setup", "title": "Fee Setup", "category": "Finance", "filters": ["entity", "centre", "status", "person_ids"]},
     {"id": "outstanding-invoices", "title": "Outstanding Invoices", "category": "Finance", "filters": ["entity", "status"]},
     {"id": "payment-receipts", "title": "Payment Receipts", "category": "Finance", "filters": ["entity", "date_range"]},
     {"id": "marks-summary", "title": "Marks Summary", "category": "Academic", "filters": ["entity", "section", "status"]},

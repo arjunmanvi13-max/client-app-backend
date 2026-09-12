@@ -16,6 +16,7 @@ from reports_engine import (
     RUNNERS,
     export_excel,
     export_pdf,
+    export_csv,
     export_download_filename,
     dict_rows_to_matrix,
     _subtitle,
@@ -990,6 +991,7 @@ def _report_filters(
     designation: Optional[str] = None,
     employment_type: Optional[str] = None,
     shift: Optional[str] = None,
+    person_ids: Optional[str] = None,
 ) -> dict:
     return {
         k: v for k, v in {
@@ -1009,6 +1011,7 @@ def _report_filters(
             "designation": designation,
             "employment_type": employment_type,
             "shift": shift,
+            "person_ids": person_ids,
         }.items() if v
     }
 
@@ -1024,15 +1027,40 @@ async def report_catalog(user: dict = Depends(get_current_user)):
     return {
         "reports": REPORT_CATALOG,
         "entity_options": entity_options,
-        "export_formats": ["xlsx", "pdf"],
+        "export_formats": ["xlsx", "pdf", "csv"],
     }
+
+
+@router.get("/fee-setup/people")
+async def fee_setup_people(
+    user: dict = Depends(get_current_user),
+    entity: Optional[str] = None,
+    centre: Optional[str] = None,
+    status: Optional[str] = None,
+):
+    """Names for the Fee Setup people multi-select."""
+    _access_reports(user)
+    inst = resolve_entity(user, entity)
+    if inst not in ("PWS", "ALPHA"):
+        inst = "PWS"
+    from reports_fee_setup import fee_setup_people_query
+    q = fee_setup_people_query(inst, centre, status)
+    people = await db.people.find(q, {"_id": 0, "id": 1, "name": 1, "admission_number": 1, "player_id": 1, "roll_number": 1}).sort("name", 1).to_list(4000)
+    return [
+        {
+            "id": p.get("id"),
+            "name": p.get("name") or "—",
+            "unique_id": p.get("admission_number") or p.get("player_id") or p.get("roll_number") or p.get("id"),
+        }
+        for p in people if p.get("id")
+    ]
 
 
 @router.get("/{report_id}/export")
 async def export_mvp_report(
     report_id: str,
     user: dict = Depends(get_current_user),
-    format: str = Query("xlsx", description="xlsx or pdf"),
+    format: str = Query("xlsx", description="xlsx, pdf, or csv"),
     entity: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
@@ -1049,27 +1077,44 @@ async def export_mvp_report(
     designation: Optional[str] = None,
     employment_type: Optional[str] = None,
     shift: Optional[str] = None,
+    person_ids: Optional[str] = None,
 ):
     _access_reports(user)
     runner = RUNNERS.get(report_id)
     if not runner:
         raise HTTPException(404, f"Unknown report: {report_id}")
     inst = resolve_entity(user, entity)
+    if report_id == "fee-setup" and inst not in ("PWS", "ALPHA"):
+        inst = "PWS"
     filters = _report_filters(
         entity, date_from, date_to, grade, section_id, sport, centre, status, player_type,
         fee_collection_type, payment_method, pws_student_type,
-        department, designation, employment_type, shift,
+        department, designation, employment_type, shift, person_ids,
     )
     meta = await runner(user, inst, filters)
     columns, matrix = dict_rows_to_matrix(meta)
-    subtitle = _subtitle(inst, filters, user)
+    if report_id == "fee-setup":
+        sm = meta.get("summary") or {}
+        matrix.append([
+            "TOTAL", "", "", "", "", "", "",
+            sm.get("total_base_fee", 0),
+            sm.get("total_registration", 0),
+            sm.get("total_discounts", 0),
+            sm.get("total_net_payable", 0),
+            "",
+        ])
+    generated = meta.get("generated_at") or ""
+    by = meta.get("generated_by") or user.get("name") or ""
+    subtitle = f"{_subtitle(inst, filters, user)} · Generated {generated} by {by}".strip(" ·")
     fmt = (format or "xlsx").lower()
     fname = export_download_filename(report_id, meta.get("title") or report_id, filters, fmt)
     if fmt == "pdf":
         return await run_in_threadpool(export_pdf, meta["title"], columns, matrix, subtitle, fname)
     if fmt == "xlsx":
         return await run_in_threadpool(export_excel, meta["title"], columns, matrix, subtitle, fname)
-    raise HTTPException(400, "format must be xlsx or pdf")
+    if fmt == "csv":
+        return await run_in_threadpool(export_csv, meta["title"], columns, matrix, subtitle, fname)
+    raise HTTPException(400, "format must be xlsx, pdf, or csv")
 
 
 @router.get("/{report_id}")
@@ -1092,6 +1137,7 @@ async def run_mvp_report(
     designation: Optional[str] = None,
     employment_type: Optional[str] = None,
     shift: Optional[str] = None,
+    person_ids: Optional[str] = None,
 ):
     """Run an MVP report and return JSON (table rows + summary)."""
     _access_reports(user)
@@ -1099,9 +1145,11 @@ async def run_mvp_report(
     if not runner:
         raise HTTPException(404, f"Unknown report: {report_id}")
     inst = resolve_entity(user, entity)
+    if report_id == "fee-setup" and inst not in ("PWS", "ALPHA"):
+        inst = "PWS"
     filters = _report_filters(
         entity, date_from, date_to, grade, section_id, sport, centre, status, player_type,
         fee_collection_type, payment_method, pws_student_type,
-        department, designation, employment_type, shift,
+        department, designation, employment_type, shift, person_ids,
     )
     return await runner(user, inst, filters)
