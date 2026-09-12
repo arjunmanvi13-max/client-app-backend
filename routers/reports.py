@@ -1094,15 +1094,9 @@ async def export_mvp_report(
     meta = await runner(user, inst, filters)
     columns, matrix = dict_rows_to_matrix(meta)
     if report_id == "fee-setup":
-        sm = meta.get("summary") or {}
-        matrix.append([
-            "TOTAL", "", "", "", "", "", "",
-            sm.get("total_base_fee", 0),
-            sm.get("total_registration", 0),
-            sm.get("total_discounts", 0),
-            sm.get("total_net_payable", 0),
-            "",
-        ])
+        from reports_fee_setup import fee_setup_total_row
+
+        matrix.append(fee_setup_total_row(meta))
     generated = meta.get("generated_at") or ""
     by = meta.get("generated_by") or user.get("name") or ""
     subtitle = f"{_subtitle(inst, filters, user)} · Generated {generated} by {by}".strip(" ·")
