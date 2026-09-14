@@ -58,3 +58,25 @@ def compute_player_fee_status(unpaid: List[dict], paid: List[dict], today: str, 
         "badge": badge,
         "has_current_month_due": has_current_month_due,
     }
+
+
+def expand_player_type_filter(raw: str | None) -> list[str] | None:
+    """Parse comma-separated ALPHA player types; Hostel aliases match both labels."""
+    if not raw or not str(raw).strip():
+        return None
+    types = [x.strip() for x in str(raw).split(",") if x.strip() and x.strip().lower() != "all"]
+    if not types:
+        return None
+    out: list[str] = []
+    for t in types:
+        if t in ("Hostel", "Hostel Only"):
+            out.extend(["Hostel", "Hostel Only"])
+        else:
+            out.append(t)
+    seen: set[str] = set()
+    unique: list[str] = []
+    for t in out:
+        if t not in seen:
+            seen.add(t)
+            unique.append(t)
+    return unique or None

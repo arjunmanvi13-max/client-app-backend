@@ -27,3 +27,12 @@ def test_compute_status_paid_ahead():
     paid = [{"period_month": "2026-05", "amount_due": 2500}]
     snap = compute_player_fee_status([], paid, "2026-04-15", "2026-04")
     assert snap["fee_status"] == "paid_ahead"
+
+
+def test_expand_player_type_filter_hostel_aliases():
+    from fees_collection_utils import expand_player_type_filter
+
+    assert expand_player_type_filter(None) is None
+    assert expand_player_type_filter("") is None
+    assert expand_player_type_filter("Daily,Day Boarding") == ["Daily", "Day Boarding"]
+    assert expand_player_type_filter("Hostel Only") == ["Hostel", "Hostel Only"]

@@ -37,7 +37,7 @@ from rbac.guards import can_collect_fees_for
 logger = logging.getLogger("pws-alpha.fees")
 
 from alpha_centre_rules import apply_defense_colony_rates_for_person
-from fees_collection_utils import compute_player_fee_status
+from fees_collection_utils import compute_player_fee_status, expand_player_type_filter
 from starlette.concurrency import run_in_threadpool
 from pymongo.errors import DuplicateKeyError
 
@@ -179,6 +179,13 @@ def _fy_end(month_key: str) -> str:
 def _next_month(month_key: str) -> str:
     y, m = int(month_key[:4]), int(month_key[5:7])
     return f"{y + 1}-01" if m == 12 else f"{y}-{m + 1:02d}"
+
+
+def _next_day_iso(day: str) -> str:
+    from datetime import datetime, timedelta
+
+    d = datetime.fromisoformat((day or "")[:10]).date()
+    return (d + timedelta(days=1)).isoformat()
 
 
 def _alpha_monthly_amounts(player: dict) -> tuple:
@@ -496,6 +503,7 @@ async def _collection_people_query(
     sport: Optional[str],
     group: Optional[str],
     search: Optional[str],
+    player_type: Optional[str] = None,
 ) -> dict:
     inst = resolve_user_institution(user, institution).upper()
     if inst not in ("PWS", "ALPHA"):
@@ -514,6 +522,9 @@ async def _collection_people_query(
             query["centre"] = centre
         if sport:
             query["sport"] = sport
+        types = expand_player_type_filter(player_type)
+        if types:
+            query["player_type"] = {"$in": types}
     if user.get("role") == "coach":
         from routers.coach import _coach_visibility_filter
         coach_q = _coach_visibility_filter(user)
@@ -549,6 +560,7 @@ async def fees_collection_summary(
     centre: Optional[str] = None,
     sport: Optional[str] = None,
     group: Optional[str] = None,
+    player_type: Optional[str] = None,
     status: Optional[Literal["all", "overdue", "due_this_month", "paid_ahead"]] = "all",
     sort: Optional[Literal["amount_due", "name", "overdue_days"]] = "amount_due",
     search: Optional[str] = None,
@@ -563,13 +575,15 @@ async def fees_collection_summary(
     if inst not in ("PWS", "ALPHA"):
         inst = "ALPHA"
 
-    pq = await _collection_people_query(user, institution, centre, sport, group, search)
+    pq = await _collection_people_query(user, institution, centre, sport, group, search, player_type)
     if pq.get("kind") == "__none__":
         empty = {
             "total_players": 0,
             "amount_due_today": 0,
             "overdue_count": 0,
             "collected_this_month": 0,
+            "collected_today": 0,
+            "recovery_rate_pct": 0,
         }
         return {
             "institution": inst,
@@ -594,6 +608,12 @@ async def fees_collection_summary(
         {"$group": {"_id": None, "total": {"$sum": "$amount_due"}}},
     ]).to_list(1)
     collected_this_month = int(collected_agg[0]["total"]) if collected_agg else 0
+    next_day = _next_day_iso(today)
+    collected_today_agg = await db.fees.aggregate([
+        {"$match": {**fee_match, "status": "paid", "paid_on": {"$gte": today, "$lt": next_day}}},
+        {"$group": {"_id": None, "total": {"$sum": "$amount_due"}}},
+    ]).to_list(1)
+    collected_today = int(collected_today_agg[0]["total"]) if collected_today_agg else 0
 
     enriched: List[dict] = []
     for person in people:
@@ -616,11 +636,16 @@ async def fees_collection_summary(
             **snap,
         })
 
+    pending_dues = sum(p["amount_due"] for p in enriched)
+    denom = collected_this_month + pending_dues
     kpis = {
         "total_players": len(enriched),
         "amount_due_today": sum(p["amount_due_today"] for p in enriched),
         "overdue_count": sum(1 for p in enriched if p["fee_status"] == "overdue"),
         "collected_this_month": collected_this_month,
+        "collected_today": collected_today,
+        "recovery_rate_pct": int(round(100 * collected_this_month / denom)) if denom else 0,
+        "total_pending": pending_dues,
     }
 
     filtered = enriched
