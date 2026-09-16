@@ -9,6 +9,7 @@ APPROVAL_CATEGORIES = (
     "fee_concession",
     "fee_override_admission",
     "refund",
+    "ground_booking_discount",
 )
 
 LEGACY_DEACTIVATION_TYPES = ("student_deactivation", "player_deactivation", "user_deactivation")
@@ -21,6 +22,7 @@ TYPE_TO_CATEGORY: Dict[str, str] = {
     "fee_concession": "fee_concession",
     "fee_override_admission": "fee_override_admission",
     "refund": "refund",
+    "ground_booking_discount": "ground_booking_discount",
 }
 
 CATEGORY_TYPES: Dict[str, tuple] = {
@@ -29,6 +31,7 @@ CATEGORY_TYPES: Dict[str, tuple] = {
     "fee_concession": ("fee_concession",),
     "fee_override_admission": ("fee_override_admission",),
     "refund": ("refund",),
+    "ground_booking_discount": ("ground_booking_discount",),
 }
 
 
@@ -173,6 +176,11 @@ def build_details(doc: dict) -> Dict[str, Any]:
     if cat == "user_deactivation":
         details.setdefault("person_id", payload.get("person_id"))
         details.setdefault("user_id", payload.get("user_id"))
+    if cat == "ground_booking_discount":
+        details.setdefault("discount_amount", payload.get("discount_amount"))
+        details.setdefault("list_ground_rate", payload.get("list_ground_rate"))
+        details.setdefault("quoted_ground_rate", payload.get("quoted_ground_rate"))
+        details.setdefault("booking_id", payload.get("booking_id"))
     return details
 
 

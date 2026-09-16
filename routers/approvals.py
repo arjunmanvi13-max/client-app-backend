@@ -35,6 +35,7 @@ APPROVAL_TYPES = (
     "fee_concession",
     "fee_override_admission",
     "refund",
+    "ground_booking_discount",
 )
 APPROVAL_STATUSES = ("pending", "approved", "rejected", "cancelled")
 
@@ -173,6 +174,7 @@ class ApprovalCreate(BaseModel):
         "fee_concession",
         "fee_override_admission",
         "refund",
+        "ground_booking_discount",
     ]
     subject_id: str
     reason: str = Field(min_length=3)
@@ -413,6 +415,11 @@ async def _apply_approval(req: dict) -> None:
             raise HTTPException(404, str(exc)) from exc
         return
 
+    if t == "ground_booking_discount":
+        from routers.ground_booking import apply_discount_decision
+        await apply_discount_decision(req, approved=True)
+        return
+
     raise HTTPException(400, "Cannot apply this approval type")
 
 
@@ -600,6 +607,20 @@ async def reject(req_id: str, payload: DecisionIn, user: dict = Depends(get_curr
         from fee_override_approval import apply_rejected_fee_override
         try:
             await apply_rejected_fee_override(req)
+        except Exception:
+            await db.approval_requests.update_one({"id": req_id}, {"$set": {
+                "status": "pending",
+                "decided_by_id": None,
+                "decided_by_name": None,
+                "decided_at": None,
+                "decision_note": None,
+            }, "$pull": {"history": {"id": entry["id"]}}})
+            raise
+
+    if req.get("type") == "ground_booking_discount":
+        from routers.ground_booking import apply_discount_decision
+        try:
+            await apply_discount_decision(req, approved=False)
         except Exception:
             await db.approval_requests.update_one({"id": req_id}, {"$set": {
                 "status": "pending",
