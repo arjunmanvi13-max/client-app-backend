@@ -17,6 +17,7 @@ from core import (
     is_pws_admin_user,
     is_super_admin,
     now_utc,
+    resolve_user_type_safe,
     today_ist,
     user_entity_scope,
 )
@@ -52,15 +53,26 @@ PWS_CLASSES = (
 )
 
 
+_ENQUIRY_USER_TYPES = (
+    "super_admin",
+    "pws_admin",
+    "alpha_admin",
+    "pws_accounts",
+    "alpha_accounts",
+)
+
+
 def can_manage_enquiries(user: dict) -> bool:
     if is_super_admin(user):
+        return True
+    ut = (resolve_user_type_safe(user) or user.get("user_type") or "").strip().lower()
+    if ut in _ENQUIRY_USER_TYPES:
         return True
     if is_pws_admin_user(user) or is_alpha_admin_user(user):
         return True
     if is_pws_accounts_user(user) or is_alpha_accounts_user(user):
         return True
-    role = (user.get("role") or "").lower()
-    return role in ("staff",)
+    return False
 
 
 def _assert_manage(user: dict) -> None:
