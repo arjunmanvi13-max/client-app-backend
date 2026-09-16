@@ -10,6 +10,7 @@ APPROVAL_CATEGORIES = (
     "fee_override_admission",
     "refund",
     "ground_booking_discount",
+    "enquiry_close",
 )
 
 LEGACY_DEACTIVATION_TYPES = ("student_deactivation", "player_deactivation", "user_deactivation")
@@ -23,6 +24,7 @@ TYPE_TO_CATEGORY: Dict[str, str] = {
     "fee_override_admission": "fee_override_admission",
     "refund": "refund",
     "ground_booking_discount": "ground_booking_discount",
+    "enquiry_close": "enquiry_close",
 }
 
 CATEGORY_TYPES: Dict[str, tuple] = {
@@ -32,6 +34,7 @@ CATEGORY_TYPES: Dict[str, tuple] = {
     "fee_override_admission": ("fee_override_admission",),
     "refund": ("refund",),
     "ground_booking_discount": ("ground_booking_discount",),
+    "enquiry_close": ("enquiry_close",),
 }
 
 

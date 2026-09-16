@@ -9,6 +9,7 @@ from core import (
     get_perm,
     is_super_admin,
     is_admin,
+    is_pws_admin_user,
     now_utc,
     assert_entity_access,
     user_entity_scope,
@@ -36,6 +37,7 @@ APPROVAL_TYPES = (
     "fee_override_admission",
     "refund",
     "ground_booking_discount",
+    "enquiry_close",
 )
 APPROVAL_STATUSES = ("pending", "approved", "rejected", "cancelled")
 
@@ -52,10 +54,12 @@ def can_approve_deactivation(user: dict) -> bool:
 def _assert_can_decide_type(user: dict, req: dict) -> None:
     if req.get("type") in LEGACY_DEACTIVATION_TYPES and not can_approve_deactivation(user):
         raise HTTPException(403, "Deactivation approvals require the approve_deactivation permission")
+    if req.get("type") == "enquiry_close" and not (is_super_admin(user) or is_pws_admin_user(user)):
+        raise HTTPException(403, "Closing an enquiry requires Principal or Super Admin approval")
 
 
 def _can_view_approvals(user: dict) -> bool:
-    return _can_approve(user) or is_admin(user) or get_perm(user, "edit_players") or get_perm(user, "edit_students") or get_perm(user, "edit_fees")
+    return _can_approve(user) or is_admin(user) or is_pws_admin_user(user) or get_perm(user, "edit_players") or get_perm(user, "edit_students") or get_perm(user, "edit_fees")
 
 
 def _assert_can_decide_entity(user: dict, req: dict) -> None:
@@ -420,6 +424,11 @@ async def _apply_approval(req: dict) -> None:
         await apply_discount_decision(req, approved=True)
         return
 
+    if t == "enquiry_close":
+        from routers.enquiry import apply_enquiry_close_decision
+        await apply_enquiry_close_decision(req, approved=True)
+        return
+
     raise HTTPException(400, "Cannot apply this approval type")
 
 
@@ -524,11 +533,14 @@ def _completion_notification(req: dict, *, approved: bool, decider_name: str) ->
 
 @router.post("/{req_id}/approve")
 async def approve(req_id: str, payload: DecisionIn, user: dict = Depends(get_current_user)):
-    if not _can_approve(user):
-        raise HTTPException(403, "Approval permission required")
     req = await db.approval_requests.find_one({"id": req_id})
     if not req:
         raise HTTPException(404, "Approval request not found")
+    if req.get("type") == "enquiry_close":
+        if not (is_super_admin(user) or is_pws_admin_user(user)):
+            raise HTTPException(403, "Closing an enquiry requires Principal or Super Admin approval")
+    elif not _can_approve(user):
+        raise HTTPException(403, "Approval permission required")
     if req["status"] != "pending":
         raise HTTPException(400, f"Request already {req['status']}")
     _assert_can_decide_entity(user, req)
@@ -582,11 +594,14 @@ async def approve(req_id: str, payload: DecisionIn, user: dict = Depends(get_cur
 
 @router.post("/{req_id}/reject")
 async def reject(req_id: str, payload: DecisionIn, user: dict = Depends(get_current_user)):
-    if not _can_approve(user):
-        raise HTTPException(403, "Approval permission required")
     req = await db.approval_requests.find_one({"id": req_id})
     if not req:
         raise HTTPException(404, "Approval request not found")
+    if req.get("type") == "enquiry_close":
+        if not (is_super_admin(user) or is_pws_admin_user(user)):
+            raise HTTPException(403, "Closing an enquiry requires Principal or Super Admin approval")
+    elif not _can_approve(user):
+        raise HTTPException(403, "Approval permission required")
     if req["status"] != "pending":
         raise HTTPException(400, f"Request already {req['status']}")
     _assert_can_decide_entity(user, req)
@@ -621,6 +636,20 @@ async def reject(req_id: str, payload: DecisionIn, user: dict = Depends(get_curr
         from routers.ground_booking import apply_discount_decision
         try:
             await apply_discount_decision(req, approved=False)
+        except Exception:
+            await db.approval_requests.update_one({"id": req_id}, {"$set": {
+                "status": "pending",
+                "decided_by_id": None,
+                "decided_by_name": None,
+                "decided_at": None,
+                "decision_note": None,
+            }, "$pull": {"history": {"id": entry["id"]}}})
+            raise
+
+    if req.get("type") == "enquiry_close":
+        from routers.enquiry import apply_enquiry_close_decision
+        try:
+            await apply_enquiry_close_decision(req, approved=False)
         except Exception:
             await db.approval_requests.update_one({"id": req_id}, {"$set": {
                 "status": "pending",
