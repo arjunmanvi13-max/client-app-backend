@@ -4,6 +4,8 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Optional, List, Dict, Any
 
+import logging
+
 from core import (
     db,
     now_utc,
@@ -16,9 +18,14 @@ from core import (
     is_pws_admin_user,
     is_pws_accounts_user,
     is_alpha_admin_user,
-    is_alpha_accounts_user, today_ist,
+    is_alpha_accounts_user,
+    is_teacher_user,
+    today_ist,
 )
 from academic_class_roster import class_roster_query_for_section_ids
+from notifications_service import notification_filter_for_user, normalize_notification
+
+logger = logging.getLogger(__name__)
 
 
 def _entity_param(entity: Optional[str]) -> str:
@@ -126,86 +133,164 @@ async def admin_dashboard(user: dict) -> dict:
     return data
 
 
-async def teacher_dashboard(user: dict) -> dict:
-    from routers.academic import get_open_academic_year
+def _empty_teacher_dashboard(today: str) -> dict:
+    return {
+        "role": "teacher",
+        "today": today,
+        "assigned_classes": [],
+        "attendance_today": [],
+        "pending_marks_entry": 0,
+        "recent_notifications": [],
+        "unread_notifications": 0,
+        "generated_at": now_utc().isoformat(),
+    }
 
-    today = today_ist()
-    open_year = await get_open_academic_year()
-    year_id = (open_year or {}).get("id")
-    assignments: List[dict] = []
-    section_attendance: List[dict] = []
-    pending_marks = 0
 
-    if year_id:
-        rows = await db.teacher_class_assignments.find(
-            {"teacher_user_id": user["id"], "academic_year_id": year_id},
-            {"_id": 0},
-        ).to_list(100)
-        seen = set()
-        for r in rows:
-            key = (r["section_id"], r["subject_id"])
-            if key in seen:
-                continue
-            seen.add(key)
-            section = await db.sections.find_one({"id": r["section_id"]}, {"_id": 0, "label": 1, "grade_name": 1})
-            subject = await db.subjects.find_one({"id": r["subject_id"]}, {"_id": 0, "name": 1, "code": 1})
-            assignments.append({
-                "section_id": r["section_id"],
-                "section_label": (section or {}).get("label"),
-                "grade_name": (section or {}).get("grade_name"),
-                "subject_id": r["subject_id"],
-                "subject_name": (subject or {}).get("name"),
-            })
-
-            student_ids = await db.people.distinct(
-                "id",
-                await class_roster_query_for_section_ids([r["section_id"]]),
-            )
-            marked = await db.attendance.count_documents({
-                "person_id": {"$in": student_ids},
-                "date": today,
-                "kind": "student",
-            }) if student_ids else 0
-            present = await db.attendance.count_documents({
-                "person_id": {"$in": student_ids},
-                "date": today,
-                "kind": "student",
-                "status": {"$in": ["present", "late"]},
-            }) if student_ids else 0
-            section_attendance.append({
-                "section_id": r["section_id"],
-                "section_label": (section or {}).get("label"),
-                "total_students": len(student_ids),
-                "marked_today": marked,
-                "present_today": present,
-            })
-
-            assessments = await db.assessments.find({
-                "section_id": r["section_id"],
-                "subject_id": r["subject_id"],
-                "academic_year_id": year_id,
-            }, {"_id": 0, "id": 1}).to_list(30)
-            for asm in assessments:
-                marks_n = await db.academic_marks.count_documents({"assessment_id": asm["id"]})
-                if marks_n < len(student_ids):
-                    pending_marks += 1
-
+async def _teacher_notifications(user: dict) -> dict:
     notif_rows = await db.notifications.find(
         notification_filter_for_user(user),
         {"_id": 0},
     ).sort("created_at", -1).to_list(5)
     notifications = [normalize_notification(n) for n in notif_rows]
-
     return {
-        "role": "teacher",
-        "today": today,
-        "assigned_classes": assignments,
-        "attendance_today": section_attendance,
-        "pending_marks_entry": pending_marks,
         "recent_notifications": notifications,
         "unread_notifications": sum(1 for n in notifications if not n.get("read")),
-        "generated_at": now_utc().isoformat(),
     }
+
+
+async def teacher_dashboard(user: dict) -> dict:
+    today = today_ist()
+    out = _empty_teacher_dashboard(today)
+    try:
+        open_year = await db.academic_years.find_one(
+            {"entity_id": "pws", "status": "open"},
+            {"_id": 0, "id": 1},
+        )
+        year_id = (open_year or {}).get("id")
+        if not year_id:
+            out.update(await _teacher_notifications(user))
+            return out
+
+        rows = await db.teacher_class_assignments.find(
+            {"teacher_user_id": user["id"], "academic_year_id": year_id},
+            {"_id": 0, "section_id": 1, "subject_id": 1},
+        ).to_list(200)
+        pairs: List[tuple] = []
+        seen = set()
+        for r in rows:
+            sid, sub = r.get("section_id"), r.get("subject_id")
+            if not sid or not sub or (sid, sub) in seen:
+                continue
+            seen.add((sid, sub))
+            pairs.append((sid, sub))
+        section_ids = list(dict.fromkeys(sid for sid, _ in pairs))
+        subject_ids = list(dict.fromkeys(sub for _, sub in pairs))
+
+        sections = await db.sections.find(
+            {"id": {"$in": section_ids}},
+            {"_id": 0, "id": 1, "label": 1, "grade_name": 1},
+        ).to_list(200) if section_ids else []
+        subjects = await db.subjects.find(
+            {"id": {"$in": subject_ids}},
+            {"_id": 0, "id": 1, "name": 1},
+        ).to_list(200) if subject_ids else []
+        section_map = {s["id"]: s for s in sections}
+        subject_map = {s["id"]: s for s in subjects}
+
+        assignments = []
+        for sid, sub in pairs:
+            section = section_map.get(sid) or {}
+            subject = subject_map.get(sub) or {}
+            assignments.append({
+                "section_id": sid,
+                "section_label": section.get("label"),
+                "grade_name": section.get("grade_name"),
+                "subject_id": sub,
+                "subject_name": subject.get("name"),
+            })
+
+        students_by_section: Dict[str, list] = {sid: [] for sid in section_ids}
+        if section_ids:
+            roster_q = await class_roster_query_for_section_ids(section_ids)
+            people = await db.people.find(
+                roster_q,
+                {"_id": 0, "id": 1, "section_id": 1, "group": 1},
+            ).to_list(8000)
+            label_to_sid = {s["label"]: s["id"] for s in sections if s.get("label")}
+            for person in people:
+                sid = person.get("section_id")
+                if sid not in students_by_section:
+                    sid = label_to_sid.get(person.get("group") or "")
+                if sid in students_by_section and person.get("id"):
+                    students_by_section[sid].append(person["id"])
+
+        att_counts = {sid: {"marked": 0, "present": 0} for sid in section_ids}
+        pid_to_section = {
+            pid: sid
+            for sid, ids in students_by_section.items()
+            for pid in ids
+        }
+        all_ids = list(pid_to_section)
+        if all_ids:
+            att_rows = await db.attendance.find(
+                {"person_id": {"$in": all_ids}, "date": today, "kind": "student"},
+                {"_id": 0, "person_id": 1, "status": 1},
+            ).to_list(20000)
+            for row in att_rows:
+                sid = pid_to_section.get(row.get("person_id"))
+                if not sid:
+                    continue
+                att_counts[sid]["marked"] += 1
+                if row.get("status") in ("present", "late"):
+                    att_counts[sid]["present"] += 1
+
+        section_attendance = []
+        for sid in section_ids:
+            section = section_map.get(sid) or {}
+            ids = students_by_section.get(sid) or []
+            counts = att_counts.get(sid) or {"marked": 0, "present": 0}
+            section_attendance.append({
+                "section_id": sid,
+                "section_label": section.get("label"),
+                "total_students": len(ids),
+                "marked_today": counts["marked"],
+                "present_today": counts["present"],
+            })
+
+        pending_marks = 0
+        if pairs:
+            assessments = await db.assessments.find(
+                {
+                    "academic_year_id": year_id,
+                    "$or": [{"section_id": sid, "subject_id": sub} for sid, sub in pairs],
+                },
+                {"_id": 0, "id": 1, "section_id": 1},
+            ).to_list(200)
+            marked_by_asm: Dict[str, int] = {}
+            asm_ids = [a["id"] for a in assessments if a.get("id")]
+            if asm_ids:
+                grouped = await db.academic_marks.aggregate([
+                    {"$match": {"assessment_id": {"$in": asm_ids}}},
+                    {"$group": {"_id": "$assessment_id", "n": {"$sum": 1}}},
+                ]).to_list(200)
+                marked_by_asm = {row["_id"]: row["n"] for row in grouped}
+            for asm in assessments:
+                need = len(students_by_section.get(asm.get("section_id"), []))
+                if marked_by_asm.get(asm.get("id"), 0) < need:
+                    pending_marks += 1
+
+        out["assigned_classes"] = assignments
+        out["attendance_today"] = section_attendance
+        out["pending_marks_entry"] = pending_marks
+        out.update(await _teacher_notifications(user))
+        return out
+    except Exception:
+        logger.exception("Teacher dashboard failed for user %s", user.get("id"))
+        try:
+            out.update(await _teacher_notifications(user))
+        except Exception:
+            pass
+        return out
 
 
 async def coach_dashboard_mvp(user: dict) -> dict:
@@ -331,7 +416,7 @@ async def build_mvp_dashboard(user: dict, entity: Optional[str] = None) -> dict:
         return await alpha_org_dashboard(user)
     if role == "admin":
         return await admin_dashboard(user)
-    if role == "teacher":
+    if is_teacher_user(user) or (user.get("user_type") or "").strip().lower() == "pws_teacher":
         return await teacher_dashboard(user)
     if role == "coach":
         return await coach_dashboard_mvp(user)

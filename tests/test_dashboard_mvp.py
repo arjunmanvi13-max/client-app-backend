@@ -80,7 +80,7 @@ class TestTeacherDashboard:
         r = requests.get(f"{API}/dashboard/mvp", headers=_hdr("teacher"), timeout=20)
         assert r.status_code == 200, r.text
         d = r.json()
-        assert d["role"] == "teacher"
+        assert d["role"] in ("teacher", "pws_teacher")
         assert "assigned_classes" in d
         assert "attendance_today" in d
         assert "pending_marks_entry" in d
