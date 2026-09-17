@@ -33,6 +33,7 @@ from rbac.guards import (
 )
 from teacher_profile_pdf import render_teacher_profile_pdf
 from starlette.concurrency import run_in_threadpool
+from pws_class_catalog import format_class_display
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -813,7 +814,7 @@ async def _teacher_class_rows_for_pdf(teacher_id: str) -> list:
         grade = await db.grades.find_one({"id": r["grade_id"]}, {"_id": 0, "name": 1})
         section = await db.sections.find_one({"id": r["section_id"]}, {"_id": 0, "label": 1})
         subject = await db.subjects.find_one({"id": r["subject_id"]}, {"_id": 0, "name": 1})
-        class_name = (grade or {}).get("name") or "—"
+        class_name = format_class_display((grade or {}).get("name")) or (grade or {}).get("name") or "—"
         sec = _section_letter((section or {}).get("label") or "")
         key = f"{class_name}:{sec}"
         if key not in grouped:
