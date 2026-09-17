@@ -765,6 +765,14 @@ async def reset_user_password(user_id: str, payload: ResetPasswordIn, user: dict
     return await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0})
 
 
+_SUPER_ADMIN_MATCH = {
+    "$or": [
+        {"role": "super_admin"},
+        {"user_type": "super_admin"},
+    ]
+}
+
+
 @router.delete("/{user_id}")
 async def delete_user(user_id: str, user: dict = Depends(get_current_user)):
     if not is_super_admin(user):
@@ -774,6 +782,15 @@ async def delete_user(user_id: str, user: dict = Depends(get_current_user)):
     target = await db.users.find_one({"id": user_id})
     if not target:
         raise HTTPException(404, "User not found")
+    if is_super_admin(target):
+        remaining = await db.users.count_documents({
+            "id": {"$ne": user_id},
+            **_SUPER_ADMIN_MATCH,
+        })
+        if remaining < 1:
+            raise HTTPException(409, "Cannot delete the last Super Admin")
+    await db.teacher_class_assignments.delete_many({"teacher_user_id": user_id})
+    await db.teacher_section_assignments.delete_many({"teacher_user_id": user_id})
     await db.users.delete_one({"id": user_id})
     await _log_user_type_audit(action="deleted", target=target, actor=user)
     return {"ok": True}

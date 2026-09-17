@@ -149,6 +149,35 @@ class TestUserCRUD:
         r = requests.delete(f"{API}/users/{me['id']}", headers=_hdr("coach"))
         assert r.status_code == 403
 
+    def test_teacher_cannot_delete_login_user(self):
+        assert TestUserCRUD.created_ids
+        target = TestUserCRUD.created_ids[0]
+        r = requests.delete(f"{API}/users/{target}", headers=_hdr("teacher"))
+        assert r.status_code == 403
+
+    def test_super_admin_cannot_delete_self(self):
+        me = requests.get(f"{API}/auth/me", headers=_hdr("super_admin")).json()
+        r = requests.delete(f"{API}/users/{me['id']}", headers=_hdr("super_admin"))
+        assert r.status_code == 400
+
+    def test_super_admin_deletes_login_user(self):
+        sfx = self._suffix()
+        payload = {
+            "email": f"TEST_delete_{sfx}@prarambhika.com",
+            "password": "Pass@Word123",
+            "name": "TEST Delete Me",
+            "user_type": "alpha_coach",
+            "assigned_sports": ["Cricket"],
+            "assigned_centres": ["Balua"],
+        }
+        created = requests.post(f"{API}/users", headers=_hdr("super_admin"), json=payload)
+        assert created.status_code == 200, created.text
+        uid = created.json()["id"]
+        r = requests.delete(f"{API}/users/{uid}", headers=_hdr("super_admin"))
+        assert r.status_code == 200, r.text
+        gone = requests.get(f"{API}/users/{uid}", headers=_hdr("super_admin"))
+        assert gone.status_code == 404
+
     @classmethod
     def teardown_class(cls):
         for uid in cls.created_ids:
