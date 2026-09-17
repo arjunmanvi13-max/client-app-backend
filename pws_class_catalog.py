@@ -1,11 +1,14 @@
 """Single source of truth for PWS class / standard values.
 
-Canonical stored value (people.pws_class, fees, enquiry, teacher allocation):
-    Nursery, LKG, UKG, Class I … Class X
+Canonical stored + display value:
+    Nursery, LKG, UKG, Std 1 … Std 12
 
-Display label is the same canonical string (never "Std 1").
+Internal class code (stable, not shown in UI):
+    NURSERY, LKG, UKG, STD_01 … STD_12
+
 Academic Structure may still store short grade keys (Nur, 1, 2) — those
 normalize back to the canonical class via `normalize_class_value`.
+Never display Nur, Std Nur, Class I, Class X, 10th, or Grade 10.
 """
 from __future__ import annotations
 
@@ -16,16 +19,18 @@ CLASS_LIST: tuple[str, ...] = (
     "Nursery",
     "LKG",
     "UKG",
-    "Class I",
-    "Class II",
-    "Class III",
-    "Class IV",
-    "Class V",
-    "Class VI",
-    "Class VII",
-    "Class VIII",
-    "Class IX",
-    "Class X",
+    "Std 1",
+    "Std 2",
+    "Std 3",
+    "Std 4",
+    "Std 5",
+    "Std 6",
+    "Std 7",
+    "Std 8",
+    "Std 9",
+    "Std 10",
+    "Std 11",
+    "Std 12",
 )
 
 CLASS_SET = frozenset(CLASS_LIST)
@@ -35,21 +40,42 @@ CLASS_TO_GRADE_KEY: dict[str, str] = {
     "Nursery": "Nur",
     "LKG": "LKG",
     "UKG": "UKG",
-    "Class I": "1",
-    "Class II": "2",
-    "Class III": "3",
-    "Class IV": "4",
-    "Class V": "5",
-    "Class VI": "6",
-    "Class VII": "7",
-    "Class VIII": "8",
-    "Class IX": "9",
-    "Class X": "10",
+    "Std 1": "1",
+    "Std 2": "2",
+    "Std 3": "3",
+    "Std 4": "4",
+    "Std 5": "5",
+    "Std 6": "6",
+    "Std 7": "7",
+    "Std 8": "8",
+    "Std 9": "9",
+    "Std 10": "10",
+    "Std 11": "11",
+    "Std 12": "12",
+}
+
+CLASS_TO_CODE: dict[str, str] = {
+    "Nursery": "NURSERY",
+    "LKG": "LKG",
+    "UKG": "UKG",
+    "Std 1": "STD_01",
+    "Std 2": "STD_02",
+    "Std 3": "STD_03",
+    "Std 4": "STD_04",
+    "Std 5": "STD_05",
+    "Std 6": "STD_06",
+    "Std 7": "STD_07",
+    "Std 8": "STD_08",
+    "Std 9": "STD_09",
+    "Std 10": "STD_10",
+    "Std 11": "STD_11",
+    "Std 12": "STD_12",
 }
 
 ROMAN_TO_ARABIC = {
     "i": "1", "ii": "2", "iii": "3", "iv": "4", "v": "5",
     "vi": "6", "vii": "7", "viii": "8", "ix": "9", "x": "10",
+    "xi": "11", "xii": "12",
 }
 ARABIC_TO_ROMAN = {v: k.upper() for k, v in ROMAN_TO_ARABIC.items()}
 
@@ -72,9 +98,9 @@ def _alias_map() -> dict[str, str]:
 
     for canonical in CLASS_LIST:
         add(canonical, canonical)
-        add(canonical.replace("Class ", "Std "), canonical)
-        add(canonical.replace("Class ", "Standard "), canonical)
-        add(canonical.replace("Class ", "Grade "), canonical)
+        add(canonical.replace("Std ", "Class "), canonical)
+        add(canonical.replace("Std ", "Standard "), canonical)
+        add(canonical.replace("Std ", "Grade "), canonical)
         key = CLASS_TO_GRADE_KEY[canonical]
         add(key, canonical)
         add(f"std {key}", canonical)
@@ -83,6 +109,7 @@ def _alias_map() -> dict[str, str]:
         add(f"grade {key}", canonical)
         add(f"class {key}", canonical)
         add(f"class-{key}", canonical)
+        add(CLASS_TO_CODE[canonical], canonical)
         if key.isdigit():
             roman = ARABIC_TO_ROMAN[key]
             add(roman, canonical)
@@ -91,7 +118,11 @@ def _alias_map() -> dict[str, str]:
             add(f"class {key}", canonical)
             add(f"class{key}", canonical)
             add(f"c{key}", canonical)
+            add(f"{key}th", canonical)
+            if key == "1":
+                add("1st", canonical)
     add("nur", "Nursery")
+    add("std nur", "Nursery")
     add("nursary", "Nursery")
     add("pre nursery", "Nursery")
     add("pre-nursery", "Nursery")
@@ -131,6 +162,13 @@ def format_class_display(class_val: Optional[str]) -> str:
     return canon or (class_val or "").strip()
 
 
+def class_code_for_class(class_val: Optional[str]) -> str:
+    canon = normalize_class_value(class_val)
+    if not canon:
+        return ""
+    return CLASS_TO_CODE[canon]
+
+
 def grade_key_for_class(class_val: Optional[str]) -> str:
     canon = normalize_class_value(class_val)
     if not canon:
@@ -154,12 +192,13 @@ def grade_aliases_for_class(class_val: Optional[str]) -> set[str]:
         _fold(f"std {key}"),
         _fold(f"grade {key}"),
         _fold(f"class {key}"),
+        _fold(CLASS_TO_CODE[canon]),
     }
     if key.isdigit():
         aliases.add(_fold(ARABIC_TO_ROMAN[key]))
         aliases.add(key)
     if canon == "Nursery":
-        aliases.update({"nur", "nursery"})
+        aliases.update({"nur", "nursery", "std nur"})
     return {a for a in aliases if a}
 
 
@@ -172,6 +211,7 @@ def class_aliases(class_val: Optional[str]) -> list[str]:
     key = CLASS_TO_GRADE_KEY[canon]
     out = [
         canon,
+        CLASS_TO_CODE[canon],
         key,
         f"Std {key}",
         f"STD {key}",
@@ -185,7 +225,7 @@ def class_aliases(class_val: Optional[str]) -> list[str]:
         out.extend([f"Class {roman}", f"Std {roman}", roman, f"Class {roman.upper()}"])
         out.append(f"Std {int(key)}")
     if canon == "Nursery":
-        out.extend(["Nur", "NUR", "nursery"])
+        out.extend(["Nur", "NUR", "nursery", "Std Nur"])
     seen: set[str] = set()
     unique: list[str] = []
     for item in out:

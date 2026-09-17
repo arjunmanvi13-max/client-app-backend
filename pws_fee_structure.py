@@ -18,8 +18,8 @@ PWS_CLASSES = CLASS_LIST
 # LKG shares Nursery fee bands so inserting it into CLASS_LIST does not shift indexes.
 _FEE_ORDER = (
     "Nursery", "UKG",
-    "Class I", "Class II", "Class III", "Class IV", "Class V", "Class VI",
-    "Class VII", "Class VIII", "Class IX", "Class X",
+    "Std 1", "Std 2", "Std 3", "Std 4", "Std 5", "Std 6",
+    "Std 7", "Std 8", "Std 9", "Std 10",
 )
 TRANSPORT_DISTANCES = ("Up to 5 km", "Over 5 km")
 
@@ -45,6 +45,8 @@ def _class_idx(pws_class: str) -> int:
     canon = normalize_class_value(pws_class) or pws_class
     if canon == "LKG":
         canon = "Nursery"
+    if canon in ("Std 11", "Std 12"):
+        canon = "Std 10"
     try:
         return _FEE_ORDER.index(canon)
     except ValueError:
@@ -252,9 +254,9 @@ def student_type_to_legacy(pws_student_type: Optional[str], is_resident: bool = 
 
 def pws_student_profile_from_person(person: dict) -> dict:
     """Normalize person document to PWS fee profile."""
-    pws_class = normalize_class_value(person.get("pws_class") or person.get("group")) or "Class I"
+    pws_class = normalize_class_value(person.get("pws_class") or person.get("group")) or "Std 1"
     if pws_class not in PWS_CLASSES:
-        pws_class = "Class I"
+        pws_class = "Std 1"
     transport_enabled = bool(person.get("transport_enabled"))
     if not transport_enabled and int(person.get("transport_fee_monthly") or 0) > 0:
         transport_enabled = True

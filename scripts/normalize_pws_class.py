@@ -5,7 +5,7 @@ Usage:
   python3 scripts/normalize_pws_class.py [--dry-run]
 
 Rewrites people.pws_class and PWS enquiry applying_for values such as
-"Std 1", "1", "Class-10" to the canonical catalog (Nursery, LKG, UKG, Class I–X).
+"Class I", "1", "Class-10" to the canonical catalog (Nursery, LKG, UKG, Std 1–12).
 """
 from __future__ import annotations
 

@@ -20,6 +20,7 @@ from core import db, get_current_user, logger, notify_role, PersonCreate, Direct
 from rbac.guards import can_bulk_upload
 from bulk_ingest import KINDS, SPECS, SPEC_BY_SHEET, SheetSpec, _normalize_header, duplicate_key, parse_row
 from bulk_template import build_csv, build_workbook
+from pws_class_catalog import CLASS_TO_GRADE_KEY, class_aliases, normalize_class_value
 
 router = APIRouter(prefix="/bulk-upload", tags=["bulk-upload"])
 
@@ -29,21 +30,11 @@ XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 PEOPLE_KINDS = ("student", "player", "staff")
 
-CLASS_TO_GRADE = {
-    "Nursery": ["Nursery", "Nur"],
-    "LKG": ["LKG"],
-    "UKG": ["UKG"],
-    "Class I": ["1", "I"],
-    "Class II": ["2", "II"],
-    "Class III": ["3", "III"],
-    "Class IV": ["4", "IV"],
-    "Class V": ["5", "V"],
-    "Class VI": ["6", "VI"],
-    "Class VII": ["7", "VII"],
-    "Class VIII": ["8", "VIII"],
-    "Class IX": ["9", "IX"],
-    "Class X": ["10", "X"],
-}
+
+def _grade_names_for_pws_class(pws_class: str) -> list[str]:
+    canon = normalize_class_value(pws_class) or pws_class
+    names = [CLASS_TO_GRADE_KEY.get(canon, ""), canon, *class_aliases(canon)]
+    return [n for n in dict.fromkeys(names) if n]
 
 
 def _assert_can_upload(user: dict) -> None:
@@ -248,13 +239,13 @@ async def _validate_rows(
 async def _resolve_section_id(pws_class: Optional[str], letter: Optional[str]) -> Optional[str]:
     if not pws_class or not letter:
         return None
-    for grade_name in CLASS_TO_GRADE.get(pws_class, []):
+    for grade_name in _grade_names_for_pws_class(pws_class):
         section = await db.sections.find_one(
             {"grade_name": grade_name, "name": letter}, {"_id": 0, "id": 1}
         )
         if section:
             return section["id"]
-    label_candidates = [f"{g}-{letter}" for g in CLASS_TO_GRADE.get(pws_class, [])]
+    label_candidates = [f"{g}-{letter}" for g in _grade_names_for_pws_class(pws_class)]
     if label_candidates:
         section = await db.sections.find_one(
             {"label": {"$in": label_candidates}}, {"_id": 0, "id": 1}

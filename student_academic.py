@@ -94,6 +94,12 @@ async def sync_student_academic_fields(doc: dict, *, fix_mismatch: bool = True) 
     if section:
         out["group"] = section["label"]
         out["section_name"] = section_letter_from_label(section["label"])
+        gid = section.get("grade_id")
+        if gid:
+            out["grade_id"] = gid
+            out["class_id"] = gid
+        if section.get("academic_year_id"):
+            out["academic_year_id"] = section["academic_year_id"]
     else:
         letter = section_letter_from_label(out.get("group"))
         out["section_name"] = letter
@@ -141,6 +147,10 @@ async def enrich_students_for_list(rows: Iterable[dict]) -> list[dict]:
                     out["section_id"] = replacement["id"]
             out["group"] = section.get("label") or out.get("group")
             out["section_name"] = section_letter_from_label(section.get("label"))
+            gid = section.get("grade_id")
+            if gid:
+                out["grade_id"] = gid
+                out["class_id"] = gid
             if out.get("kind") == "player" and sports_group is not None:
                 out["group"] = sports_group
                 out["academic_section_label"] = section.get("label") or ""
