@@ -48,6 +48,11 @@ async def login(payload: LoginIn, request: Request):
             403,
             "Your account requires an approved user type assignment. Please contact the Super Admin.",
         )
+    try:
+        from category_permissions_service import overlay_permission_set
+        user = await overlay_permission_set(user)
+    except Exception:
+        logger.exception("Failed to overlay permission set for login %s", user.get("id"))
     token = create_token(user["id"], user.get("email") or "", user["role"], user.get("password_set_at"))
     return {
         "access_token": token,

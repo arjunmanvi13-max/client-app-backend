@@ -264,6 +264,11 @@ async def get_current_user(request: Request) -> dict:
             403,
             "Your account requires an approved user type assignment. Please contact the Super Admin.",
         )
+    try:
+        from category_permissions_service import overlay_permission_set
+        user = await overlay_permission_set(user)
+    except Exception:
+        logger.exception("Failed to overlay permission set for user %s", user.get("id"))
     return user
 
 def require_roles(*roles):
@@ -334,6 +339,8 @@ def is_super_admin(user: dict) -> bool:
 
 def is_principal_user(user: dict) -> bool:
     """PWS Principal — not Vice Principal or generic PWS Admin without designation."""
+    if (user.get("permission_set") or "").strip().lower() == "principal":
+        return True
     legacy = (user.get("role") or "").strip().lower()
     if legacy == "principal":
         return True
@@ -416,6 +423,8 @@ def default_permissions(role: str, coach_type: Optional[str] = None) -> dict:
             "view_attendance": True, "correct_attendance": True,
             "supervise_tasks": True,
         })
+        if role == "principal":
+            p.update({"view_players": True, "add_players": True, "edit_players": True})
     elif role == "coach":
         # Head coach gets staff-attendance + edits; assistant coach is restricted. Coaches NEVER see fees.
         p.update({
@@ -466,7 +475,7 @@ PERMISSION_TEMPLATES = {
     "principal": {
         "label": "Principal / Vice Principal",
         "category": "Admin",
-        "organization": "PWS",
+        "organization": "BOTH",
         "permissions": default_permissions("principal"),
     },
     "head_coach": {
@@ -610,21 +619,56 @@ def resolve_user_institution(user: dict, requested: Optional[str] = None) -> str
     if is_super_admin(user):
         v = (requested or "BOTH").upper()
         return v if v in INSTITUTIONS else "BOTH"
-    if is_pws_admin_user(user) or is_pws_accounts_user(user):
-        return "PWS"
-    if is_alpha_admin_user(user) or is_alpha_accounts_user(user):
-        return "ALPHA"
-    if is_sports_admin(user) or user.get("role") in ("coach", "alpha_coach"):
-        return "ALPHA"
-    if user.get("role") in ("principal", "vice_principal", "teacher", "pws_teacher"):
-        return "PWS"
-    if user.get("role") == "warden":
-        return "BOTH"
-    org = (user.get("organization") or "PWS").upper()
-    if org == "BOTH":
+    if is_principal_user(user):
+        resolved = "BOTH"
+        if requested:
+            req = requested.upper()
+            if req in INSTITUTIONS:
+                return req
+        return resolved
+    perms = user.get("permissions") or {}
+    rbac = user.get("permissions_rbac") or {}
+    has_pws_records = bool(
+        perms.get("view_students") or perms.get("add_students") or perms.get("view_staff")
+    )
+    has_alpha_records = bool(
+        perms.get("view_players")
+        or perms.get("add_players")
+        or perms.get("edit_players")
+        or rbac.get("MANAGE_PLAYERS")
+        or rbac.get("ADD_ALPHA_PLAYERS")
+    )
+    if has_pws_records and has_alpha_records:
+        resolved = "BOTH"
+    elif has_alpha_records and not has_pws_records:
+        resolved = "ALPHA"
+    elif has_pws_records and not has_alpha_records:
+        resolved = "PWS"
+    elif is_pws_admin_user(user) or is_pws_accounts_user(user):
+        resolved = "PWS"
+    elif is_alpha_admin_user(user) or is_alpha_accounts_user(user):
+        resolved = "ALPHA"
+    elif is_sports_admin(user) or user.get("role") in ("coach", "alpha_coach"):
+        resolved = "ALPHA"
+    elif user.get("role") in ("vice_principal", "teacher", "pws_teacher"):
+        resolved = "PWS"
+    elif user.get("role") == "warden":
+        resolved = "BOTH"
+    else:
+        org = (user.get("organization") or "PWS").upper()
+        resolved = org if org in INSTITUTIONS else "PWS"
+    if resolved == "BOTH":
         v = (requested or "BOTH").upper()
         return v if v in INSTITUTIONS else "BOTH"
-    return org if org in ("PWS", "ALPHA") else "PWS"
+    if requested:
+        req = requested.upper()
+        if req == "BOTH":
+            return resolved
+        if req in INSTITUTIONS and req != resolved:
+            raise HTTPException(403, "Entity access denied")
+        if req in INSTITUTIONS:
+            return req
+    return resolved
 
 
 def normalize_entity_id(raw: Optional[str]) -> Optional[str]:
@@ -878,7 +922,7 @@ def public_user(u: dict) -> dict:
         "user_type": u.get("user_type") or resolve_user_type_safe(u),
         "designation": u.get("designation"),
         "login_tier": u.get("login_tier"),
-        "entity_scope": u.get("entity_scope") or u.get("organization"),
+        "entity_scope": resolve_user_institution(u, None),
         "module_access": u.get("module_access"),
         "permission_set": u.get("permission_set"),
         "teacher_designation": u.get("teacher_designation"),
@@ -895,7 +939,6 @@ def public_user(u: dict) -> dict:
         "reference_mobile": u.get("reference_mobile"),
         "has_login_account": bool(u.get("has_login_account", u.get("email"))),
         "aadhaar_number_masked": mask_aadhaar_number(u.get("aadhaar_number")),
-        "entity_scope": u.get("entity_scope"),
         "legacy_role": u.get("legacy_role"),
         "requires_user_type_review": bool(u.get("requires_user_type_review")),
     }

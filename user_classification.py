@@ -381,23 +381,24 @@ def apply_user_type_fields(
         raise ValueError(f"Invalid user type: {user_type}")
     meta = CATALOG_BY_CODE[user_type]
     doc["user_type"] = user_type
+    desig = (designation or "").upper() or None
+    if not desig and user_type == UserRole.PWS_ADMIN.value:
+        desig = "PRINCIPAL"
     scope = (entity_scope or "").upper() if entity_scope else meta["entityScope"]
     if scope not in ("PWS", "ALPHA", "BOTH"):
         scope = meta["entityScope"]
+    if desig == "PRINCIPAL":
+        scope = "BOTH"
     doc["organization"] = scope
     doc["entity_scope"] = scope
     doc["login_tier"] = (login_tier or USER_TYPE_TO_LOGIN_TIER.get(user_type, "staff")).lower()
     if doc["login_tier"] not in LOGIN_TIERS:
         doc["login_tier"] = USER_TYPE_TO_LOGIN_TIER.get(user_type, "staff")
-    desig = (designation or "").upper() or None
     if desig:
         allowed = designations_for_entity(scope)
         if desig not in allowed and desig not in ALL_DESIGNATIONS:
             raise ValueError(f"Invalid designation for entity {scope}: {desig}")
         doc["designation"] = desig
-    elif user_type == UserRole.PWS_ADMIN.value:
-        doc["designation"] = "PRINCIPAL"
-        desig = "PRINCIPAL"
     else:
         doc.pop("designation", None)
     doc["role"] = legacy_role_for_user_type(user_type, desig)

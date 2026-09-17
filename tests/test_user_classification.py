@@ -60,7 +60,11 @@ def test_apply_user_type_sets_organization():
     assert doc["user_type"] == UserRole.PWS_TEACHER.value
 
 
-def test_apply_user_type_pws_admin_designation():
+def test_apply_user_type_principal_is_both_entities():
+    doc = apply_user_type_fields({}, user_type=UserRole.PWS_ADMIN.value, designation="PRINCIPAL", entity_scope="PWS")
+    assert doc["designation"] == "PRINCIPAL"
+    assert doc["entity_scope"] == "BOTH"
+    assert doc["organization"] == "BOTH"
     doc = apply_user_type_fields({}, user_type=UserRole.PWS_ADMIN.value, designation="VICE_PRINCIPAL")
     assert doc["role"] == "vice_principal"
     assert doc["designation"] == "VICE_PRINCIPAL"

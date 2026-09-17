@@ -50,6 +50,13 @@ def test_rbac_override_grants():
     assert has_permission(u, Permission.MANAGE_PLAYERS, use_legacy_fallback=False)
 
 
+def test_principal_manages_alpha_players():
+    u = _user("principal", organization="PWS")
+    assert has_permission(u, Permission.MANAGE_PLAYERS, entity=BusinessEntity.ALPHA)
+    u = _user("principal", organization="PWS", permissions_rbac={Permission.MANAGE_PLAYERS.value: True})
+    assert has_permission(u, Permission.MANAGE_PLAYERS, entity=BusinessEntity.ALPHA, use_legacy_fallback=False)
+
+
 def test_entity_scope_pws_teacher_blocked_on_alpha_fee():
     u = _user("teacher", organization="PWS", permissions={"collect_fees": True})
     assert not has_permission(u, Permission.COLLECT_ALPHA_FEES, entity=BusinessEntity.ALPHA)

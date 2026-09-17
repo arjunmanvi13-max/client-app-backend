@@ -198,16 +198,16 @@ async def get_permission_set(code: str) -> Dict[str, Any]:
         modules = {mid: bool(stored["modules"].get(mid)) for mid in leaves}
     else:
         modules = default_enabled_map(compat)
+        if code == "principal":
+            modules["players"] = True
         if code in ("student", "player"):
             modules = {mid: False for mid in leaves}
             if "dashboard" in modules:
                 modules["dashboard"] = True
     if meta.get("locked"):
         modules = {mid: True for mid in leaves}
-    assigned = await db.users.count_documents({
-        "status": {"$ne": "deactivated"},
-        "permission_set": code,
-    })
+    from directory_workflow import users_matching_permission_set_filter
+    assigned = await db.users.count_documents(users_matching_permission_set_filter(code))
     return {
         "code": code,
         "name": meta["name"],
@@ -248,7 +248,7 @@ async def list_permission_sets() -> List[Dict[str, Any]]:
 
 
 async def save_permission_set(code: str, modules: Dict[str, bool], actor: dict) -> Dict[str, Any]:
-    from directory_workflow import PERMISSION_SET_BY_CODE, PERMISSION_SET_CODES
+    from directory_workflow import PERMISSION_SET_BY_CODE, PERMISSION_SET_CODES, users_matching_permission_set_filter
     from rbac.enums import UserRole
     if code not in PERMISSION_SET_CODES:
         raise ValueError(f"Unknown permission set: {code}")
@@ -275,8 +275,12 @@ async def save_permission_set(code: str, modules: Dict[str, bool], actor: dict) 
         upsert=True,
     )
     result = await db.users.update_many(
-        {"permission_set": code},
-        {"$set": {"permissions": legacy, "permissions_rbac": rbac}},
+        users_matching_permission_set_filter(code),
+        {"$set": {
+            "permission_set": code,
+            "permissions": legacy,
+            "permissions_rbac": rbac,
+        }},
     )
     await db.permission_audit.insert_one({
         "id": str(uuid.uuid4()),
@@ -292,3 +296,61 @@ async def save_permission_set(code: str, modules: Dict[str, bool], actor: dict) 
     out["users_updated"] = result.modified_count
     out["saved_at"] = now
     return out
+
+
+async def overlay_permission_set(user: dict) -> dict:
+    """Attach the current permission-set grants onto a user document for this request."""
+    from directory_workflow import PERMISSION_SET_BY_CODE, permission_set_for_user
+    from rbac.enums import UserRole
+    if not user:
+        return user
+    if (user.get("role") or "") == "super_admin" or (user.get("user_type") or "") == "super_admin":
+        return user
+    code = permission_set_for_user(user)
+    if not code or code == "super_admin":
+        return user
+    had_bound_set = (user.get("permission_set") or "").strip().lower() in PERMISSION_SET_BY_CODE
+    try:
+        stored = await db.permission_sets.find_one({"code": code}, {"_id": 0})
+        perms = dict((stored or {}).get("permissions") or {})
+        rbac = dict((stored or {}).get("permissions_rbac") or {})
+        if perms or rbac:
+            user["permissions"] = perms
+            user["permissions_rbac"] = rbac
+        else:
+            doc = await get_permission_set(code)
+            compat = (PERMISSION_SET_BY_CODE.get(code) or {}).get("compat_user_type") or UserRole.PWS_ADMIN.value
+            legacy, rbac_derived = derive_permissions_from_modules(compat, doc.get("modules") or {})
+            user["permissions"] = legacy
+            user["permissions_rbac"] = rbac_derived
+        user["permission_set"] = code
+        persist: dict = {}
+        if user.get("id") and not had_bound_set:
+            persist["permission_set"] = code
+        if code == "principal":
+            needs_scope = (
+                (user.get("entity_scope") or "").upper() != "BOTH"
+                or (user.get("organization") or "").upper() != "BOTH"
+            )
+            user["entity_scope"] = "BOTH"
+            user["organization"] = "BOTH"
+            merged = dict(user.get("permissions") or {})
+            merged["view_players"] = True
+            merged["add_players"] = True
+            merged["edit_players"] = True
+            user["permissions"] = merged
+            rbac_map = dict(user.get("permissions_rbac") or {})
+            rbac_map["MANAGE_PLAYERS"] = True
+            rbac_map["ADD_ALPHA_PLAYERS"] = True
+            user["permissions_rbac"] = rbac_map
+            if user.get("id") and needs_scope:
+                persist["entity_scope"] = "BOTH"
+                persist["organization"] = "BOTH"
+        if persist and user.get("id"):
+            try:
+                await db.users.update_one({"id": user["id"]}, {"$set": persist})
+            except Exception:
+                pass
+    except Exception:
+        return user
+    return user

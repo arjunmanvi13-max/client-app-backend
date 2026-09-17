@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pymongo.errors import DuplicateKeyError
 from alpha_centre_rules import defense_colony_advanced_slot_error
-from core import db, PersonCreate, PersonUpdate, get_current_user, assert_can_manage, assert_player_action, assert_perm, get_perm, is_admin, is_sports_admin, is_super_admin, is_teacher_user, now_utc, resolve_user_institution, person_entity_filter, derive_person_entities, assert_person_entity_access, coach_can, logger, merge_mongo_query, active_status_filter, today_ist, DAILY_ONLY_CENTRES
+from core import db, PersonCreate, PersonUpdate, get_current_user, assert_can_manage, assert_player_action, assert_perm, get_perm, is_admin, is_principal_user, is_sports_admin, is_super_admin, is_teacher_user, now_utc, resolve_user_institution, person_entity_filter, derive_person_entities, assert_person_entity_access, coach_can, logger, merge_mongo_query, active_status_filter, today_ist, DAILY_ONLY_CENTRES
 from routers.academic import (
     resolve_section_group,
     assert_teacher_section_access,
@@ -129,8 +129,11 @@ def _search_filter(qtext: str) -> dict:
 
 
 def _can_list_kind(user: dict, kind: str) -> bool:
+    if is_principal_user(user) and kind in ("student", "player", "staff", "teacher"):
+        return True
     if is_teacher_user(user) and kind != "student":
-        return False
+        if not (kind == "player" and get_perm(user, "view_players")):
+            return False
     if is_coach_user(user):
         if kind != "player":
             return False

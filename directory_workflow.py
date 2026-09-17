@@ -54,7 +54,7 @@ PERMISSION_SET_CODES: Tuple[str, ...] = (
 
 PERMISSION_SET_CATALOG: List[Dict[str, Any]] = [
     {"code": "super_admin", "name": "Super Admin", "description": "Full access across PWS and ALPHA", "scope": "BOTH", "categories": ["admins"], "designations": [], "locked": True, "compat_user_type": UserRole.SUPER_ADMIN.value},
-    {"code": "principal", "name": "Principal", "description": "PWS school leadership", "scope": "PWS", "categories": ["admins"], "designations": ["PRINCIPAL"], "locked": False, "compat_user_type": UserRole.PWS_ADMIN.value},
+    {"code": "principal", "name": "Principal", "description": "School leadership across PWS and ALPHA", "scope": "BOTH", "categories": ["admins"], "designations": ["PRINCIPAL"], "locked": False, "compat_user_type": UserRole.PWS_ADMIN.value},
     {"code": "vice_principal", "name": "Vice Principal", "description": "PWS school leadership", "scope": "PWS", "categories": ["admins"], "designations": ["VICE_PRINCIPAL"], "locked": False, "compat_user_type": UserRole.PWS_ADMIN.value},
     {"code": "academic_head", "name": "Academic Head", "description": "PWS academics leadership", "scope": "PWS", "categories": ["admins"], "designations": ["ACADEMIC_HEAD"], "locked": False, "compat_user_type": UserRole.PWS_ADMIN.value},
     {"code": "event_coordinator", "name": "Event Co-ordinator", "description": "PWS events and operations", "scope": "PWS", "categories": ["admins"], "designations": ["EVENT_COORDINATOR"], "locked": False, "compat_user_type": UserRole.PWS_ADMIN.value},
@@ -82,6 +82,27 @@ DESIGNATION_TO_PERMISSION_SET: Dict[str, str] = {
     "HOD": "teacher",
 }
 
+ROLE_TO_PERMISSION_SET: Dict[str, str] = {
+    "super_admin": "super_admin",
+    "principal": "principal",
+    "vice_principal": "vice_principal",
+    "teacher": "teacher",
+    "pws_teacher": "teacher",
+    "coach": "coach",
+    "alpha_coach": "coach",
+    "pws_accounts": "accounts",
+    "alpha_accounts": "accounts",
+    "warden": "warden",
+}
+
+USER_TYPE_TO_PERMISSION_SET: Dict[str, str] = {
+    UserRole.SUPER_ADMIN.value: "super_admin",
+    UserRole.PWS_TEACHER.value: "teacher",
+    UserRole.ALPHA_COACH.value: "coach",
+    UserRole.PWS_ACCOUNTS.value: "accounts",
+    UserRole.ALPHA_ACCOUNTS.value: "accounts",
+}
+
 
 def canonicalize_designation(raw: Optional[str]) -> Optional[str]:
     if not raw:
@@ -95,6 +116,84 @@ def permission_set_for_designation(designation: Optional[str]) -> Optional[str]:
     if not canon:
         return None
     return DESIGNATION_TO_PERMISSION_SET.get(canon)
+
+
+def permission_set_for_user(user: dict) -> Optional[str]:
+    """Resolve the reusable permission set for a login user, including legacy records."""
+    stored = (user.get("permission_set") or "").strip().lower()
+    if stored in PERMISSION_SET_BY_CODE:
+        return stored
+    from_desig = permission_set_for_designation(user.get("designation"))
+    if from_desig:
+        return from_desig
+    ut = (user.get("user_type") or "").strip().lower()
+    if ut in USER_TYPE_TO_PERMISSION_SET:
+        return USER_TYPE_TO_PERMISSION_SET[ut]
+    role = (user.get("role") or "").strip().lower()
+    if role in ROLE_TO_PERMISSION_SET:
+        return ROLE_TO_PERMISSION_SET[role]
+    legacy = (user.get("legacy_role") or "").strip().lower()
+    if legacy in ROLE_TO_PERMISSION_SET:
+        return ROLE_TO_PERMISSION_SET[legacy]
+    # Historical PWS Admin logins without a designation defaulted to Principal.
+    if ut == UserRole.PWS_ADMIN.value or role == "pws_admin":
+        return "principal"
+    if ut == UserRole.ALPHA_ADMIN.value or role in ("alpha_admin", "admin"):
+        return "operations_admin"
+    return None
+
+
+def designations_for_permission_set(code: str) -> List[str]:
+    meta = PERMISSION_SET_BY_CODE.get(code) or {}
+    codes = list(meta.get("designations") or [])
+    extra = [alias for alias, canon in DESIGNATION_ALIASES.items() if canon in codes]
+    return list(dict.fromkeys(codes + extra))
+
+
+def roles_for_permission_set(code: str) -> List[str]:
+    return [role for role, mapped in ROLE_TO_PERMISSION_SET.items() if mapped == code]
+
+
+def users_matching_permission_set_filter(code: str) -> dict:
+    """Mongo filter for live users who should receive this permission set."""
+    designations = designations_for_permission_set(code)
+    roles = roles_for_permission_set(code)
+    clauses: List[dict] = [{"permission_set": code}]
+    if designations:
+        clauses.append({
+            "$expr": {
+                "$in": [
+                    {"$toUpper": {"$ifNull": ["$designation", ""]}},
+                    designations,
+                ]
+            }
+        })
+    if roles:
+        clauses.append({"role": {"$in": roles}})
+        clauses.append({"legacy_role": {"$in": roles}})
+    if code == "principal":
+        clauses.append({
+            "user_type": UserRole.PWS_ADMIN.value,
+            "$or": [
+                {"designation": {"$exists": False}},
+                {"designation": None},
+                {"designation": ""},
+                {"designation": "PRINCIPAL"},
+            ],
+        })
+        clauses.append({
+            "role": "pws_admin",
+            "$or": [
+                {"designation": {"$exists": False}},
+                {"designation": None},
+                {"designation": ""},
+                {"designation": "PRINCIPAL"},
+            ],
+        })
+    return {
+        "status": {"$ne": "deactivated"},
+        "$or": clauses,
+    }
 
 
 def user_type_for_admin(designation: Optional[str], organization: Optional[str]) -> str:

@@ -14,7 +14,7 @@ def demo_seed_enabled() -> bool:
 DEMO_USERS = [
     {"email": "admin@prarambhika.com", "password": "Admin@123", "name": "Rohan Sharma", "role": "admin", "organization": "ALPHA", "department": "ALPHA Operations"},
     {"email": "super@prarambhika.com", "password": "Super@123", "name": "Anita Verma", "role": "super_admin", "organization": "BOTH", "department": "Trustee"},
-    {"email": "principal@prarambhika.com", "password": "Principal@123", "name": "Meera Nair", "role": "principal", "organization": "PWS", "department": "Administration"},
+    {"email": "principal@prarambhika.com", "password": "Principal@123", "name": "Meera Nair", "role": "principal", "organization": "BOTH", "department": "Administration"},
     {"email": "vp@prarambhika.com", "password": "Vp@123", "name": "Arun Pandey", "role": "vice_principal", "organization": "PWS", "department": "Administration"},
     {"email": "teacher@prarambhika.com", "password": "Teacher@123", "name": "Priya Kumari", "role": "teacher", "organization": "PWS", "department": "Mathematics"},
     {"email": "coach@prarambhika.com", "password": "Coach@123", "name": "Vikram Singh", "role": "coach", "organization": "ALPHA", "department": "Cricket", "coach_type": "head"},

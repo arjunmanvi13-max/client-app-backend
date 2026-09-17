@@ -20,9 +20,29 @@ def normalize_role(raw_role: str) -> UserRole:
 
 
 def resolve_user_entity(user: dict) -> BusinessEntity:
-    org = (user.get("organization") or "PWS").upper()
+    role = (user.get("role") or "").strip().lower()
+    designation = (user.get("designation") or "").strip().upper()
+    if role == "principal" or designation == "PRINCIPAL":
+        return BusinessEntity.BOTH
+    perms = user.get("permissions") or {}
+    rbac = user.get("permissions_rbac") or {}
+    has_pws = bool(perms.get("view_students") or perms.get("add_students") or perms.get("view_staff"))
+    has_alpha = bool(
+        perms.get("view_players")
+        or perms.get("add_players")
+        or perms.get("edit_players")
+        or rbac.get("MANAGE_PLAYERS")
+        or rbac.get("ADD_ALPHA_PLAYERS")
+    )
+    if has_pws and has_alpha:
+        return BusinessEntity.BOTH
+    if has_alpha and not has_pws:
+        return BusinessEntity.ALPHA
+    if has_pws and not has_alpha:
+        return BusinessEntity.PWS
+    raw = (user.get("entity_scope") or user.get("organization") or "PWS").upper()
     try:
-        return BusinessEntity(org)
+        return BusinessEntity(raw)
     except ValueError:
         return BusinessEntity.PWS
 
@@ -80,12 +100,20 @@ def has_permission(
     if role == UserRole.SUPER_ADMIN:
         return entity_allows(resolve_user_entity(user), entity)
 
-    if entity and not entity_allows(resolve_user_entity(user), entity):
-        return False
+    is_principal = (
+        (user.get("role") or "").strip().lower() == "principal"
+        or (user.get("designation") or "").strip().upper() == "PRINCIPAL"
+        or (user.get("permission_set") or "").strip().lower() == "principal"
+    )
+    if is_principal and permission in (Permission.MANAGE_PLAYERS, Permission.ADD_ALPHA_PLAYERS):
+        return entity_allows(BusinessEntity.BOTH, entity)
 
     rbac_overrides = user.get("permissions_rbac") or {}
     if permission.value in rbac_overrides:
         return bool(rbac_overrides[permission.value])
+
+    if entity and not entity_allows(resolve_user_entity(user), entity):
+        return False
 
     if permission in permissions_for_role(role):
         return True
