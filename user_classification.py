@@ -25,6 +25,8 @@ PWS_DESIGNATIONS = (
     "VICE_PRINCIPAL",
     "ACADEMIC_HEAD",
     "EVENT_COORDINATOR",
+    "OPERATIONS_ADMIN",
+    "ACCOUNTS",
     "PWS_OFFICE_STAFF",
     "PWS_ACCOUNTS",
     "HOD",
@@ -33,6 +35,8 @@ PWS_DESIGNATIONS = (
 ALPHA_DESIGNATIONS = (
     "WARDEN",
     "COACH",
+    "OPERATIONS_ADMIN",
+    "ACCOUNTS",
     "ALPHA_ACCOUNTS",
     "ALPHA_OFFICE_STAFF",
 )
@@ -43,6 +47,8 @@ DESIGNATION_LABELS = {
     "VICE_PRINCIPAL": "Vice Principal",
     "ACADEMIC_HEAD": "Academic Head",
     "EVENT_COORDINATOR": "Event Co-ordinator",
+    "OPERATIONS_ADMIN": "Operations Admin",
+    "ACCOUNTS": "Accounts",
     "PWS_OFFICE_STAFF": "PWS Office Staff",
     "PWS_ACCOUNTS": "PWS Accounts",
     "HOD": "HOD",
@@ -59,6 +65,8 @@ DESIGNATION_TO_USER_TYPE: Dict[str, str] = {
     "VICE_PRINCIPAL": UserRole.PWS_ADMIN.value,
     "ACADEMIC_HEAD": UserRole.PWS_ADMIN.value,
     "EVENT_COORDINATOR": UserRole.PWS_ADMIN.value,
+    "OPERATIONS_ADMIN": UserRole.PWS_ADMIN.value,
+    "ACCOUNTS": UserRole.PWS_ACCOUNTS.value,
     "PWS_OFFICE_STAFF": UserRole.PWS_ADMIN.value,
     "PWS_ACCOUNTS": UserRole.PWS_ACCOUNTS.value,
     "HOD": UserRole.PWS_TEACHER.value,
@@ -227,6 +235,8 @@ DESIGNATION_TO_LEGACY_ROLE: Dict[str, str] = {
     "VICE_PRINCIPAL": "vice_principal",
     "ACADEMIC_HEAD": "pws_admin",
     "EVENT_COORDINATOR": "pws_admin",
+    "OPERATIONS_ADMIN": "pws_admin",
+    "ACCOUNTS": "pws_accounts",
     "PWS_OFFICE_STAFF": "pws_admin",
     "PWS_ACCOUNTS": "pws_accounts",
     "HOD": "teacher",
@@ -325,12 +335,17 @@ def organization_for_user_type(user_type: str) -> str:
 
 
 def legacy_role_for_user_type(user_type: str, designation: Optional[str] = None) -> str:
+    key = (designation or "").upper()
+    if key == "ACCOUNTS":
+        return "alpha_accounts" if user_type == UserRole.ALPHA_ACCOUNTS.value else "pws_accounts"
+    if key == "OPERATIONS_ADMIN":
+        return "admin" if user_type == UserRole.ALPHA_ADMIN.value else "pws_admin"
     if designation:
-        mapped = DESIGNATION_TO_LEGACY_ROLE.get(designation.upper())
+        mapped = DESIGNATION_TO_LEGACY_ROLE.get(key)
         if mapped:
             return mapped
     if user_type == UserRole.PWS_ADMIN.value and designation:
-        return DESIGNATION_TO_LEGACY_ROLE.get(designation.upper(), "principal")
+        return DESIGNATION_TO_LEGACY_ROLE.get(key, "principal")
     return USER_TYPE_TO_LEGACY_ROLE.get(user_type, user_type)
 
 
@@ -415,7 +430,7 @@ def validate_user_type_payload(
             )
     if not entity_scope:
         expected_org = organization_for_user_type(user_type)
-        if organization and organization != expected_org:
+        if organization and organization != expected_org and organization != "BOTH":
             raise ValueError(
                 f"User type {user_type} requires organization {expected_org}, not {organization}"
             )
@@ -431,10 +446,13 @@ def catalog_export() -> List[Dict[str, Any]]:
 
 
 def login_tier_catalog_export() -> Dict[str, Any]:
+    from directory_workflow import ADMIN_DESIGNATION_LABELS, ADMIN_DESIGNATIONS, PERMISSION_SET_CATALOG
     return {
         "loginTiers": list(LOGIN_TIER_CATALOG),
         "pwsDesignations": [{"code": c, "label": DESIGNATION_LABELS[c]} for c in PWS_DESIGNATIONS],
         "alphaDesignations": [{"code": c, "label": DESIGNATION_LABELS[c]} for c in ALPHA_DESIGNATIONS],
+        "adminDesignations": [{"code": c, "label": ADMIN_DESIGNATION_LABELS[c]} for c in ADMIN_DESIGNATIONS],
+        "permissionSets": PERMISSION_SET_CATALOG,
         "accessLevels": [
             {"code": "none", "label": "No Access"},
             {"code": "view", "label": "View Only"},

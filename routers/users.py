@@ -276,7 +276,12 @@ async def directory(
 async def create_user(payload: UserCreate, user: dict = Depends(get_current_user)):
     user_type = payload.user_type
     if payload.login_tier and payload.login_tier != "super_admin" and payload.designation:
-        user_type = user_type_from_designation(payload.designation, login_tier=payload.login_tier)
+        from directory_workflow import ADMIN_DESIGNATIONS, canonicalize_designation, user_type_for_admin
+        canon = canonicalize_designation(payload.designation)
+        if canon in ADMIN_DESIGNATIONS:
+            user_type = user_type_for_admin(canon, payload.entity_scope or payload.organization)
+        else:
+            user_type = user_type_from_designation(payload.designation, login_tier=payload.login_tier)
     if not user_type:
         raise HTTPException(400, "user_type or login_tier + designation is required")
     assert_can_create_login_user(user, user_type)
@@ -371,6 +376,10 @@ async def create_user(payload: UserCreate, user: dict = Depends(get_current_user
         entity_scope=payload.entity_scope or payload.organization,
         login_tier=payload.login_tier,
     )
+    from directory_workflow import permission_set_for_designation
+    doc["permission_set"] = payload.permission_set or permission_set_for_designation(doc.get("designation")) or (
+        "teacher" if user_type == UserRole.PWS_TEACHER.value else None
+    )
     _apply_teacher_profile_fields(
         doc,
         {
@@ -453,6 +462,7 @@ async def create_directory_teacher(payload: DirectoryTeacherCreate, user: dict =
         "reference_name": payload.reference_name.strip(),
         "reference_mobile": reference_mobile,
         "teacher_designation": "TEACHER",
+        "permission_set": "teacher",
         "created_at": now_utc().isoformat(),
     }
     if payload.enable_login:
@@ -542,7 +552,14 @@ async def update_user(user_id: str, payload: UserUpdate, user: dict = Depends(ge
     new_login_tier = body.get("login_tier", target.get("login_tier"))
     new_entity_scope = body.get("entity_scope") or body.get("organization") or target.get("entity_scope")
     if new_login_tier and new_designation:
-        new_user_type = user_type_from_designation(new_designation, login_tier=new_login_tier)
+        from directory_workflow import ADMIN_DESIGNATIONS, canonicalize_designation, permission_set_for_designation, user_type_for_admin
+        canon = canonicalize_designation(new_designation)
+        if canon in ADMIN_DESIGNATIONS:
+            new_user_type = user_type_for_admin(canon, new_entity_scope)
+        else:
+            new_user_type = user_type_from_designation(new_designation, login_tier=new_login_tier)
+        if not body.get("permission_set"):
+            upd["permission_set"] = permission_set_for_designation(new_designation)
     teacher_field_keys = (
         "date_of_joining", "date_of_birth", "address", "teacher_designation",
         "personal_email", "aadhaar_number", "qualification", "qualification_other",

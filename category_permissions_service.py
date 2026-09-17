@@ -182,3 +182,113 @@ async def permissions_for_user_type(user_type: str) -> Optional[Dict[str, Any]]:
         "permissions": stored.get("permissions") or {},
         "permissions_rbac": stored.get("permissions_rbac") or {},
     }
+
+
+async def get_permission_set(code: str) -> Dict[str, Any]:
+    from directory_workflow import PERMISSION_SET_BY_CODE, PERMISSION_SET_CODES
+    from rbac.enums import UserRole
+    if code not in PERMISSION_SET_CODES:
+        raise ValueError(f"Unknown permission set: {code}")
+    meta = PERMISSION_SET_BY_CODE[code]
+    catalog = permissions_catalog()
+    leaves = leaf_module_ids(catalog)
+    stored = await db.permission_sets.find_one({"code": code}, {"_id": 0})
+    compat = meta.get("compat_user_type") or UserRole.PWS_ADMIN.value
+    if stored and stored.get("modules"):
+        modules = {mid: bool(stored["modules"].get(mid)) for mid in leaves}
+    else:
+        modules = default_enabled_map(compat)
+        if code in ("student", "player"):
+            modules = {mid: False for mid in leaves}
+            if "dashboard" in modules:
+                modules["dashboard"] = True
+    if meta.get("locked"):
+        modules = {mid: True for mid in leaves}
+    assigned = await db.users.count_documents({
+        "status": {"$ne": "deactivated"},
+        "permission_set": code,
+    })
+    return {
+        "code": code,
+        "name": meta["name"],
+        "description": meta["description"],
+        "entity_scope": meta["scope"],
+        "eligible_categories": meta["categories"],
+        "eligible_designations": meta["designations"],
+        "locked": bool(meta.get("locked")),
+        "catalog": catalog,
+        "modules": modules,
+        "assigned_user_count": assigned,
+        "updated_at": stored.get("updated_at") if stored else None,
+        "updated_by_name": stored.get("updated_by_name") if stored else None,
+    }
+
+
+async def list_permission_sets() -> List[Dict[str, Any]]:
+    from directory_workflow import PERMISSION_SET_CODES
+    rows = []
+    for code in PERMISSION_SET_CODES:
+        doc = await get_permission_set(code)
+        leaf_ids = leaf_module_ids(doc["catalog"])
+        enabled_count = sum(1 for mid in leaf_ids if doc["modules"].get(mid))
+        rows.append({
+            "code": doc["code"],
+            "name": doc["name"],
+            "description": doc["description"],
+            "entity_scope": doc["entity_scope"],
+            "eligible_categories": doc["eligible_categories"],
+            "locked": doc["locked"],
+            "enabled_count": enabled_count,
+            "total_count": len(leaf_ids),
+            "assigned_user_count": doc["assigned_user_count"],
+            "updated_at": doc["updated_at"],
+            "updated_by_name": doc["updated_by_name"],
+        })
+    return rows
+
+
+async def save_permission_set(code: str, modules: Dict[str, bool], actor: dict) -> Dict[str, Any]:
+    from directory_workflow import PERMISSION_SET_BY_CODE, PERMISSION_SET_CODES
+    from rbac.enums import UserRole
+    if code not in PERMISSION_SET_CODES:
+        raise ValueError(f"Unknown permission set: {code}")
+    meta = PERMISSION_SET_BY_CODE[code]
+    if meta.get("locked"):
+        raise PermissionError("The Super Admin permission set is locked and cannot be edited")
+    catalog = permissions_catalog()
+    valid_ids = set(leaf_module_ids(catalog))
+    normalized = {mid: bool(modules.get(mid)) for mid in valid_ids}
+    compat = meta.get("compat_user_type") or UserRole.PWS_ADMIN.value
+    legacy, rbac = derive_permissions_from_modules(compat, normalized)
+    now = now_utc().isoformat()
+    await db.permission_sets.update_one(
+        {"code": code},
+        {"$set": {
+            "code": code,
+            "modules": normalized,
+            "permissions": legacy,
+            "permissions_rbac": rbac,
+            "updated_at": now,
+            "updated_by": actor["id"],
+            "updated_by_name": actor["name"],
+        }},
+        upsert=True,
+    )
+    result = await db.users.update_many(
+        {"permission_set": code},
+        {"$set": {"permissions": legacy, "permissions_rbac": rbac}},
+    )
+    await db.permission_audit.insert_one({
+        "id": str(uuid.uuid4()),
+        "at": now,
+        "actor_id": actor["id"],
+        "actor_name": actor["name"],
+        "target_permission_set": code,
+        "target_name": meta["name"],
+        "changes": {"modules": normalized},
+        "users_updated": result.modified_count,
+    })
+    out = await get_permission_set(code)
+    out["users_updated"] = result.modified_count
+    out["saved_at"] = now
+    return out

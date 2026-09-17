@@ -155,6 +155,14 @@ DESIGNATION_PRESETS: Dict[str, Dict[str, str]] = {
         "directory": "view", "fees": "none", "attendance": "view", "schedules": "edit",
         "tasks": "edit", "reports": "view", "approvals": "none", "expenses": "edit", "academics": "view",
     },
+    "OPERATIONS_ADMIN": {
+        "directory": "view", "fees": "view", "attendance": "view", "schedules": "view",
+        "tasks": "edit", "reports": "view", "approvals": "none", "expenses": "none", "academics": "view",
+    },
+    "ACCOUNTS": {
+        "directory": "view", "fees": "admin", "attendance": "none", "schedules": "none",
+        "tasks": "edit", "reports": "admin", "approvals": "edit", "expenses": "admin", "academics": "none",
+    },
     "PWS_OFFICE_STAFF": {
         "directory": "view", "fees": "view", "attendance": "view", "schedules": "view",
         "tasks": "edit", "reports": "view", "approvals": "none", "expenses": "none", "academics": "view",
@@ -192,4 +200,11 @@ DESIGNATION_PRESETS: Dict[str, Dict[str, str]] = {
 
 def preset_for_designation(designation: Optional[str]) -> Dict[str, str]:
     key = (designation or "").upper()
+    aliases = {
+        "PWS_OFFICE_STAFF": "OPERATIONS_ADMIN",
+        "ALPHA_OFFICE_STAFF": "OPERATIONS_ADMIN",
+        "PWS_ACCOUNTS": "ACCOUNTS",
+        "ALPHA_ACCOUNTS": "ACCOUNTS",
+    }
+    key = aliases.get(key, key)
     return dict(DESIGNATION_PRESETS.get(key) or {m["id"]: "none" for m in MODULE_MATRIX})

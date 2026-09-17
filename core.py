@@ -880,6 +880,7 @@ def public_user(u: dict) -> dict:
         "login_tier": u.get("login_tier"),
         "entity_scope": u.get("entity_scope") or u.get("organization"),
         "module_access": u.get("module_access"),
+        "permission_set": u.get("permission_set"),
         "teacher_designation": u.get("teacher_designation"),
         "date_of_joining": u.get("date_of_joining"),
         "date_of_birth": u.get("date_of_birth"),
@@ -942,6 +943,7 @@ class UserCreate(BaseModel):
     login_tier: Optional[Literal["super_admin", "admin", "staff"]] = None
     entity_scope: Optional[Literal["PWS", "ALPHA", "BOTH"]] = None
     module_access: Optional[dict] = None
+    permission_set: Optional[str] = None
     role: Optional[str] = None  # ignored — derived from user_type
     organization: Optional[Literal["PWS", "ALPHA", "BOTH"]] = None
     department: Optional[str] = None

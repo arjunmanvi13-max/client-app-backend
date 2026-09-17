@@ -12,8 +12,11 @@ from rbac.enums import Permission
 from user_classification import APPROVED_LOGIN_USER_TYPES
 from category_permissions_service import (
     get_category_modules,
+    get_permission_set,
     list_category_permissions,
+    list_permission_sets,
     save_category_modules,
+    save_permission_set,
 )
 
 router = APIRouter(tags=["permissions"])
@@ -52,6 +55,32 @@ async def update_category(user_type: str, payload: CategoryModulesPatch, user: d
         raise HTTPException(400, "Unknown user category")
     try:
         return await save_category_modules(user_type, payload.modules, user)
+    except PermissionError as e:
+        raise HTTPException(400, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/permissions/sets")
+async def list_sets(user: dict = Depends(get_current_user)):
+    _require_super_admin(user)
+    return {"sets": await list_permission_sets()}
+
+
+@router.get("/permissions/sets/{code}")
+async def get_set(code: str, user: dict = Depends(get_current_user)):
+    _require_super_admin(user)
+    try:
+        return await get_permission_set(code)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.put("/permissions/sets/{code}")
+async def update_set(code: str, payload: CategoryModulesPatch, user: dict = Depends(get_current_user)):
+    _require_super_admin(user)
+    try:
+        return await save_permission_set(code, payload.modules, user)
     except PermissionError as e:
         raise HTTPException(400, str(e))
     except ValueError as e:

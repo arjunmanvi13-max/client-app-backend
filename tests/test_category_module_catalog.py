@@ -87,16 +87,13 @@ def test_teachers_module_in_flat_directory_catalog():
     assert "students-players" not in ids
     directory = next(g for g in permissions_catalog() if g["id"] == "directory")
     module_ids = [m["id"] for m in directory["modules"]]
-    assert module_ids == ["directory-master", "staff", "coaches", "teachers-directory", "students", "players"]
+    assert module_ids == ["directory-master", "admins", "teachers-directory", "students", "players"]
     teachers = next(m for m in directory["modules"] if m["id"] == "teachers-directory")
     assert Permission.ADD_NEW_TEACHER.value in (teachers.get("rbac_permissions") or [])
 
 
-def test_manage_users_rosters_module_in_system_settings():
+def test_manage_users_rosters_removed_from_system_settings():
     ids = all_module_ids()
-    assert "manage-users-rosters" in ids
-    assert "manage-users-rosters" in leaf_module_ids()
-    defaults = default_enabled_map(UserRole.PWS_ADMIN.value)
-    assert defaults.get("manage-users-rosters") is False
-    super_defaults = default_enabled_map(UserRole.SUPER_ADMIN.value)
-    assert super_defaults.get("manage-users-rosters") is True
+    assert "manage-users-rosters" not in ids
+    assert "permissions" in ids
+    assert "admins" in ids
