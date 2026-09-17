@@ -167,6 +167,7 @@ async def enrich_students_for_list(rows: Iterable[dict]) -> list[dict]:
     enriched: list[dict] = []
     for row in items:
         out = dict(row)
+        sports_group = out.get("group") if out.get("kind") == "player" else None
         pws_class = out.get("pws_class") or ""
         out["class_name"] = class_display_name(pws_class)
         section = section_cache.get(out.get("section_id") or "")
@@ -179,6 +180,9 @@ async def enrich_students_for_list(rows: Iterable[dict]) -> list[dict]:
                     out["section_id"] = replacement["id"]
             out["group"] = section.get("label") or out.get("group")
             out["section_name"] = section_letter_from_label(section.get("label"))
+            if out.get("kind") == "player" and sports_group is not None:
+                out["group"] = sports_group
+                out["academic_section_label"] = section.get("label") or ""
         else:
             out["section_name"] = section_letter_from_label(out.get("group"))
         enriched.append(out)

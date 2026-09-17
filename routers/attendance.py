@@ -2,7 +2,7 @@
 import csv
 import io
 import uuid
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal, Dict
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -13,6 +13,18 @@ from core import (
     is_teacher_user, assert_teacher_student_scope, today_ist,
 )
 from academic_calendar import calendar_day_info, is_holiday_for_kind
+from attendance_roster import (
+    allowed_roster_kinds,
+    assert_kind_allowed,
+    attendance_role_view,
+    default_roster_kind,
+    hostel_resident_query,
+    normalize_entity_filter,
+    serialize_roster_person,
+    roster_summary,
+    columns_for_kind,
+    warden_centres,
+)
 from rbac.authorization import normalize_role
 from rbac.enums import UserRole
 from pymongo.errors import DuplicateKeyError
@@ -162,6 +174,225 @@ async def attendance_calendar_day(date: str, user: dict = Depends(get_current_us
     return calendar_day_info(date)
 
 
+def _csv_values(raw: Optional[str]) -> list[str]:
+    if not raw:
+        return []
+    return [part.strip() for part in str(raw).replace("|", ",").split(",") if part.strip()]
+
+
+def _person_matches_filters(
+    person: dict,
+    *,
+    centres: list[str],
+    sports: list[str],
+    categories: list[str],
+    batches: list[str],
+) -> bool:
+    if centres and (person.get("centre") or "") not in centres:
+        return False
+    if sports and (person.get("sport") or "") not in sports:
+        return False
+    if categories and (person.get("player_type") or "") not in categories:
+        return False
+    if batches and (person.get("group") or "") not in batches:
+        return False
+    return True
+
+
+async def _load_saved_marks(kind: str, date: str, session: str, person_ids: list) -> Dict[str, str]:
+    if not person_ids:
+        return {}
+    rows = await db.attendance.find(
+        {
+            "kind": kind,
+            "date": date,
+            "session": session,
+            "person_id": {"$in": person_ids},
+        },
+        {"_id": 0, "person_id": 1, "status": 1},
+    ).to_list(len(person_ids) + 50)
+    return {r["person_id"]: r.get("status") for r in rows if r.get("person_id") and r.get("status")}
+
+
+async def _teacher_subjects_for_section(teacher_user_id: str, section_id: Optional[str]) -> list[str]:
+    from routers.academic import _class_assignments_for_teacher
+    rows = await _class_assignments_for_teacher(teacher_user_id)
+    if section_id:
+        rows = [r for r in rows if r.get("section_id") == section_id]
+    subject_ids = [r.get("subject_id") for r in rows if r.get("subject_id")]
+    if not subject_ids:
+        return []
+    subjects = await db.subjects.find(
+        {"id": {"$in": subject_ids}},
+        {"_id": 0, "name": 1},
+    ).to_list(80)
+    return [s["name"] for s in subjects if s.get("name")]
+
+
+@router.get("/roster")
+async def attendance_roster(
+    kind: str,
+    date: str,
+    session: Optional[str] = None,
+    section_id: Optional[str] = None,
+    group: Optional[str] = None,
+    centre: Optional[str] = None,
+    sport: Optional[str] = None,
+    player_type: Optional[str] = None,
+    organization: Optional[str] = None,
+    entity: Optional[str] = None,
+    user: dict = Depends(get_current_user),
+):
+    """Role-scoped attendance roster for Take Attendance."""
+    kind = (kind or "").strip().lower()
+    if kind not in _MARK_PERM_BY_KIND:
+        raise HTTPException(400, "Invalid attendance kind")
+    entity_filter = normalize_entity_filter(entity)
+    assert_teacher_student_scope(user, kind)
+    assert_kind_allowed(user, kind, entity=entity_filter)
+
+    sess = "morning" if kind == "student" else normalize_session(session, kind=kind)
+    role_view = attendance_role_view(user)
+    holiday = is_holiday_for_kind(date, kind)
+    error = None
+    subtitle = ""
+    raw_people = []
+    query = {}
+
+    centres = _csv_values(centre)
+    sports = _csv_values(sport)
+    categories = _csv_values(player_type)
+    batches = _csv_values(group) if kind != "student" else []
+
+    if kind == "student":
+        from routers.academic import assigned_section_ids_for_teacher, assert_teacher_section_access
+        from student_academic import enrich_students_for_list
+        from academic_class_roster import class_roster_query_for_section_ids
+        if section_id:
+            await assert_teacher_section_access(user, section_id)
+            query = await class_roster_query_for_section_ids([section_id])
+        elif is_teacher_user(user):
+            assigned = await assigned_section_ids_for_teacher(user["id"])
+            query = await class_roster_query_for_section_ids(assigned)
+        else:
+            query = {"kind": "student", "status": {"$ne": "deactivated"}}
+        raw_people = await db.people.find(query, {"_id": 0}).sort("name", 1).to_list(1000)
+        raw_people = await enrich_students_for_list(raw_people)
+        if is_teacher_user(user):
+            subjects = await _teacher_subjects_for_section(user["id"], section_id)
+            subtitle = " · ".join([p for p in [group, ", ".join(subjects)] if p])
+            subtitle = subtitle or "Assigned class roster · includes ALPHA Boarding / Day Boarding"
+
+    elif kind == "player":
+        from routers.coach import _coach_visibility_filter, _assert_coach_can_access_players
+        from coach_scope import is_coach_user as _is_coach
+        query: dict = {"kind": "player", "status": {"$ne": "deactivated"}}
+        if _is_coach(user):
+            try:
+                _assert_coach_can_access_players(user)
+            except HTTPException as exc:
+                error = str(exc.detail)
+                query = {"kind": "player", "id": {"$in": []}}
+            else:
+                query = _coach_visibility_filter(user)
+        if len(centres) == 1:
+            query["centre"] = centres[0]
+        if len(sports) == 1:
+            query["sport"] = sports[0]
+        if len(categories) == 1:
+            query["player_type"] = categories[0]
+        if len(batches) == 1:
+            query["group"] = batches[0]
+        if not error:
+            raw_people = await db.people.find(query, {"_id": 0}).sort("name", 1).to_list(1000)
+            if len(centres) > 1 or len(sports) > 1 or len(categories) > 1 or len(batches) > 1:
+                raw_people = [
+                    p for p in raw_people
+                    if _person_matches_filters(
+                        p, centres=centres, sports=sports, categories=categories, batches=batches,
+                    )
+                ]
+        subtitle = "ALPHA training roster · sport / campus / batch"
+
+    elif kind == "hostel":
+        org = organization if organization in ("PWS", "ALPHA") else (
+            None if entity_filter == "BOTH" else entity_filter
+        )
+        w_centres = warden_centres(user) if role_view == "warden" else centres
+        query = hostel_resident_query(centres=w_centres or None, organization=org)
+        raw_people = await db.people.find(query, {"_id": 0}).sort("name", 1).to_list(1000)
+        from student_academic import enrich_students_for_list
+        raw_people = await enrich_students_for_list(raw_people)
+        subtitle = "Hostel & Boarding residents · ALPHA / PWS"
+
+    elif kind == "staff":
+        org = organization
+        if entity_filter in ("PWS", "ALPHA") and not org:
+            org = entity_filter
+        scoped = await _staff_query_for_user(user, organization=org)
+        query = merge_mongo_query(scoped, active_status_filter())
+        raw_people = await db.people.find(query, {"_id": 0}).sort("name", 1).to_list(500)
+        subtitle = f"{org or 'Institution'} office & academic staff"
+
+    elif kind == "teacher":
+        teachers = await db.users.find(
+            _pws_teacher_users_query(),
+            {"_id": 0, "password_hash": 0},
+        ).sort("name", 1).to_list(500)
+        raw_people = [{
+            **_teacher_directory_row(t),
+            "designation": t.get("designation"),
+            "department": t.get("department"),
+        } for t in teachers]
+        subtitle = "PWS teachers"
+
+    elif kind == "coach":
+        if not (_can_mark_coach_attendance(user) or user.get("role") == "coach"):
+            raise HTTPException(403, "Not allowed to view coach list")
+        q = await _coach_scope_filter(user)
+        if q.get("_block"):
+            raise HTTPException(403, "Not allowed")
+        coaches = await db.users.find(q, {"_id": 0, "password_hash": 0}).sort("name", 1).to_list(500)
+        raw_people = [{
+            "id": c["id"],
+            "name": c.get("name"),
+            "kind": "coach",
+            "organization": "ALPHA",
+            "coach_type": c.get("coach_type"),
+            "sport": (c.get("assigned_sports") or [c.get("assigned_sport")])[0] if (c.get("assigned_sports") or c.get("assigned_sport")) else None,
+            "centre": ", ".join(c.get("assigned_centres") or []),
+            "assigned_sports": c.get("assigned_sports") or [],
+            "assigned_centres": c.get("assigned_centres") or [],
+        } for c in coaches]
+        subtitle = "ALPHA coaches"
+
+    people = [serialize_roster_person(kind, p) for p in raw_people if p.get("id")]
+    marks = await _load_saved_marks(kind, date, sess, [p["id"] for p in people])
+    batches_available = sorted({p.get("group") for p in people if p.get("group")})
+    filter_payload = {
+        "batches": batches_available,
+        "entity": entity_filter,
+        "organization": organization,
+    }
+    return {
+        "kind": kind,
+        "role_view": role_view,
+        "allowed_kinds": allowed_roster_kinds(user, entity=entity_filter),
+        "default_kind": default_roster_kind(user, allowed_roster_kinds(user, entity=entity_filter)),
+        "entity": entity_filter,
+        "session": sess,
+        "date": date,
+        "holiday": holiday,
+        "subtitle": subtitle,
+        "error": error,
+        "columns": columns_for_kind(kind),
+        "people": people,
+        "marks": marks,
+        "summary": roster_summary(people, marks),
+        "filters": filter_payload,
+    }
+
+
 # -------- Staff Attendance (default-present workflow) --------
 def _can_mark_pws_staff(user: dict) -> bool:
     from rbac.guards import can_mark_pws_attendance
@@ -180,9 +411,13 @@ def _can_mark_alpha_staff(user: dict, centre: Optional[str]) -> bool:
 
 
 async def _staff_query_for_user(user: dict, centre: Optional[str] = None, organization: Optional[str] = None) -> dict:
+    from attendance_roster import is_academic_leadership_user
     q: dict = {"kind": "staff"}
     role = user.get("role")
     ut = user.get("user_type") or normalize_role(role or "")
+    if is_academic_leadership_user(user):
+        q["organization"] = organization or "PWS"
+        return q
     if is_admin(user) or role == UserRole.SUPER_ADMIN.value:
         if role == "admin" or ut == UserRole.ALPHA_ADMIN.value:
             q["organization"] = organization or "ALPHA"
@@ -234,11 +469,12 @@ async def staff_list(
 
 @router.post("/staff")
 async def mark_staff_attendance(payload: StaffAttendanceIn, user: dict = Depends(get_current_user)):
+    from attendance_roster import is_academic_leadership_user
     org = payload.organization
     role = user.get("role")
     ut = user.get("user_type") or normalize_role(role or "")
     if not is_admin(user):
-        if ut == UserRole.PWS_ADMIN.value or role in ("principal", "vice_principal"):
+        if is_academic_leadership_user(user) or ut == UserRole.PWS_ADMIN.value or role in ("principal", "vice_principal"):
             org = "PWS"
         elif ut == UserRole.ALPHA_ADMIN.value or role == "admin":
             org = "ALPHA"
@@ -315,9 +551,9 @@ def _can_mark_coach_attendance(user: dict) -> bool:
 
 async def _coach_scope_filter(user: dict) -> dict:
     base: dict = {"role": "coach", "status": {"$ne": "deactivated"}}
-    if user.get("role") == "super_admin":
+    if user.get("role") in ("super_admin", "admin", "alpha_admin", "pws_admin"):
         return base
-    if user.get("role") == "admin":
+    if is_admin(user):
         return base
     if user.get("role") == "coach" and user.get("coach_type") == "head":
         centres = user.get("assigned_centres") or []
@@ -509,26 +745,28 @@ async def _validate_batch_marks(
     if kind == "student":
         allowed_ids: Optional[set] = None
         if section_id:
+            from academic_class_roster import class_roster_query_for_section_ids
             allowed_ids = set(await db.people.distinct(
                 "id",
-                {"kind": "student", "section_id": section_id, "status": {"$ne": "deactivated"}},
+                await class_roster_query_for_section_ids([section_id]),
             ))
         elif group:
             allowed_ids = set(await db.people.distinct(
                 "id",
                 {"kind": "student", "group": group, "status": {"$ne": "deactivated"}},
             ))
-        elif user.get("role") == "teacher" and not is_admin(user):
+        elif is_teacher_user(user) and not is_admin(user):
             from routers.academic import assigned_section_ids_for_teacher
+            from academic_class_roster import class_roster_query_for_section_ids
             assigned = await assigned_section_ids_for_teacher(user["id"])
             if not assigned:
                 raise HTTPException(403, "No class assignments")
             allowed_ids = set(await db.people.distinct(
                 "id",
-                {"kind": "student", "section_id": {"$in": assigned}, "status": {"$ne": "deactivated"}},
+                await class_roster_query_for_section_ids(assigned),
             ))
         existing_ids = set(await db.people.distinct(
-            "id", {"id": {"$in": person_ids}, "kind": "student"}
+            "id", {"id": {"$in": person_ids}}
         ))
         for pid in person_ids:
             if pid not in existing_ids:
@@ -542,6 +780,17 @@ async def _validate_batch_marks(
         for pid in person_ids:
             if pid not in roster_ids:
                 raise HTTPException(403, "Player is not in your assigned roster")
+
+    elif kind == "hostel":
+        org = None
+        centres = warden_centres(user) if attendance_role_view(user) == "warden" else None
+        allowed_ids = set(await db.people.distinct(
+            "id",
+            hostel_resident_query(centres=centres or None, organization=org),
+        ))
+        for pid in person_ids:
+            if pid not in allowed_ids:
+                raise HTTPException(403, "Resident is not in your hostel roster")
 
 
 @router.post("/batch")

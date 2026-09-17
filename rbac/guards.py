@@ -136,6 +136,9 @@ def can_mark_teacher_attendance(user: dict) -> bool:
         return True
     if can_mark_pws_attendance(user):
         return True
+    from attendance_roster import is_academic_leadership_user
+    if is_academic_leadership_user(user):
+        return True
     if not has_permission(user, Permission.MARK_TEACHER_ATTENDANCE, entity=BusinessEntity.PWS):
         return False
     role = normalize_role(user.get("role", ""))

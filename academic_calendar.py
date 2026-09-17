@@ -20,6 +20,7 @@ def calendar_day_info(date_str: str) -> Dict[str, Any]:
         "player": False,
         "staff": False,
         "coach": False,
+        "hostel": False,
     }
     return {
         "date": date_str,

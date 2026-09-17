@@ -5,8 +5,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from core import (
     db, get_current_user, is_admin, is_super_admin, get_perm, now_utc,
-    is_login_user_active,
+    is_login_user_active, is_teacher_user,
 )
+from academic_class_roster import class_roster_query_for_section_ids
 
 def _assert_teacher_assignable(teacher: dict) -> None:
     if not is_login_user_active(teacher):
@@ -119,7 +120,7 @@ async def resolve_section_group(section_id: str) -> tuple[str, str]:
 
 
 async def assert_teacher_section_access(user: dict, section_id: str) -> None:
-    if user.get("role") != "teacher":
+    if not is_teacher_user(user):
         return
     assigned = await assigned_section_ids_for_teacher(user["id"])
     if section_id not in assigned:
@@ -133,7 +134,7 @@ async def assert_teacher_subject_access(
     academic_year_id: Optional[str] = None,
 ) -> None:
     """Teacher must have an explicit class assignment for section + subject."""
-    if user.get("role") != "teacher":
+    if not is_teacher_user(user):
         return
     await assert_teacher_section_access(user, section_id)
     subjects = await assigned_subject_ids_for_teacher(user["id"], section_id, academic_year_id)
@@ -444,9 +445,9 @@ async def create_section(payload: SectionIn, user: dict = Depends(get_current_us
 
 
 async def _section_delete_blockers(section_id: str, academic_year_id: str) -> Optional[str]:
-    student_count = await db.people.count_documents({"kind": "student", "section_id": section_id, "status": {"$ne": "deactivated"}})
+    student_count = await db.people.count_documents(await class_roster_query_for_section_ids([section_id]))
     if student_count:
-        return f"Cannot delete section: {student_count} active student(s) are assigned to it."
+        return f"Cannot delete section: {student_count} active student(s) or linked ALPHA player(s) are assigned to it."
     if await db.teacher_class_assignments.count_documents({"section_id": section_id, "academic_year_id": academic_year_id}):
         return "Cannot delete section: teacher class assignments still reference it."
     if await db.teacher_section_assignments.count_documents({"section_id": section_id, "academic_year_id": academic_year_id}):
@@ -530,17 +531,19 @@ async def delete_section(section_id: str, user: dict = Depends(get_current_user)
 
 @router.get("/sections/for-attendance")
 async def sections_for_attendance(user: dict = Depends(get_current_user)):
-    if not (is_admin(user) or get_perm(user, "mark_student_attendance")):
+    if not (is_admin(user) or is_teacher_user(user) or get_perm(user, "mark_student_attendance")):
         raise HTTPException(403, "Student attendance permission required")
     open_year = await get_open_academic_year()
     if not open_year:
         return {"academic_year": None, "sections": []}
-    q: dict = {"academic_year_id": open_year["id"], "entity_id": ENTITY_PWS}
-    if user.get("role") == "teacher":
+    if is_teacher_user(user):
         assigned = await assigned_section_ids_for_teacher(user["id"], open_year["id"])
         if not assigned:
             return {"academic_year": open_year, "sections": []}
-        q["id"] = {"$in": assigned}
+        sections = await db.sections.find({"id": {"$in": assigned}}, {"_id": 0}).sort("label", 1).to_list(200)
+        return {"academic_year": open_year, "sections": sections}
+    q: dict = {"academic_year_id": open_year["id"]}
+    q["$or"] = [{"entity_id": ENTITY_PWS}, {"entity_id": {"$exists": False}}]
     sections = await db.sections.find(q, {"_id": 0}).sort("label", 1).to_list(200)
     return {"academic_year": open_year, "sections": sections}
 

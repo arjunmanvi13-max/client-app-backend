@@ -18,7 +18,7 @@ from core import (
     is_alpha_admin_user,
     is_alpha_accounts_user, today_ist,
 )
-from notifications_service import normalize_notification, notification_filter_for_user
+from academic_class_roster import class_roster_query_for_section_ids
 
 
 def _entity_param(entity: Optional[str]) -> str:
@@ -159,7 +159,7 @@ async def teacher_dashboard(user: dict) -> dict:
 
             student_ids = await db.people.distinct(
                 "id",
-                {"kind": "student", "section_id": r["section_id"], "status": {"$ne": "deactivated"}},
+                await class_roster_query_for_section_ids([r["section_id"]]),
             )
             marked = await db.attendance.count_documents({
                 "person_id": {"$in": student_ids},

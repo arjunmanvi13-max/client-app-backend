@@ -11,6 +11,7 @@ from routers.academic import (
     assert_teacher_section_access,
     assigned_section_ids_for_teacher,
 )
+from academic_class_roster import class_roster_query_for_section_ids, is_pws_linked_player, is_pws_linked_player_type
 from coach_scope import (
     coach_scope_metadata,
     validate_coach_sport_param,
@@ -186,6 +187,8 @@ def _assert_can_view_person(user: dict, person: dict) -> None:
         if person["id"] not in (user.get("linked_person_ids") or []):
             raise HTTPException(404, "Person not found")
         return
+    if is_teacher_user(user) and is_pws_linked_player(person):
+        return
     if kind:
         _assert_can_list_kind(user, kind)
     if is_coach_user(user) and kind == "player":
@@ -240,15 +243,23 @@ async def list_people(
     if section_id and kind == "student":
         await assert_teacher_section_access(user, section_id)
     query: dict = {}
-    if kind:
-        query["kind"] = kind
-    if section_id:
-        query["section_id"] = section_id
-    elif group:
-        query["group"] = group
-    elif kind == "student" and user.get("role") == "teacher":
-        assigned = await assigned_section_ids_for_teacher(user["id"])
-        query["section_id"] = {"$in": assigned} if assigned else {"$in": []}
+    use_class_roster = kind == "student" and bool(section_id or (is_teacher_user(user) and not group))
+    if use_class_roster:
+        if section_id:
+            query = await class_roster_query_for_section_ids([section_id])
+        else:
+            assigned = await assigned_section_ids_for_teacher(user["id"])
+            query = await class_roster_query_for_section_ids(assigned)
+    else:
+        if kind:
+            query["kind"] = kind
+        if section_id:
+            query["section_id"] = section_id
+        elif group:
+            query["group"] = group
+        elif kind == "student" and is_teacher_user(user):
+            assigned = await assigned_section_ids_for_teacher(user["id"])
+            query["section_id"] = {"$in": assigned} if assigned else {"$in": []}
     if sport:
         if is_coach_user(user) and kind == "player":
             try:
@@ -276,7 +287,7 @@ async def list_people(
         query["gender"] = gender
     if status:
         query["status"] = status
-    elif kind in ("player", "student", "staff", "teacher") and not include_deactivated:
+    elif kind in ("player", "student", "staff", "teacher") and not include_deactivated and not use_class_roster:
         query["status"] = {"$ne": "deactivated"}
     if q:
         query = _merge_mongo_filters(query, _search_filter(q))
@@ -291,9 +302,10 @@ async def list_people(
         # Coach may only list players
         return []
     inst = resolve_user_institution(user, institution)
-    entity_f = person_entity_filter(inst)
-    if entity_f:
-        query = _merge_mongo_filters(query, entity_f)
+    if not use_class_roster:
+        entity_f = person_entity_filter(inst)
+        if entity_f:
+            query = _merge_mongo_filters(query, entity_f)
     if is_sports_admin(user):
         if kind in ("student", "teacher"):
             return []
@@ -322,7 +334,10 @@ async def get_person(person_id: str, user: dict = Depends(get_current_user)):
     person = await db.people.find_one({"id": person_id}, {"_id": 0})
     if not person:
         raise HTTPException(404, "Person not found")
-    assert_person_entity_access(user, person)
+    if is_teacher_user(user) and is_pws_linked_player(person):
+        await assert_teacher_section_access(user, person.get("section_id") or "")
+    else:
+        assert_person_entity_access(user, person)
     _assert_can_view_person(user, person)
     if person.get("kind") == "student" and user.get("role") == "teacher":
         await assert_teacher_section_access(user, person.get("section_id") or "")
@@ -454,6 +469,9 @@ async def create_person(payload: PersonCreate, user: dict = Depends(get_current_
         )
         if not payload.date_of_admission:
             raise HTTPException(400, "Date of admission is required for players")
+        if is_pws_linked_player_type(payload.player_type):
+            if not (payload.pws_class or "").strip() or not payload.section_id:
+                raise HTTPException(400, "PWS class and section are required for Boarding and Day Boarding players")
         if user.get("role") == "coach":
             centres, sports = _coach_assignment_lists(user)
             try:
@@ -483,6 +501,10 @@ async def create_person(payload: PersonCreate, user: dict = Depends(get_current_
         sid, label = await resolve_section_group(payload.section_id)
         doc["section_id"] = sid
         doc["group"] = label
+    elif payload.kind == "player" and payload.section_id:
+        sid, _label = await resolve_section_group(payload.section_id)
+        doc["section_id"] = sid
+        # Keep sports batch in `group`; academic class lives on pws_class + section_id.
     if payload.kind == "student":
         doc = await sync_student_academic_fields(doc)
     if payload.kind == "staff":
@@ -619,6 +641,16 @@ async def update_person(person_id: str, payload: PersonUpdate, user: dict = Depe
         synced = await sync_student_academic_fields(merged)
         upd["section_id"] = synced.get("section_id")
         upd["group"] = synced.get("group")
+    if target["kind"] == "player":
+        if upd.get("section_id") == "":
+            upd["section_id"] = None
+        elif upd.get("section_id"):
+            sid, _label = await resolve_section_group(upd["section_id"])
+            upd["section_id"] = sid
+        merged_player = {**target, **upd}
+        if is_pws_linked_player_type(merged_player.get("player_type")):
+            if not (merged_player.get("pws_class") or "").strip() or not merged_player.get("section_id"):
+                raise HTTPException(400, "PWS class and section are required for Boarding and Day Boarding players")
     if target["kind"] == "student":
         merged_norm = _normalize_pws_student({**target, **upd})
         upd["is_resident"] = merged_norm.get("is_resident", target.get("is_resident"))

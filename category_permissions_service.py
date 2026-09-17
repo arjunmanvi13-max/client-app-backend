@@ -346,6 +346,15 @@ async def overlay_permission_set(user: dict) -> dict:
             if user.get("id") and needs_scope:
                 persist["entity_scope"] = "BOTH"
                 persist["organization"] = "BOTH"
+        if code == "teacher":
+            merged = dict(user.get("permissions") or {})
+            merged["mark_student_attendance"] = True
+            merged["view_students"] = True
+            merged["dashboard_access"] = True
+            user["permissions"] = merged
+            rbac_map = dict(user.get("permissions_rbac") or {})
+            rbac_map["MARK_STUDENT_ATTENDANCE"] = True
+            user["permissions_rbac"] = rbac_map
         if persist and user.get("id"):
             try:
                 await db.users.update_one({"id": user["id"]}, {"$set": persist})
