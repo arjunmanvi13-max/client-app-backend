@@ -15,9 +15,9 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from alpha_centre_rules import defense_colony_advanced_slot_error
+from pws_class_catalog import CLASS_LIST, normalize_class_value
 from pws_fee_structure import (
     FEE_CATEGORIES,
-    PWS_CLASSES,
     PWS_STUDENT_TYPES,
     TRANSPORT_DISTANCES,
 )
@@ -144,6 +144,16 @@ def coerce_aadhaar(raw: str) -> Optional[str]:
     return s
 
 
+def coerce_pws_class(raw: str) -> Optional[str]:
+    s = (raw or "").strip()
+    if not s:
+        return None
+    hit = normalize_class_value(s)
+    if hit is None:
+        raise CellError("must be one of: " + ", ".join(CLASS_LIST))
+    return hit
+
+
 def make_enum_coercer(allowed: Sequence[str], *, aliases: Optional[Dict[str, str]] = None) -> Callable[[str], Optional[str]]:
     lookup = {a.strip().lower(): a for a in allowed}
     for k, v in (aliases or {}).items():
@@ -230,7 +240,8 @@ STUDENT_SPEC = SheetSpec(
         Column("Admission Number", "admission_number", example="PWS2026001",
                note="Must be unique; leave blank to skip"),
         Column("Roll Number", "roll_number", example="12"),
-        _enum(PWS_CLASSES, label="Class", target="pws_class", required=True, example="Class IX"),
+        _enum(CLASS_LIST, label="Class", target="pws_class", required=True, example="Class IX",
+              coerce=coerce_pws_class),
         _enum(SECTION_LETTERS, label="Section", target="_section_letter", example="A"),
         _enum(GENDERS, label="Gender", target="gender", example="Male"),
         Column("Date of Birth", "dob", coerce_date, example="2012-06-14",
@@ -318,7 +329,8 @@ PLAYER_SPEC = SheetSpec(
         Column("Monthly Fee Override", "monthly_fee_override", coerce_money, example=""),
         Column("Registration Fee Override", "registration_fee_override", coerce_money, example=""),
         Column("Hostel Fee Override", "hostel_fee_override", coerce_money, example=""),
-        _enum(PWS_CLASSES, label="Boarding Class", target="pws_class", example="",
+        _enum(CLASS_LIST, label="Boarding Class", target="pws_class", example="",
+              coerce=coerce_pws_class,
               note="Only for Boarding players who also attend PWS"),
         _enum(SECTION_LETTERS, label="Boarding Section", target="_section_letter", example=""),
         _enum(STATUSES, label="Status", target="status", example="active"),

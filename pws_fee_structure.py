@@ -7,12 +7,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional
 
+from pws_class_catalog import CLASS_LIST, normalize_class_value
+
 PWS_ACADEMIC_YEAR = "2026-27"
 PWS_FY_START = "2026-04"
 PWS_FY_END = "2027-03"
 
 PWS_STUDENT_TYPES = ("Day School", "Boarding", "Day Boarding")
-PWS_CLASSES = (
+PWS_CLASSES = CLASS_LIST
+# LKG shares Nursery fee bands so inserting it into CLASS_LIST does not shift indexes.
+_FEE_ORDER = (
     "Nursery", "UKG",
     "Class I", "Class II", "Class III", "Class IV", "Class V", "Class VI",
     "Class VII", "Class VIII", "Class IX", "Class X",
@@ -38,8 +42,11 @@ BASE_FEES = {
 
 
 def _class_idx(pws_class: str) -> int:
+    canon = normalize_class_value(pws_class) or pws_class
+    if canon == "LKG":
+        canon = "Nursery"
     try:
-        return PWS_CLASSES.index(pws_class)
+        return _FEE_ORDER.index(canon)
     except ValueError:
         return 0
 
@@ -245,7 +252,7 @@ def student_type_to_legacy(pws_student_type: Optional[str], is_resident: bool = 
 
 def pws_student_profile_from_person(person: dict) -> dict:
     """Normalize person document to PWS fee profile."""
-    pws_class = person.get("pws_class") or person.get("group") or "Class I"
+    pws_class = normalize_class_value(person.get("pws_class") or person.get("group")) or "Class I"
     if pws_class not in PWS_CLASSES:
         pws_class = "Class I"
     transport_enabled = bool(person.get("transport_enabled"))

@@ -23,6 +23,7 @@ from routers.coach import _coach_visibility_filter, _coach_assignment_lists
 from people_enrollment import assign_enrollment_ids
 from approval_types import entity_from_person, role_label_from_person
 from student_academic import enrich_students_for_list, sync_student_academic_fields
+from pws_class_catalog import normalize_class_value, pws_class_mongo_filter
 
 router = APIRouter(prefix="/people", tags=["people"])
 
@@ -281,8 +282,10 @@ async def list_people(
         query["centre"] = centre
     if player_type:
         query["player_type"] = player_type
-    if pws_class and kind == "student":
-        query["pws_class"] = pws_class
+    if pws_class:
+        class_filter = pws_class_mongo_filter(pws_class)
+        if class_filter:
+            query.update(class_filter)
     if gender:
         query["gender"] = gender
     if status:
@@ -437,6 +440,7 @@ def _age_from_dob(dob: Optional[str]) -> Optional[int]:
         return None
 
 def _normalize_alpha_player(doc: dict) -> dict:
+    doc = _coerce_pws_class(doc)
     if doc.get("kind") != "player":
         return doc
     ptype = (doc.get("player_type") or "").strip()
@@ -444,7 +448,17 @@ def _normalize_alpha_player(doc: dict) -> dict:
     return doc
 
 
+def _coerce_pws_class(doc: dict) -> dict:
+    raw = doc.get("pws_class")
+    if isinstance(raw, str) and raw.strip():
+        canon = normalize_class_value(raw)
+        if canon:
+            doc["pws_class"] = canon
+    return doc
+
+
 def _normalize_pws_student(doc: dict) -> dict:
+    doc = _coerce_pws_class(doc)
     if doc.get("kind") != "student":
         return doc
     from pws_fee_structure import transport_amount

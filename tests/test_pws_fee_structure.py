@@ -14,6 +14,7 @@ from pws_fee_structure import (
 
 def test_tuition_by_class_band():
     assert tuition_amount("Nursery") == 1300
+    assert tuition_amount("LKG") == 1300
     assert tuition_amount("UKG") == 1300
     assert tuition_amount("Class I") == 1800
     assert tuition_amount("Class III") == 1800

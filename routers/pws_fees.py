@@ -8,6 +8,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from core import db, get_current_user, get_perm, is_super_admin, now_utc, derive_person_entities, format_date_display, format_month_display, today_ist, current_month_ist, to_ist_day
+from pws_class_catalog import normalize_class_value
 from pws_fee_structure import (
     PWS_ACADEMIC_YEAR,
     PWS_CLASSES,
@@ -111,19 +112,20 @@ class PreviewIn(BaseModel):
 @router.post("/preview")
 async def preview_fees(payload: PreviewIn, user: dict = Depends(get_current_user)):
     _require_view_fees(user)
-    if payload.pws_class not in PWS_CLASSES:
+    pws_class = normalize_class_value(payload.pws_class)
+    if pws_class not in PWS_CLASSES:
         raise HTTPException(400, f"Invalid class — choose from {PWS_CLASSES}")
     if payload.transport_enabled and not payload.transport_distance:
         raise HTTPException(400, "transport_distance required when transport is enabled")
     amounts = resolve_category_amounts(
-        payload.pws_class,
+        pws_class,
         payload.transport_enabled,
         payload.transport_distance,
         payload.overrides if _can_override_fees(user) else None,
     )
     admission = payload.date_of_admission or today_ist()
     schedule = build_pws_fee_schedule(
-        payload.pws_class,
+        pws_class,
         admission,
         payload.transport_enabled,
         payload.transport_distance,

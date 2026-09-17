@@ -7,13 +7,13 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Optional
 
-from student_academic import (
-    PWS_CLASS_TO_GRADE_PREFIX,
-    class_display_name,
-    grade_aliases_for_pws_class,
-    normalize_grade_key,
-    section_letter_from_label,
+from pws_class_catalog import (
+    CLASS_TO_GRADE_KEY,
+    class_aliases,
+    format_class_display,
+    normalize_class_value,
 )
+from student_academic import section_letter_from_label
 
 PWS_LINKED_PLAYER_TYPES = ("Boarding", "Day Boarding")
 PWS_LINKED_PLAYER_TYPE_ALIASES = {
@@ -38,10 +38,8 @@ def is_pws_linked_player(person: dict) -> bool:
 
 
 def pws_classes_for_grade_name(grade_name: Optional[str]) -> list[str]:
-    gn = normalize_grade_key(grade_name or "")
-    if not gn:
-        return []
-    return [pws for pws in PWS_CLASS_TO_GRADE_PREFIX if gn in grade_aliases_for_pws_class(pws)]
+    canon = normalize_class_value(grade_name)
+    return [canon] if canon else []
 
 
 def group_aliases_for_section(
@@ -70,9 +68,10 @@ def group_aliases_for_section(
         aliases.add(raw.replace(" ", "").replace("-", ""))
     heads: list[str] = []
     for pws in pws_list:
-        num = PWS_CLASS_TO_GRADE_PREFIX.get(pws) or ""
-        display = class_display_name(pws)
+        num = CLASS_TO_GRADE_KEY.get(pws) or ""
+        display = format_class_display(pws)
         heads.extend([pws, num, display, f"Std {num}", f"Grade {num}", f"Class {num}"])
+        heads.extend(class_aliases(pws))
     heads.extend(list(prefixes))
     for head in dict.fromkeys(h.strip() for h in heads if h and str(h).strip()):
         if letter:
@@ -148,12 +147,14 @@ def academic_class_roster_query(
             "academic_section_label": label_clause,
         })
     for pws, letter in pws_pairs:
-        or_clauses.append({"kind": "student", "pws_class": pws, "section_name": letter})
-        or_clauses.append({"kind": "student", "pws_class": pws, "section": letter})
+        aliases = class_aliases(pws)
+        pws_clause: Any = aliases[0] if len(aliases) == 1 else {"$in": aliases}
+        or_clauses.append({"kind": "student", "pws_class": pws_clause, "section_name": letter})
+        or_clauses.append({"kind": "student", "pws_class": pws_clause, "section": letter})
         or_clauses.append({
             "kind": "player",
             "player_type": {"$in": list(PWS_LINKED_PLAYER_TYPES)},
-            "pws_class": pws,
+            "pws_class": pws_clause,
             "section_name": letter,
         })
     return {

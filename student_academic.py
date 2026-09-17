@@ -6,62 +6,21 @@ from typing import Dict, Iterable, Optional
 
 from core import db
 
-PWS_CLASS_DISPLAY: Dict[str, str] = {
-    "Nursery": "Nur",
-    "LKG": "LKG",
-    "UKG": "UKG",
-    "Class I": "Std 1",
-    "Class II": "Std 2",
-    "Class III": "Std 3",
-    "Class IV": "Std 4",
-    "Class V": "Std 5",
-    "Class VI": "Std 6",
-    "Class VII": "Std 7",
-    "Class VIII": "Std 8",
-    "Class IX": "Std 9",
-    "Class X": "Std 10",
-}
+from pws_class_catalog import (
+    CLASS_TO_GRADE_KEY as PWS_CLASS_TO_GRADE_PREFIX,
+    format_class_display as class_display_name,
+    grade_aliases_for_class as grade_aliases_for_pws_class,
+    normalize_class_value,
+    same_class,
+)
 
-PWS_CLASS_TO_GRADE_PREFIX: Dict[str, str] = {
-    "Nursery": "Nur",
-    "LKG": "LKG",
-    "UKG": "UKG",
-    "Class I": "1",
-    "Class II": "2",
-    "Class III": "3",
-    "Class IV": "4",
-    "Class V": "5",
-    "Class VI": "6",
-    "Class VII": "7",
-    "Class VIII": "8",
-    "Class IX": "9",
-    "Class X": "10",
-}
+# Back-compat: callers still import these names.
+PWS_CLASS_DISPLAY = {c: c for c in PWS_CLASS_TO_GRADE_PREFIX}
 
 
 def normalize_grade_key(name: str) -> str:
-    return (name or "").strip().lower().replace("std", "").replace("grade", "").strip()
-
-
-def grade_aliases_for_pws_class(pws_class: str) -> set[str]:
-    aliases: set[str] = set()
-    prefix = PWS_CLASS_TO_GRADE_PREFIX.get(pws_class or "")
-    if prefix:
-        aliases.add(normalize_grade_key(prefix))
-    aliases.add(normalize_grade_key(pws_class or ""))
-    if prefix and prefix.isdigit():
-        aliases.add(normalize_grade_key(f"std {prefix}"))
-        aliases.add(normalize_grade_key(f"grade {prefix}"))
-    if normalize_grade_key(pws_class or "") in {"nur", "nursery"} or prefix == "Nur":
-        aliases.update({"nur", "nursery"})
-    return {a for a in aliases if a}
-
-
-def class_display_name(pws_class: Optional[str]) -> str:
-    raw = (pws_class or "").strip()
-    if not raw:
-        return ""
-    return PWS_CLASS_DISPLAY.get(raw, raw)
+    folded = (name or "").strip().lower().replace("std", "").replace("grade", "").replace("class", "")
+    return re.sub(r"[^a-z0-9]+", " ", folded).strip() or (name or "").strip().lower()
 
 
 def section_letter_from_label(label: Optional[str]) -> str:
@@ -70,11 +29,7 @@ def section_letter_from_label(label: Optional[str]) -> str:
 
 
 def grade_matches_pws_class(grade_name: Optional[str], pws_class: Optional[str]) -> bool:
-    if not grade_name or not pws_class:
-        return False
-    aliases = grade_aliases_for_pws_class(pws_class)
-    gn = normalize_grade_key(grade_name)
-    return gn in aliases
+    return same_class(grade_name, pws_class)
 
 
 def _section_matches_class(section: dict, pws_class: str, letter: str) -> bool:
@@ -111,6 +66,9 @@ async def find_section_for_class_letter(
 async def sync_student_academic_fields(doc: dict, *, fix_mismatch: bool = True) -> dict:
     """Ensure section_id/group/class display fields are consistent with pws_class."""
     out = dict(doc)
+    canon = normalize_class_value(out.get("pws_class"))
+    if canon:
+        out["pws_class"] = canon
     pws_class = (out.get("pws_class") or "").strip()
     out["class_name"] = class_display_name(pws_class)
 
@@ -168,6 +126,9 @@ async def enrich_students_for_list(rows: Iterable[dict]) -> list[dict]:
     for row in items:
         out = dict(row)
         sports_group = out.get("group") if out.get("kind") == "player" else None
+        canon = normalize_class_value(out.get("pws_class"))
+        if canon:
+            out["pws_class"] = canon
         pws_class = out.get("pws_class") or ""
         out["class_name"] = class_display_name(pws_class)
         section = section_cache.get(out.get("section_id") or "")

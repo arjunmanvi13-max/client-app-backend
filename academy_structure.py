@@ -11,6 +11,7 @@ from core import (
     is_super_admin, today_ist,
     ALPHA_CENTRES,
 )
+from pws_class_catalog import normalize_class_value
 
 ACADEMY_CATEGORIES = ["Day Boarding", "Boarding", "Hostel", "Daily Players"]
 
@@ -28,16 +29,16 @@ PWS_CLASS_LABELS = {
     "nursery": "Nursery",
     "lkg": "LKG",
     "ukg": "UKG",
-    "std1": "Std 1",
-    "std2": "Std 2",
-    "std3": "Std 3",
-    "std4": "Std 4",
-    "std5": "Std 5",
-    "std6": "Std 6",
-    "std7": "Std 7",
-    "std8": "Std 8",
-    "std9": "Std 9",
-    "std10": "Std 10",
+    "std1": "Class I",
+    "std2": "Class II",
+    "std3": "Class III",
+    "std4": "Class IV",
+    "std5": "Class V",
+    "std6": "Class VI",
+    "std7": "Class VII",
+    "std8": "Class VIII",
+    "std9": "Class IX",
+    "std10": "Class X",
 }
 
 PWS_DB_CLASS_TO_KEY = {
@@ -226,7 +227,7 @@ async def _count_pws_by_class(inst: str) -> Dict[str, int]:
         base_q = {"$and": [base_q, ent_f]}
     students = await db.people.find(base_q, {"_id": 0, "pws_class": 1}).to_list(5000)
     for row in students:
-        key = PWS_DB_CLASS_TO_KEY.get(row.get("pws_class") or "")
+        key = PWS_DB_CLASS_TO_KEY.get(normalize_class_value(row.get("pws_class")) or "")
         if key:
             counts[key] += 1
     return counts

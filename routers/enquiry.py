@@ -46,11 +46,7 @@ RELATIONSHIPS = ("Mother", "Father", "Guardian", "Other")
 ALPHA_SPORTS = ("Cricket", "Football")
 ALPHA_CATEGORIES = ("Daily", "Hostel", "Boarding", "Day Boarding")
 ALPHA_CAMPUSES = ("Balua", "Harding Park", "Defense Colony")
-PWS_CLASSES = (
-    "Nursery", "UKG",
-    "Class I", "Class II", "Class III", "Class IV", "Class V", "Class VI",
-    "Class VII", "Class VIII", "Class IX", "Class X",
-)
+from pws_class_catalog import CLASS_LIST as PWS_CLASSES, normalize_class_value
 
 
 _ENQUIRY_USER_TYPES = (
@@ -247,8 +243,10 @@ def _validate(payload: EnquiryUpsert) -> None:
 
 def _core(payload: EnquiryUpsert, assigned: Optional[dict]) -> dict:
     applying = payload.applying_for.strip()
-    if payload.institution == "PWS" and not applying:
-        applying = payload.current_class or ""
+    if payload.institution == "PWS":
+        applying = normalize_class_value(applying) or applying
+        if not applying:
+            applying = normalize_class_value(payload.current_class) or (payload.current_class or "")
     return {
         "institution": payload.institution,
         "academic_year": (payload.academic_year or "2026-27").strip(),

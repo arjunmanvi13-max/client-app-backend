@@ -63,7 +63,12 @@ def test_roster_query_matches_pws_class_and_section_letter():
         "name": "A",
     }])
     assert any(
-        c.get("kind") == "student" and c.get("pws_class") == "Class III" and c.get("section_name") == "A"
+        c.get("kind") == "student"
+        and c.get("section_name") == "A"
+        and (
+            c.get("pws_class") == "Class III"
+            or (isinstance(c.get("pws_class"), dict) and "Class III" in (c.get("pws_class") or {}).get("$in", []))
+        )
         for c in q["$or"]
     )
     groups = _student_groups(q)

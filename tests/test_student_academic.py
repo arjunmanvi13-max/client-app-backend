@@ -20,8 +20,10 @@ def test_section_letter_from_label():
 
 
 def test_class_display_name():
-    assert class_display_name("Class III") == "Std 3"
-    assert class_display_name("Nursery") == "Nur"
+    assert class_display_name("Class III") == "Class III"
+    assert class_display_name("Std 3") == "Class III"
+    assert class_display_name("Nursery") == "Nursery"
+    assert class_display_name("Nur") == "Nursery"
 
 
 def test_grade_matches_pws_class():
