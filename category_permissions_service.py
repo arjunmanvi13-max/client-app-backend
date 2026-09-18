@@ -325,18 +325,11 @@ async def overlay_permission_set(user: dict) -> dict:
         return _with_overrides(user)
     had_bound_set = (user.get("permission_set") or "").strip().lower() in PERMISSION_SET_BY_CODE
     try:
-        stored = await db.permission_sets.find_one({"code": code}, {"_id": 0})
-        perms = dict((stored or {}).get("permissions") or {})
-        rbac = dict((stored or {}).get("permissions_rbac") or {})
-        if perms or rbac:
-            user["permissions"] = perms
-            user["permissions_rbac"] = rbac
-        else:
-            doc = await get_permission_set(code)
-            compat = (PERMISSION_SET_BY_CODE.get(code) or {}).get("compat_user_type") or UserRole.PWS_ADMIN.value
-            legacy, rbac_derived = derive_permissions_from_modules(compat, doc.get("modules") or {})
-            user["permissions"] = legacy
-            user["permissions_rbac"] = rbac_derived
+        compat = (PERMISSION_SET_BY_CODE.get(code) or {}).get("compat_user_type") or UserRole.PWS_ADMIN.value
+        set_doc = await get_permission_set(code)
+        legacy, rbac_derived = derive_permissions_from_modules(compat, set_doc.get("modules") or {})
+        user["permissions"] = legacy
+        user["permissions_rbac"] = rbac_derived
         user["permission_set"] = code
         persist: dict = {}
         if user.get("id") and not had_bound_set:

@@ -139,6 +139,20 @@ def test_operations_admin_preset_hides_enquiry_until_override():
     assert granted["manage_ground_bookings"] is True
 
 
+def test_module_access_none_does_not_revoke_permission_set_grants():
+    from designation_access import apply_module_access_overrides, preset_for_designation
+    set_perms = {
+        "dashboard_access": True,
+        "view_ground_bookings": True,
+        "manage_ground_bookings": True,
+        "view_enquiries": True,
+        "manage_enquiries": True,
+    }
+    kept = apply_module_access_overrides(set_perms, preset_for_designation("OPERATIONS_ADMIN"))
+    assert kept["manage_ground_bookings"] is True
+    assert kept["manage_enquiries"] is True
+
+
 def test_rejects_unknown_user_type():
     assert not is_approved_login_user_type("parent")
     assert not is_approved_login_user_type("admin")

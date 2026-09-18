@@ -136,20 +136,26 @@ def permissions_from_module_access(access: Dict[str, str]) -> dict:
 
 
 def apply_module_access_overrides(permissions: Optional[dict], module_access: Optional[dict]) -> dict:
-    """Apply Super Admin per-user module overrides on top of a permission set."""
+    """Layer individual grants on a permission set. `none` means keep the set default."""
     out = dict(permissions or {})
     if not module_access:
         return out
+    aliases = {"ground-booking": "ground_booking"}
     for mod in MODULE_MATRIX:
         mid = mod["id"]
-        if mid not in module_access:
+        raw_level = module_access.get(mid)
+        if raw_level is None:
+            for alias, canon in aliases.items():
+                if canon == mid:
+                    raw_level = module_access.get(alias)
+                    break
+        if raw_level is None:
             continue
-        level = (module_access.get(mid) or "none").lower()
-        if level not in ("none", "view", "edit", "admin"):
-            level = "none"
-        granted = set(_keys_for_level(mod, level))
-        for key in (mod.get("view") or []) + (mod.get("edit") or []) + (mod.get("admin") or []):
-            out[key] = key in granted
+        level = str(raw_level or "none").lower()
+        if level not in ("view", "edit", "admin"):
+            continue
+        for key in _keys_for_level(mod, level):
+            out[key] = True
     return out
 
 
