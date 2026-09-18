@@ -335,24 +335,17 @@ async def overlay_permission_set(user: dict) -> dict:
         if user.get("id") and not had_bound_set:
             persist["permission_set"] = code
         if code == "principal":
-            needs_scope = (
-                (user.get("entity_scope") or "").upper() != "BOTH"
-                or (user.get("organization") or "").upper() != "BOTH"
-            )
-            user["entity_scope"] = "BOTH"
-            user["organization"] = "BOTH"
-            merged = dict(user.get("permissions") or {})
-            merged["view_players"] = True
-            merged["add_players"] = True
-            merged["edit_players"] = True
-            user["permissions"] = merged
-            rbac_map = dict(user.get("permissions_rbac") or {})
-            rbac_map["MANAGE_PLAYERS"] = True
-            rbac_map["ADD_ALPHA_PLAYERS"] = True
-            user["permissions_rbac"] = rbac_map
-            if user.get("id") and needs_scope:
-                persist["entity_scope"] = "BOTH"
-                persist["organization"] = "BOTH"
+            scope = (user.get("entity_scope") or user.get("organization") or "BOTH").upper()
+            if scope in ("BOTH", "ALPHA"):
+                merged = dict(user.get("permissions") or {})
+                merged["view_players"] = True
+                merged["add_players"] = True
+                merged["edit_players"] = True
+                user["permissions"] = merged
+                rbac_map = dict(user.get("permissions_rbac") or {})
+                rbac_map["MANAGE_PLAYERS"] = True
+                rbac_map["ADD_ALPHA_PLAYERS"] = True
+                user["permissions_rbac"] = rbac_map
         if code == "teacher":
             merged = dict(user.get("permissions") or {})
             merged["mark_student_attendance"] = True

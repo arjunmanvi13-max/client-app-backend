@@ -626,10 +626,15 @@ def resolve_user_institution(user: dict, requested: Optional[str] = None) -> str
         v = (requested or "BOTH").upper()
         return v if v in INSTITUTIONS else "BOTH"
     if is_principal_user(user):
-        resolved = "BOTH"
+        stored_scope = (user.get("entity_scope") or "").upper()
+        resolved = stored_scope if stored_scope in INSTITUTIONS else "BOTH"
         if requested:
             req = requested.upper()
             if req in INSTITUTIONS:
+                if resolved != "BOTH" and req != resolved and req != "BOTH":
+                    raise HTTPException(403, "Entity access denied")
+                if req == "BOTH":
+                    return resolved
                 return req
         return resolved
     perms = user.get("permissions") or {}
@@ -928,7 +933,11 @@ def public_user(u: dict) -> dict:
         "user_type": u.get("user_type") or resolve_user_type_safe(u),
         "designation": u.get("designation"),
         "login_tier": u.get("login_tier"),
-        "entity_scope": resolve_user_institution(u, None),
+        "entity_scope": (
+            (u.get("entity_scope") or u.get("organization") or "").upper()
+            if (u.get("entity_scope") or u.get("organization") or "").upper() in INSTITUTIONS
+            else resolve_user_institution(u, None)
+        ),
         "module_access": u.get("module_access"),
         "permission_set": u.get("permission_set"),
         "teacher_designation": u.get("teacher_designation"),

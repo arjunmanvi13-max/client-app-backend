@@ -60,14 +60,35 @@ def test_apply_user_type_sets_organization():
     assert doc["user_type"] == UserRole.PWS_TEACHER.value
 
 
-def test_apply_user_type_principal_is_both_entities():
-    doc = apply_user_type_fields({}, user_type=UserRole.PWS_ADMIN.value, designation="PRINCIPAL", entity_scope="PWS")
+def test_apply_user_type_principal_defaults_to_both_entities():
+    doc = apply_user_type_fields({}, user_type=UserRole.PWS_ADMIN.value, designation="PRINCIPAL")
     assert doc["designation"] == "PRINCIPAL"
     assert doc["entity_scope"] == "BOTH"
     assert doc["organization"] == "BOTH"
     doc = apply_user_type_fields({}, user_type=UserRole.PWS_ADMIN.value, designation="VICE_PRINCIPAL")
     assert doc["role"] == "vice_principal"
     assert doc["designation"] == "VICE_PRINCIPAL"
+
+
+def test_apply_user_type_principal_honors_explicit_business_scope():
+    both = apply_user_type_fields(
+        {}, user_type=UserRole.PWS_ADMIN.value, designation="PRINCIPAL", entity_scope="BOTH"
+    )
+    assert both["organization"] == "BOTH"
+    pws = apply_user_type_fields(
+        {}, user_type=UserRole.PWS_ADMIN.value, designation="PRINCIPAL", entity_scope="PWS"
+    )
+    assert pws["organization"] == "PWS"
+    assert pws["entity_scope"] == "PWS"
+
+
+def test_validate_allows_pws_admin_both_scope():
+    validate_user_type_payload(
+        UserRole.PWS_ADMIN.value,
+        designation="PRINCIPAL",
+        organization="BOTH",
+        entity_scope="BOTH",
+    )
 
 
 def test_apply_user_type_pws_admin_academic_head():

@@ -23,6 +23,9 @@ def resolve_user_entity(user: dict) -> BusinessEntity:
     role = (user.get("role") or "").strip().lower()
     designation = (user.get("designation") or "").strip().upper()
     if role == "principal" or designation == "PRINCIPAL":
+        stored = (user.get("entity_scope") or "").upper()
+        if stored in ("PWS", "ALPHA", "BOTH"):
+            return BusinessEntity(stored)
         return BusinessEntity.BOTH
     perms = user.get("permissions") or {}
     rbac = user.get("permissions_rbac") or {}

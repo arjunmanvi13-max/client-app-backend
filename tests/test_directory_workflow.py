@@ -58,3 +58,7 @@ def test_principal_scope_is_both_without_player_flag():
     assert PERMISSION_SET_BY_CODE["principal"]["scope"] == "BOTH"
     user = {"role": "principal", "organization": "PWS", "status": "active", "permissions": {"view_students": True}}
     assert resolve_user_institution(user) == "BOTH"
+    explicit_pws = {**user, "entity_scope": "PWS"}
+    assert resolve_user_institution(explicit_pws) == "PWS"
+    explicit_both = {**user, "entity_scope": "BOTH", "organization": "BOTH"}
+    assert resolve_user_institution(explicit_both) == "BOTH"

@@ -386,10 +386,10 @@ def apply_user_type_fields(
         desig = "PRINCIPAL"
     if not desig and user_type == UserRole.ALPHA_COACH.value:
         desig = "COACH"
-    scope = (entity_scope or "").upper() if entity_scope else meta["entityScope"]
-    if scope not in ("PWS", "ALPHA", "BOTH"):
-        scope = meta["entityScope"]
-    if desig == "PRINCIPAL":
+    requested = (entity_scope or "").upper() if entity_scope else ""
+    scope = requested if requested in ("PWS", "ALPHA", "BOTH") else meta["entityScope"]
+    # Principal defaults to BOTH so they can see PWS and ALPHA, unless Super Admin picks another scope.
+    if desig == "PRINCIPAL" and not requested:
         scope = "BOTH"
     doc["organization"] = scope
     doc["entity_scope"] = scope
@@ -426,11 +426,15 @@ def validate_user_type_payload(
     if scope and scope not in ("PWS", "ALPHA", "BOTH"):
         raise ValueError(f"Invalid entity: {scope}")
     if designation:
-        allowed = designations_for_entity(scope or "BOTH")
-        if designation.upper() not in allowed:
-            raise ValueError(
-                f"Designation {designation} is not valid for entity {scope or 'BOTH'}"
-            )
+        code = designation.upper()
+        if user_type == UserRole.PWS_ADMIN.value and code in PWS_ADMIN_DESIGNATIONS:
+            pass
+        else:
+            allowed = designations_for_entity(scope or "BOTH")
+            if code not in allowed:
+                raise ValueError(
+                    f"Designation {designation} is not valid for entity {scope or 'BOTH'}"
+                )
     if not entity_scope:
         expected_org = organization_for_user_type(user_type)
         if organization and organization != expected_org and organization != "BOTH":

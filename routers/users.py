@@ -505,7 +505,7 @@ async def update_user(user_id: str, payload: UserUpdate, user: dict = Depends(ge
         raise HTTPException(403, "You cannot change your own user type or designation")
 
     body = payload.dict(exclude_none=True)
-    is_type_change = any(k in body for k in ("user_type", "designation", "login_tier", "entity_scope"))
+    is_type_change = any(k in body for k in ("user_type", "designation", "login_tier", "entity_scope", "organization"))
     if is_type_change and not is_super_admin(user):
         raise HTTPException(403, "Only Super Admin can change user type")
 
@@ -585,7 +585,7 @@ async def update_user(user_id: str, payload: UserUpdate, user: dict = Depends(ge
             if k in merged:
                 upd[k] = merged[k]
 
-    if body.get("user_type") or body.get("designation") or body.get("login_tier") or body.get("entity_scope"):
+    if body.get("user_type") or body.get("designation") or body.get("login_tier") or body.get("entity_scope") or body.get("organization"):
         try:
             validate_user_type_payload(
                 new_user_type,
