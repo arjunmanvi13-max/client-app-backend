@@ -80,3 +80,19 @@ def test_independent_person_counts():
     assert pricing["transportCost"] == 400
     assert pricing["umpireCost"] == 3000
     assert pricing["totalRevenue"] == 11000
+
+
+def test_ground_booking_access_from_override():
+    from routers.ground_booking import can_access_ground_bookings, can_manage_ground_bookings
+    ops = {
+        "role": "staff",
+        "user_type": "alpha_admin",
+        "designation": "OPERATIONS_ADMIN",
+        "permission_set": "operations_admin",
+    }
+    assert not can_access_ground_bookings(ops)
+    assert can_manage_ground_bookings({**ops, "permissions": {"manage_ground_bookings": True}})
+    assert can_access_ground_bookings({**ops, "permissions": {"view_ground_bookings": True}})
+    assert not can_manage_ground_bookings({**ops, "permissions": {"view_ground_bookings": True}})
+    assert can_manage_ground_bookings({"role": "alpha_accounts"})
+

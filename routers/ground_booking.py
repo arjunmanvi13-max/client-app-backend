@@ -29,18 +29,53 @@ from notifications_service import send_notification, send_to_role
 router = APIRouter(prefix="/ground-bookings", tags=["ground-bookings"])
 
 
-def can_manage_ground_bookings(user: dict) -> bool:
-    if is_super_admin(user):
+def _is_operations_admin(user: dict) -> bool:
+    designation = (user.get("designation") or "").strip().upper()
+    if designation in {"OPERATIONS_ADMIN", "PWS_OFFICE_STAFF", "ALPHA_OFFICE_STAFF"}:
         return True
+    return (user.get("permission_set") or "").strip().lower() == "operations_admin"
+
+
+def _has_ground_perm(user: dict, *keys: str) -> bool:
+    perms = user.get("permissions") or {}
+    return any(bool(perms.get(k)) for k in keys)
+
+
+def _role_based_ground_bookings(user: dict) -> bool:
+    if _is_operations_admin(user):
+        return False
     role = (user.get("role") or "").strip().lower()
     if role in ("admin", "alpha_admin", "alpha_accounts"):
         return True
     return is_alpha_admin_user(user) or is_alpha_accounts_user(user)
 
 
+def can_access_ground_bookings(user: dict) -> bool:
+    if is_super_admin(user):
+        return True
+    if _has_ground_perm(user, "view_ground_bookings", "manage_ground_bookings"):
+        return True
+    return _role_based_ground_bookings(user)
+
+
+def can_manage_ground_bookings(user: dict) -> bool:
+    if is_super_admin(user):
+        return True
+    if _has_ground_perm(user, "manage_ground_bookings"):
+        return True
+    if _has_ground_perm(user, "view_ground_bookings") and not _role_based_ground_bookings(user):
+        return False
+    return _role_based_ground_bookings(user)
+
+
+def _assert_access(user: dict) -> None:
+    if not can_access_ground_bookings(user):
+        raise HTTPException(403, "Not allowed to access Ground Booking")
+
+
 def _assert_manage(user: dict) -> None:
     if not can_manage_ground_bookings(user):
-        raise HTTPException(403, "Ground Booking is limited to ALPHA Admin and ALPHA Accounts")
+        raise HTTPException(403, "Ground Booking is limited to ALPHA Admin, ALPHA Accounts, or users granted the module")
 
 
 def _public(doc: dict) -> dict:
@@ -328,7 +363,7 @@ async def list_bookings(
     month: Optional[str] = None,
     user: dict = Depends(get_current_user),
 ):
-    _assert_manage(user)
+    _assert_access(user)
     q: dict = {"entity": "ALPHA"}
     if sport in SPORTS:
         q["sport"] = sport
@@ -488,7 +523,7 @@ async def search_customers(q: str = Query(..., min_length=2), user: dict = Depen
 
 @router.get("/{booking_id}")
 async def get_booking(booking_id: str, user: dict = Depends(get_current_user)):
-    _assert_manage(user)
+    _assert_access(user)
     doc = await db.ground_bookings.find_one({"id": booking_id}, {"_id": 0})
     if not doc:
         raise HTTPException(404, "Booking not found")

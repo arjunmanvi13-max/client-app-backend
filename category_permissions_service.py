@@ -302,13 +302,27 @@ async def overlay_permission_set(user: dict) -> dict:
     """Attach the current permission-set grants onto a user document for this request."""
     from directory_workflow import PERMISSION_SET_BY_CODE, permission_set_for_user
     from rbac.enums import UserRole
+    from designation_access import apply_module_access_overrides
+
+    def _with_overrides(doc: dict) -> dict:
+        if not doc:
+            return doc
+        try:
+            doc["permissions"] = apply_module_access_overrides(
+                doc.get("permissions"),
+                doc.get("module_access"),
+            )
+        except Exception:
+            pass
+        return doc
+
     if not user:
         return user
     if (user.get("role") or "") == "super_admin" or (user.get("user_type") or "") == "super_admin":
         return user
     code = permission_set_for_user(user)
     if not code or code == "super_admin":
-        return user
+        return _with_overrides(user)
     had_bound_set = (user.get("permission_set") or "").strip().lower() in PERMISSION_SET_BY_CODE
     try:
         stored = await db.permission_sets.find_one({"code": code}, {"_id": 0})
@@ -361,5 +375,5 @@ async def overlay_permission_set(user: dict) -> dict:
             except Exception:
                 pass
     except Exception:
-        return user
-    return user
+        return _with_overrides(user)
+    return _with_overrides(user)

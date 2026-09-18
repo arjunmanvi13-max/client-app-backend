@@ -58,9 +58,21 @@ _ENQUIRY_USER_TYPES = (
 )
 
 
-def can_manage_enquiries(user: dict) -> bool:
-    if is_super_admin(user):
+def _is_operations_admin(user: dict) -> bool:
+    designation = (user.get("designation") or "").strip().upper()
+    if designation in {"OPERATIONS_ADMIN", "PWS_OFFICE_STAFF", "ALPHA_OFFICE_STAFF"}:
         return True
+    return (user.get("permission_set") or "").strip().lower() == "operations_admin"
+
+
+def _has_enquiry_perm(user: dict, *keys: str) -> bool:
+    perms = user.get("permissions") or {}
+    return any(bool(perms.get(k)) for k in keys)
+
+
+def _role_based_enquiry(user: dict) -> bool:
+    if _is_operations_admin(user):
+        return False
     ut = (resolve_user_type_safe(user) or user.get("user_type") or "").strip().lower()
     if ut in _ENQUIRY_USER_TYPES:
         return True
@@ -69,6 +81,24 @@ def can_manage_enquiries(user: dict) -> bool:
     if is_pws_accounts_user(user) or is_alpha_accounts_user(user):
         return True
     return False
+
+
+def can_access_enquiries(user: dict) -> bool:
+    if is_super_admin(user):
+        return True
+    if _has_enquiry_perm(user, "view_enquiries", "manage_enquiries"):
+        return True
+    return _role_based_enquiry(user)
+
+
+def can_manage_enquiries(user: dict) -> bool:
+    if is_super_admin(user):
+        return True
+    if _has_enquiry_perm(user, "manage_enquiries"):
+        return True
+    if _has_enquiry_perm(user, "view_enquiries") and not _role_based_enquiry(user):
+        return False
+    return _role_based_enquiry(user)
 
 
 def _assert_manage(user: dict) -> None:
@@ -88,7 +118,7 @@ def _entity_filter(user: dict) -> dict:
 def _assert_access(user: dict, doc: dict) -> None:
     if is_super_admin(user):
         return
-    if can_manage_enquiries(user):
+    if can_access_enquiries(user):
         scope = user_entity_scope(user)
         inst = doc.get("institution")
         if scope == "both":
@@ -311,7 +341,7 @@ async def list_enquiries(
     user: dict = Depends(get_current_user),
 ):
     query: dict = {}
-    if can_manage_enquiries(user):
+    if can_access_enquiries(user):
         query.update(_entity_filter(user))
     else:
         query["assigned_to_id"] = user["id"]
@@ -343,7 +373,8 @@ async def list_enquiries(
 
 @router.get("/options")
 async def options(user: dict = Depends(get_current_user)):
-    _assert_manage(user)
+    if not can_access_enquiries(user):
+        raise HTTPException(403, "Not allowed to access enquiries")
     staff = await db.users.find(
         {"status": {"$ne": "deactivated"}},
         {"_id": 0, "id": 1, "name": 1, "role": 1, "email": 1, "user_type": 1},

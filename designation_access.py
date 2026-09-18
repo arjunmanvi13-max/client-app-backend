@@ -21,6 +21,8 @@ except Exception:
         "manage_expense_structure", "capture_pws_expenses", "capture_alpha_expenses",
         "timetable_view_all", "timetable_view_own", "timetable_create", "timetable_edit",
         "timetable_delete", "timetable_substitute", "timetable_publish", "timetable_export",
+        "view_enquiries", "manage_enquiries",
+        "view_ground_bookings", "manage_ground_bookings",
     ]
 
 AccessLevel = str  # none | view | edit | admin
@@ -92,6 +94,20 @@ MODULE_MATRIX: List[Dict] = [
         "edit": ["enter_academic_marks"],
         "admin": ["manage_academic_structure"],
     },
+    {
+        "id": "enquiry",
+        "label": "Enquiry",
+        "view": ["view_enquiries"],
+        "edit": ["manage_enquiries"],
+        "admin": ["manage_enquiries"],
+    },
+    {
+        "id": "ground_booking",
+        "label": "Ground Booking",
+        "view": ["view_ground_bookings"],
+        "edit": ["manage_ground_bookings"],
+        "admin": ["manage_ground_bookings"],
+    },
 ]
 
 
@@ -119,6 +135,24 @@ def permissions_from_module_access(access: Dict[str, str]) -> dict:
     return perms
 
 
+def apply_module_access_overrides(permissions: Optional[dict], module_access: Optional[dict]) -> dict:
+    """Apply Super Admin per-user module overrides on top of a permission set."""
+    out = dict(permissions or {})
+    if not module_access:
+        return out
+    for mod in MODULE_MATRIX:
+        mid = mod["id"]
+        if mid not in module_access:
+            continue
+        level = (module_access.get(mid) or "none").lower()
+        if level not in ("none", "view", "edit", "admin"):
+            level = "none"
+        granted = set(_keys_for_level(mod, level))
+        for key in (mod.get("view") or []) + (mod.get("edit") or []) + (mod.get("admin") or []):
+            out[key] = key in granted
+    return out
+
+
 def infer_module_access(perms: Optional[dict]) -> Dict[str, str]:
     p = perms or {}
     out: Dict[str, str] = {}
@@ -142,58 +176,72 @@ DESIGNATION_PRESETS: Dict[str, Dict[str, str]] = {
     "PRINCIPAL": {
         "directory": "admin", "fees": "edit", "attendance": "admin", "schedules": "admin",
         "tasks": "admin", "reports": "admin", "approvals": "admin", "expenses": "edit", "academics": "admin",
+        "enquiry": "admin", "ground_booking": "none",
     },
     "VICE_PRINCIPAL": {
         "directory": "edit", "fees": "view", "attendance": "admin", "schedules": "admin",
         "tasks": "admin", "reports": "admin", "approvals": "edit", "expenses": "view", "academics": "admin",
+        "enquiry": "edit", "ground_booking": "none",
     },
     "ACADEMIC_HEAD": {
         "directory": "edit", "fees": "none", "attendance": "edit", "schedules": "admin",
         "tasks": "edit", "reports": "view", "approvals": "none", "expenses": "none", "academics": "admin",
+        "enquiry": "view", "ground_booking": "none",
     },
     "EVENT_COORDINATOR": {
         "directory": "view", "fees": "none", "attendance": "view", "schedules": "edit",
         "tasks": "edit", "reports": "view", "approvals": "none", "expenses": "edit", "academics": "view",
+        "enquiry": "edit", "ground_booking": "none",
     },
     "OPERATIONS_ADMIN": {
         "directory": "view", "fees": "view", "attendance": "view", "schedules": "view",
         "tasks": "edit", "reports": "view", "approvals": "none", "expenses": "none", "academics": "view",
+        "enquiry": "none", "ground_booking": "none",
     },
     "ACCOUNTS": {
         "directory": "view", "fees": "admin", "attendance": "none", "schedules": "none",
         "tasks": "edit", "reports": "admin", "approvals": "edit", "expenses": "admin", "academics": "none",
+        "enquiry": "edit", "ground_booking": "none",
     },
     "PWS_OFFICE_STAFF": {
         "directory": "view", "fees": "view", "attendance": "view", "schedules": "view",
         "tasks": "edit", "reports": "view", "approvals": "none", "expenses": "none", "academics": "view",
+        "enquiry": "none", "ground_booking": "none",
     },
     "PWS_ACCOUNTS": {
         "directory": "view", "fees": "admin", "attendance": "none", "schedules": "none",
         "tasks": "edit", "reports": "admin", "approvals": "edit", "expenses": "admin", "academics": "none",
+        "enquiry": "edit", "ground_booking": "none",
     },
     "HOD": {
         "directory": "view", "fees": "none", "attendance": "edit", "schedules": "edit",
         "tasks": "edit", "reports": "view", "approvals": "none", "expenses": "none", "academics": "edit",
+        "enquiry": "none", "ground_booking": "none",
     },
     "TEACHER": {
         "directory": "view", "fees": "none", "attendance": "edit", "schedules": "view",
         "tasks": "view", "reports": "none", "approvals": "none", "expenses": "none", "academics": "edit",
+        "enquiry": "none", "ground_booking": "none",
     },
     "WARDEN": {
         "directory": "view", "fees": "none", "attendance": "admin", "schedules": "view",
         "tasks": "edit", "reports": "view", "approvals": "edit", "expenses": "view", "academics": "none",
+        "enquiry": "none", "ground_booking": "none",
     },
     "COACH": {
         "directory": "view", "fees": "none", "attendance": "edit", "schedules": "view",
         "tasks": "view", "reports": "none", "approvals": "none", "expenses": "none", "academics": "none",
+        "enquiry": "none", "ground_booking": "none",
     },
     "ALPHA_ACCOUNTS": {
         "directory": "view", "fees": "admin", "attendance": "none", "schedules": "none",
         "tasks": "edit", "reports": "admin", "approvals": "edit", "expenses": "admin", "academics": "none",
+        "enquiry": "edit", "ground_booking": "edit",
     },
     "ALPHA_OFFICE_STAFF": {
         "directory": "view", "fees": "view", "attendance": "view", "schedules": "view",
         "tasks": "edit", "reports": "view", "approvals": "none", "expenses": "none", "academics": "none",
+        "enquiry": "none", "ground_booking": "none",
     },
 }
 
@@ -204,7 +252,6 @@ def preset_for_designation(designation: Optional[str]) -> Dict[str, str]:
         "PWS_OFFICE_STAFF": "OPERATIONS_ADMIN",
         "ALPHA_OFFICE_STAFF": "OPERATIONS_ADMIN",
         "PWS_ACCOUNTS": "ACCOUNTS",
-        "ALPHA_ACCOUNTS": "ACCOUNTS",
     }
     key = aliases.get(key, key)
     return dict(DESIGNATION_PRESETS.get(key) or {m["id"]: "none" for m in MODULE_MATRIX})

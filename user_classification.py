@@ -384,6 +384,8 @@ def apply_user_type_fields(
     desig = (designation or "").upper() or None
     if not desig and user_type == UserRole.PWS_ADMIN.value:
         desig = "PRINCIPAL"
+    if not desig and user_type == UserRole.ALPHA_COACH.value:
+        desig = "COACH"
     scope = (entity_scope or "").upper() if entity_scope else meta["entityScope"]
     if scope not in ("PWS", "ALPHA", "BOTH"):
         scope = meta["entityScope"]

@@ -116,6 +116,16 @@ def _user_type_list_query(user_type: str) -> dict:
     legacy_roles = {legacy_role_for_user_type(user_type)}
     if user_type == UserRole.PWS_ADMIN.value:
         legacy_roles = {"principal", "vice_principal"}
+    if user_type == UserRole.ALPHA_COACH.value:
+        return {
+            "$or": [
+                {"user_type": UserRole.ALPHA_COACH.value},
+                {"role": {"$in": ["coach", "alpha_coach"]}},
+                {"legacy_role": {"$in": ["coach", "alpha_coach"]}},
+                {"permission_set": "coach"},
+                {"designation": {"$regex": "^coach$", "$options": "i"}},
+            ]
+        }
     return {
         "$or": [
             {"user_type": user_type},
@@ -233,6 +243,9 @@ async def list_users(
             "$or": [
                 {"user_type": {"$in": list(APPROVED_LOGIN_USER_TYPES)}},
                 {"user_type": {"$exists": False}, "role": {"$in": list(APPROVED_LEGACY_ROLES)}},
+                {"role": {"$in": ["coach", "alpha_coach"]}},
+                {"permission_set": "coach"},
+                {"designation": {"$regex": "^coach$", "$options": "i"}},
             ]
         }
     q = merge_mongo_query(q, active_status_filter(include_deactivated))

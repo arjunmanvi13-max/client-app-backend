@@ -382,6 +382,8 @@ PERMISSION_KEYS = [
     "manage_expense_structure", "capture_pws_expenses", "capture_alpha_expenses",
     "timetable_view_all", "timetable_view_own", "timetable_create", "timetable_edit",
     "timetable_delete", "timetable_substitute", "timetable_publish", "timetable_export",
+    "view_enquiries", "manage_enquiries",
+    "view_ground_bookings", "manage_ground_bookings",
 ]
 
 PERMISSION_GROUPS = {
@@ -394,6 +396,10 @@ PERMISSION_GROUPS = {
     "Time Table": [
         "timetable_view_all", "timetable_view_own", "timetable_create", "timetable_edit",
         "timetable_delete", "timetable_substitute", "timetable_publish", "timetable_export",
+    ],
+    "Operations": [
+        "view_enquiries", "manage_enquiries",
+        "view_ground_bookings", "manage_ground_bookings",
     ],
 }
 

@@ -20,6 +20,11 @@ def test_admin_designations_include_coach_accounts_warden():
     assert "OPERATIONS_ADMIN" in ADMIN_DESIGNATIONS
 
 
+def test_coach_permission_set_lives_under_admins():
+    from directory_workflow import PERMISSION_SET_BY_CODE
+    assert PERMISSION_SET_BY_CODE["coach"]["categories"] == ["admins"]
+
+
 def test_twelve_permission_sets():
     assert len(PERMISSION_SET_CODES) == 12
     assert PERMISSION_SET_CODES[0] == "super_admin"

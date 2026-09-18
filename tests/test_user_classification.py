@@ -123,6 +123,20 @@ def test_designation_preset_accounts_full_fees():
     assert perms["edit_fees"] is True
     assert perms["view_students"] is True
     assert perms["add_students"] is False
+    assert perms["manage_enquiries"] is True
+    assert perms["manage_ground_bookings"] is True
+
+
+def test_operations_admin_preset_hides_enquiry_until_override():
+    from designation_access import apply_module_access_overrides, permissions_from_module_access, preset_for_designation
+    preset = preset_for_designation("OPERATIONS_ADMIN")
+    assert preset["enquiry"] == "none"
+    assert preset["ground_booking"] == "none"
+    perms = permissions_from_module_access(preset)
+    assert perms["manage_enquiries"] is False
+    granted = apply_module_access_overrides(perms, {**preset, "enquiry": "edit", "ground_booking": "edit"})
+    assert granted["manage_enquiries"] is True
+    assert granted["manage_ground_bookings"] is True
 
 
 def test_rejects_unknown_user_type():
@@ -148,6 +162,13 @@ def test_entity_scope_pws_admin():
 def test_migrate_sports_admin_requires_review():
     _, _, review = migrate_legacy_role("sports_admin")
     assert review is True
+
+
+def test_alpha_coach_defaults_to_coach_designation():
+    doc = apply_user_type_fields({}, user_type=UserRole.ALPHA_COACH.value)
+    assert doc["user_type"] == UserRole.ALPHA_COACH.value
+    assert doc["designation"] == "COACH"
+    assert doc["role"] == "coach"
 
 
 def test_create_pws_accounts_payload():

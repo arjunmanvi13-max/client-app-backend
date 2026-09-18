@@ -135,8 +135,10 @@ MODULE_GROUPS: List[Dict[str, Any]] = [
             ]),
             _mod("hostel", "Hostel", permission_keys=["mark_hostel_attendance"], rbac=[Permission.MARK_HOSTEL_ATTENDANCE.value]),
             _mod("ground-booking", "Ground Booking", alpha_only=True,
+                  permission_keys=["view_ground_bookings", "manage_ground_bookings"],
                   user_types=[UserRole.SUPER_ADMIN.value, UserRole.ALPHA_ADMIN.value, UserRole.ALPHA_ACCOUNTS.value]),
             _mod("enquiry", "Enquiry",
+                  permission_keys=["view_enquiries", "manage_enquiries"],
                   user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value, UserRole.ALPHA_ADMIN.value,
                               UserRole.PWS_ACCOUNTS.value, UserRole.ALPHA_ACCOUNTS.value]),
             _mod("bulk-upload", "Bulk Upload", permission_keys=["bulk_upload"], rbac=[Permission.BULK_UPLOAD_USERS.value],
@@ -339,6 +341,8 @@ def derive_permissions_from_modules(
         "view_fees", "collect_fees", "edit_fees", "manage_fee_catalog", "bulk_upload", "approve_deactivation",
         "approve_requests", "supervise_tasks",
         "manage_expense_structure", "capture_pws_expenses", "capture_alpha_expenses",
+        "view_enquiries", "manage_enquiries",
+        "view_ground_bookings", "manage_ground_bookings",
     ]
     legacy = {k: False for k in permission_keys}
     rbac: Dict[str, bool] = {}

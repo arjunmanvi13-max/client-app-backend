@@ -18,6 +18,30 @@ def test_office_roles_can_manage():
     assert not can_manage_enquiries({"role": "teacher"})
     assert not can_manage_enquiries({"role": "coach"})
     assert not can_manage_enquiries({"user_type": "pws_teacher", "role": "teacher"})
+    assert not can_manage_enquiries({
+        "role": "staff",
+        "user_type": "pws_admin",
+        "designation": "OPERATIONS_ADMIN",
+        "permission_set": "operations_admin",
+    })
+    assert can_manage_enquiries({
+        "role": "staff",
+        "user_type": "pws_admin",
+        "designation": "OPERATIONS_ADMIN",
+        "permission_set": "operations_admin",
+        "permissions": {"manage_enquiries": True},
+    })
+    from routers.enquiry import can_access_enquiries
+    assert can_access_enquiries({
+        "role": "staff",
+        "designation": "OPERATIONS_ADMIN",
+        "permissions": {"view_enquiries": True},
+    })
+    assert not can_manage_enquiries({
+        "role": "staff",
+        "designation": "OPERATIONS_ADMIN",
+        "permissions": {"view_enquiries": True},
+    })
 
 
 def test_catalogues():
