@@ -13,6 +13,8 @@ import pytest
 import requests
 from dotenv import load_dotenv
 
+from alpha_centre_rules import DEFENSE_COLONY_CENTRE, defense_colony_fee_rates
+
 # Load backend .env so cleanup step (Mongo direct) has MONGO_URL / DB_NAME
 load_dotenv("/app/backend/.env")
 load_dotenv()
@@ -82,6 +84,8 @@ class TestMohitDues:
         assert mohit.get("organization") == "ALPHA", f"Expected ALPHA, got {mohit.get('organization')}"
         _state["mohit_id"] = mohit["id"]
         _state["mohit_name"] = mohit["name"]
+        _state["mohit_centre"] = mohit.get("centre")
+        _state["mohit_skill"] = mohit.get("skill_level")
 
     def test_mohit_has_registration_and_monthly_dues(self, headers):
         pid = _state.get("mohit_id") or pytest.skip("Mohit fixture unavailable")
@@ -95,8 +99,16 @@ class TestMohitDues:
         assert "Monthly" in types, f"Missing Monthly due. types={types}"
         reg = next(f for f in unpaid if f["fee_type"] == "Registration")
         monthly = next(f for f in unpaid if f["fee_type"] == "Monthly")
-        assert reg["amount_due"] == 15000, f"Registration amount_due expected 15000, got {reg['amount_due']}"
-        assert monthly["amount_due"] == 12000, f"Monthly amount_due expected 12000, got {monthly['amount_due']}"
+        centre = _state.get("mohit_centre")
+        if centre == DEFENSE_COLONY_CENTRE:
+            expected = defense_colony_fee_rates(_state.get("mohit_skill"))
+            assert reg["amount_due"] == expected["registration"], reg
+            assert monthly["amount"] == expected["monthly"], monthly
+            assert monthly["amount_due"] in (expected["monthly"], expected["monthly"] // 2), \
+                "monthly due must be the full rate or the half-month admission pro-rate"
+        else:
+            assert reg["amount_due"] == 15000, f"Registration amount_due expected 15000, got {reg['amount_due']}"
+            assert monthly["amount_due"] == 12000, f"Monthly amount_due expected 12000, got {monthly['amount_due']}"
         _state["mohit_monthly_fee_id"] = monthly["id"]
         _state["mohit_orig_monthly"] = monthly
 
@@ -107,7 +119,8 @@ class TestCollectAndDashboard:
         r = requests.get(f"{API}/fees/dashboard", headers=headers, timeout=20)
         assert r.status_code == 200
         d = r.json()
-        _state["collected_today_before"] = d["by_centre"].get("Balua", {}).get("collected_today", 0)
+        centre = _state.get("mohit_centre") or "Balua"
+        _state["collected_today_before"] = d["by_centre"].get(centre, {}).get("collected_today", 0)
 
     def test_collect_monthly_fee(self, headers):
         fee_id = _state.get("mohit_monthly_fee_id") or pytest.skip("Mohit fixture unavailable")
@@ -119,7 +132,9 @@ class TestCollectAndDashboard:
         )
         assert r.status_code == 200, r.text
         receipt = r.json()
-        assert receipt["total_amount"] == 12000
+        expected_total = int((_state.get("mohit_orig_monthly") or {}).get("amount_due") or 0)
+        assert receipt["total_amount"] == expected_total, receipt
+        _state["collected_amount"] = expected_total
         assert receipt["payment_mode"] == "Cash"
         assert receipt["batch_id"], "Receipt should have batch_id for PDF/share"
         _state["batch_id"] = receipt["batch_id"]
@@ -137,9 +152,11 @@ class TestCollectAndDashboard:
         d = r.json()
         if "mohit_monthly_fee_id" not in _state:
             pytest.skip("Mohit fixture unavailable — nothing was collected in this run")
-        after = d["by_centre"].get("Balua", {}).get("collected_today", 0)
+        centre = _state.get("mohit_centre") or "Balua"
+        after = d["by_centre"].get(centre, {}).get("collected_today", 0)
         before = _state["collected_today_before"]
-        assert after >= before + 12000, f"Dashboard did not reflect collection: before={before}, after={after}"
+        collected = _state.get("collected_amount", 12000)
+        assert after >= before + collected, f"Dashboard did not reflect collection: before={before}, after={after}"
 
 
 # ------------------------- Test 3: REGRESSION — new player with organization='BOTH' -------------------------

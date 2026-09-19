@@ -156,9 +156,15 @@ class TestAuthBoundaries:
 # ---------------------------------------------------------------------------
 @pytest.mark.integration
 class TestEntityIsolationBoundaries:
-def test_principal_cannot_list_alpha_players(self):
+    def test_principal_sees_alpha_players(self):
         r = requests.get(f"{API}/people", headers=_hdr("principal"), params={"kind": "player"}, timeout=15)
         assert r.status_code == 200, r.text
+
+    def test_teacher_cannot_list_alpha_players(self):
+        r = requests.get(f"{API}/people", headers=_hdr("teacher"), params={"kind": "player"}, timeout=15)
+        assert r.status_code in (200, 403), r.text
+        if r.status_code == 200:
+            assert r.json() == [], "PWS teacher must not see ALPHA players"
 
     def test_admin_cannot_list_pws_students(self):
         r = requests.get(f"{API}/people", headers=_hdr("admin"), params={"kind": "student"}, timeout=15)
@@ -166,7 +172,7 @@ def test_principal_cannot_list_alpha_players(self):
         if r.status_code == 200:
             assert r.json() == [], "Sports admin must not see PWS students"
 
-    def test_principal_cannot_collect_alpha_fees(self):
+    def test_principal_sees_alpha_fees(self):
         r = requests.get(f"{API}/fees", headers=_hdr("principal"), timeout=15)
         assert r.status_code == 200, r.text
 
@@ -175,8 +181,6 @@ def test_principal_cannot_list_alpha_players(self):
         ad = requests.get(f"{API}/attendance", headers=_hdr("admin"), params={"kind": "student"}, timeout=15)
         assert pr.status_code in (200, 403), pr.text
         assert ad.status_code in (200, 403), ad.text
-        if pr.status_code == 200:
-            pass  # Principal is BOTH and may see ALPHA attendance
         if ad.status_code == 200:
             assert ad.json() == []
 
@@ -435,12 +439,21 @@ class TestUploadBoundaries:
         )
         assert r.status_code == 403, r.text
 
+    def test_admin_cannot_bulk_upload(self):
+        r = requests.post(
+            f"{API}/bulk-upload/players",
+            headers=_hdr("admin"),
+            files={"file": ("test.csv", "Name,Father\nX,Y\n", "text/csv")},
+            timeout=15,
+        )
+        assert r.status_code == 403, "Bulk upload is Super Admin only"
+
     def test_bulk_upload_rejects_oversized_row_count(self):
         header = "Name,Father Name,Age,Mobile,Address,City,Centre,Sport,Category,Slot,Skill,DOJ\n"
         rows = "".join(f"P{i},F{i},14,9000000{i:03d},A,B,Balua,Cricket,Daily,Morning,Beginner,2026-01-01\n" for i in range(501))
         r = requests.post(
             f"{API}/bulk-upload/players",
-            headers=_hdr("admin"),
+            headers=_hdr("super_admin"),
             files={"file": ("big.csv", header + rows, "text/csv")},
             timeout=30,
         )

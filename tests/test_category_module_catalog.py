@@ -87,9 +87,12 @@ def test_teachers_module_in_flat_directory_catalog():
     assert "students-players" not in ids
     directory = next(g for g in permissions_catalog() if g["id"] == "directory")
     module_ids = [m["id"] for m in directory["modules"]]
-    assert module_ids == ["directory-master", "admins", "teachers-directory", "students", "players"]
+    assert module_ids == ["directory-master", "admins", "admins-manage", "teachers-directory", "students", "players"]
     teachers = next(m for m in directory["modules"] if m["id"] == "teachers-directory")
     assert Permission.ADD_NEW_TEACHER.value in (teachers.get("rbac_permissions") or [])
+    admins = next(m for m in directory["modules"] if m["id"] == "admins")
+    assert Permission.CREATE_USERS.value not in (admins.get("rbac_permissions") or []), \
+        "Viewing admins must not carry login creation"
 
 
 def test_manage_users_rosters_removed_from_system_settings():

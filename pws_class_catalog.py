@@ -162,24 +162,6 @@ def format_class_display(class_val: Optional[str]) -> str:
     return canon or (class_val or "").strip()
 
 
-def class_code_for_class(class_val: Optional[str]) -> str:
-    canon = normalize_class_value(class_val)
-    if not canon:
-        return ""
-    return CLASS_TO_CODE[canon]
-
-
-def grade_key_for_class(class_val: Optional[str]) -> str:
-    canon = normalize_class_value(class_val)
-    if not canon:
-        return (class_val or "").strip()
-    return CLASS_TO_GRADE_KEY[canon]
-
-
-def class_for_grade_key(grade_name: Optional[str]) -> Optional[str]:
-    return normalize_class_value(grade_name)
-
-
 def grade_aliases_for_class(class_val: Optional[str]) -> set[str]:
     canon = normalize_class_value(class_val)
     if not canon:
@@ -203,7 +185,11 @@ def grade_aliases_for_class(class_val: Optional[str]) -> set[str]:
 
 
 def class_aliases(class_val: Optional[str]) -> list[str]:
-    """All strings that may appear in people.pws_class for this class."""
+    """All strings that may appear in people.pws_class for this class.
+
+    Derived from the same map normalize_class_value reads, so anything the write
+    path accepts is findable by the read path.
+    """
     canon = normalize_class_value(class_val)
     if not canon:
         raw = (class_val or "").strip()
@@ -226,6 +212,7 @@ def class_aliases(class_val: Optional[str]) -> list[str]:
         out.append(f"Std {int(key)}")
     if canon == "Nursery":
         out.extend(["Nur", "NUR", "nursery", "Std Nur"])
+    out.extend(alias for alias, target in _ALIAS_TO_CANONICAL.items() if target == canon)
     seen: set[str] = set()
     unique: list[str] = []
     for item in out:
@@ -249,22 +236,8 @@ def pws_class_mongo_values(class_val: Optional[str]) -> list[str]:
 def pws_class_mongo_filter(class_val: Optional[str], *, field: str = "pws_class") -> dict:
     values = pws_class_mongo_values(class_val)
     if not values:
-        return {}
-    if len(values) == 1:
-        return {field: values[0]}
-    return {field: {"$in": values}}
+        return {field: {"$in": []}}
+    parts = [re.escape(v).replace("\\ ", r"[\s._\-]*") for v in values]
+    pattern = "^(?:" + "|".join(parts) + ")$"
+    return {field: {"$regex": pattern, "$options": "i"}}
 
-
-def class_select_options() -> list[dict[str, str]]:
-    return [{"value": c, "label": c} for c in CLASS_LIST]
-
-
-def coerce_class_list(values: Iterable[str]) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-    for raw in values:
-        canon = normalize_class_value(raw)
-        if canon and canon not in seen:
-            seen.add(canon)
-            out.append(canon)
-    return out

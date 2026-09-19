@@ -122,6 +122,14 @@ def _keys_for_level(mod: Dict, level: str) -> List[str]:
     return keys
 
 
+MODULE_PERMISSION_KEYS = frozenset(
+    key
+    for mod in MODULE_MATRIX
+    for level in ("view", "edit", "admin")
+    for key in (mod.get(level) or [])
+) | {"dashboard_access"}
+
+
 def permissions_from_module_access(access: Dict[str, str]) -> dict:
     perms = {k: False for k in PERMISSION_KEYS}
     perms["dashboard_access"] = True
@@ -156,24 +164,6 @@ def apply_module_access_overrides(permissions: Optional[dict], module_access: Op
             continue
         for key in _keys_for_level(mod, level):
             out[key] = True
-    return out
-
-
-def infer_module_access(perms: Optional[dict]) -> Dict[str, str]:
-    p = perms or {}
-    out: Dict[str, str] = {}
-    for mod in MODULE_MATRIX:
-        admin_keys = mod.get("admin") or []
-        edit_keys = mod.get("edit") or []
-        view_keys = mod.get("view") or []
-        if admin_keys and all(p.get(k) for k in admin_keys):
-            out[mod["id"]] = "admin"
-        elif edit_keys and all(p.get(k) for k in edit_keys):
-            out[mod["id"]] = "edit"
-        elif view_keys and any(p.get(k) for k in view_keys):
-            out[mod["id"]] = "view"
-        else:
-            out[mod["id"]] = "none"
     return out
 
 

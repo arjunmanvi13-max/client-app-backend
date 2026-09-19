@@ -286,10 +286,11 @@ async def teacher_dashboard(user: dict) -> dict:
         return out
     except Exception:
         logger.exception("Teacher dashboard failed for user %s", user.get("id"))
+        out["error"] = "Some of today's data could not be loaded."
         try:
             out.update(await _teacher_notifications(user))
         except Exception:
-            pass
+            logger.exception("Teacher notifications failed for user %s", user.get("id"))
         return out
 
 

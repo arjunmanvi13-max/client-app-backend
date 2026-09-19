@@ -1,8 +1,8 @@
 """ALPHA ground booking pricing helpers (no DB)."""
 from __future__ import annotations
 
-from datetime import date, datetime
-from typing import Any, Optional
+from datetime import date, datetime, timedelta
+from typing import Any, List, Optional
 
 HALF_DAY_RATE = 6000
 FULL_DAY_RATE = 10000
@@ -35,6 +35,12 @@ def inclusive_days(start_date: str, end_date: str) -> int:
     if end < start:
         raise ValueError("End date cannot be before start date")
     return (end - start).days + 1
+
+
+def booking_days(start_date: str, end_date: str) -> List[str]:
+    start = parse_iso_date(start_date)
+    total = inclusive_days(start_date, end_date)
+    return [(start + timedelta(days=i)).isoformat() for i in range(total)]
 
 
 def list_ground_rate(time_slot: str, days: int, custom_rate: Optional[float] = None) -> float:

@@ -286,6 +286,18 @@ async def directory(
     return [directory_user(u) for u in docs]
 
 
+def _assert_grants_within_own(actor: dict, perms: dict) -> None:
+    """A caller may never hand out a permission they do not themselves hold."""
+    if is_super_admin(actor):
+        return
+    granted_beyond_self = sorted(k for k, v in perms.items() if v and not get_perm(actor, k))
+    if granted_beyond_self:
+        raise HTTPException(
+            403,
+            "You cannot grant permissions you do not hold: " + ", ".join(granted_beyond_self),
+        )
+
+
 @router.post("")
 async def create_user(payload: UserCreate, user: dict = Depends(get_current_user)):
     user_type = payload.user_type
@@ -337,15 +349,11 @@ async def create_user(payload: UserCreate, user: dict = Depends(get_current_user
     module_access = payload.module_access
     if payload.permissions:
         perms = {k: bool(payload.permissions.get(k, False)) for k in PERMISSION_KEYS}
-        granted_beyond_self = sorted(k for k, v in perms.items() if v and not get_perm(user, k))
-        if granted_beyond_self:
-            raise HTTPException(
-                403,
-                "You cannot grant permissions you do not hold: " + ", ".join(granted_beyond_self),
-            )
+        _assert_grants_within_own(user, perms)
     elif module_access:
         from designation_access import permissions_from_module_access
         perms = permissions_from_module_access(module_access)
+        _assert_grants_within_own(user, perms)
     else:
         from designation_access import permissions_from_module_access, preset_for_designation
         if payload.designation:
@@ -505,7 +513,7 @@ async def update_user(user_id: str, payload: UserUpdate, user: dict = Depends(ge
         raise HTTPException(403, "You cannot change your own user type or designation")
 
     body = payload.dict(exclude_none=True)
-    is_type_change = any(k in body for k in ("user_type", "designation", "login_tier", "entity_scope", "organization"))
+    is_type_change = any(k in body for k in ("user_type", "designation", "login_tier", "entity_scope", "organization", "module_access"))
     if is_type_change and not is_super_admin(user):
         raise HTTPException(403, "Only Super Admin can change user type")
 
@@ -554,9 +562,12 @@ async def update_user(user_id: str, payload: UserUpdate, user: dict = Depends(ge
                 raise HTTPException(400, "Teacher designation must be CLASS_TEACHER or TEACHER")
             upd[k] = v
         elif k == "module_access":
-            from designation_access import permissions_from_module_access
+            from designation_access import MODULE_PERMISSION_KEYS, permissions_from_module_access
+            derived = permissions_from_module_access(v)
+            kept = {pk: bool(pv) for pk, pv in (target.get("permissions") or {}).items()
+                    if pk not in MODULE_PERMISSION_KEYS}
             upd["module_access"] = v
-            upd["permissions"] = permissions_from_module_access(v)
+            upd["permissions"] = {**kept, **derived}
         elif k not in ("user_type", "designation", "role", "login_tier", "entity_scope"):
             upd[k] = v
 
@@ -780,10 +791,11 @@ async def reset_user_password(user_id: str, payload: ResetPasswordIn, user: dict
 
 
 _SUPER_ADMIN_MATCH = {
+    "status": {"$ne": "deactivated"},
     "$or": [
         {"role": "super_admin"},
         {"user_type": "super_admin"},
-    ]
+    ],
 }
 
 
@@ -797,11 +809,11 @@ async def delete_user(user_id: str, user: dict = Depends(get_current_user)):
     if not target:
         raise HTTPException(404, "User not found")
     if is_super_admin(target):
-        remaining = await db.users.count_documents({
-            "id": {"$ne": user_id},
-            **_SUPER_ADMIN_MATCH,
-        })
-        if remaining < 1:
+        removed = await db.users.delete_one({"id": user_id})
+        if not removed.deleted_count:
+            raise HTTPException(404, "User not found")
+        if await db.users.count_documents(_SUPER_ADMIN_MATCH) < 1:
+            await db.users.insert_one(target)
             raise HTTPException(409, "Cannot delete the last Super Admin")
     await db.teacher_class_assignments.delete_many({"teacher_user_id": user_id})
     await db.teacher_section_assignments.delete_many({"teacher_user_id": user_id})

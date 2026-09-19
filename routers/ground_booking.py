@@ -17,11 +17,14 @@ from core import (
     now_utc,
     today_ist,
 )
+from pymongo.errors import DuplicateKeyError
+
 from ground_booking import (
     BALL_COLORS,
     BALL_TYPES,
     SPORTS,
     STATUSES,
+    booking_days,
     compute_pricing,
 )
 from notifications_service import send_notification, send_to_role
@@ -128,9 +131,10 @@ class CustomerIn(BaseModel):
 
 class BookingCreate(BaseModel):
     sport: Literal["Cricket", "Football"]
+    campus: Literal["Balua", "Harding Park", "Defense Colony"]
     customer: CustomerIn
-    startDate: str
-    endDate: str
+    startDate: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
+    endDate: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     timeSlot: Literal["half_day", "full_day", "custom"]
     customHours: Optional[float] = None
     eventType: Literal["Friendly Match", "Tournament", "Scouting", "Social Event"]
@@ -144,6 +148,13 @@ class BookingCreate(BaseModel):
 
 class BookingStatusIn(BaseModel):
     status: Literal["Tentative", "Confirmed", "Cancelled"]
+
+
+ALLOWED_STATUS_FROM = {
+    "Tentative": ["Tentative"],
+    "Confirmed": ["Tentative", "Confirmed"],
+    "Cancelled": ["Tentative", "Confirmed"],
+}
 
 
 def _phone_ok(phone: str) -> bool:
@@ -210,6 +221,7 @@ def _editor_stamp(user: dict, at: str) -> dict:
 def _core_fields(payload: BookingCreate, pricing: dict) -> dict:
     return {
         "sport": payload.sport,
+        "campus": payload.campus,
         "customer": {
             "name": payload.customer.name.strip(),
             "organization": (payload.customer.organization or "").strip() or None,
@@ -467,6 +479,7 @@ async def search_customers(q: str = Query(..., min_length=2), user: dict = Depen
             org_keys=["organization", "organisation", "club", "centre"],
             phone_keys=["mobile", "phone", "guardian_phone"],
         ),
+        "organization": {"$in": ["ALPHA", "BOTH"]},
     }
     people = await db.people.find(people_filt, {"_id": 0}).sort("name", 1).to_list(25)
     seen = set()
@@ -524,10 +537,35 @@ async def search_customers(q: str = Query(..., min_length=2), user: dict = Depen
 @router.get("/{booking_id}")
 async def get_booking(booking_id: str, user: dict = Depends(get_current_user)):
     _assert_access(user)
-    doc = await db.ground_bookings.find_one({"id": booking_id}, {"_id": 0})
+    doc = await db.ground_bookings.find_one({"id": booking_id, "entity": "ALPHA"}, {"_id": 0})
     if not doc:
         raise HTTPException(404, "Booking not found")
     return _public(doc)
+
+
+async def _claim_slots(booking_id: str, campus: str, sport: str, start: str, end: str) -> None:
+    """Reserve one lock row per occupied day; the unique index is the conflict check."""
+    days = booking_days(start, end)
+    locks = [
+        {"id": str(uuid.uuid4()), "booking_id": booking_id, "campus": campus,
+         "sport": sport, "day": day}
+        for day in days
+    ]
+    taken: List[str] = []
+    for lock in locks:
+        try:
+            await db.ground_slot_locks.insert_one(dict(lock))
+        except DuplicateKeyError:
+            await db.ground_slot_locks.delete_many({"booking_id": booking_id})
+            raise HTTPException(
+                409,
+                f"{sport} at {campus} is already booked on {lock['day']}",
+            )
+        taken.append(lock["day"])
+
+
+async def _release_slots(booking_id: str) -> None:
+    await db.ground_slot_locks.delete_many({"booking_id": booking_id})
 
 
 @router.post("")
@@ -556,11 +594,20 @@ async def create_booking(payload: BookingCreate, user: dict = Depends(get_curren
         "discount_task_id": None,
         "discount_approval_id": None,
     }
+    await _claim_slots(doc["id"], payload.campus, payload.sport, payload.startDate, payload.endDate)
+    try:
+        await db.ground_bookings.insert_one(dict(doc))
+    except BaseException:
+        await _release_slots(doc["id"])
+        raise
     if pricing["discountRequested"]:
         refs = await _open_discount_task(user, doc, pricing)
         doc["discount_task_id"] = refs["task_id"]
         doc["discount_approval_id"] = refs["approval_id"]
-    await db.ground_bookings.insert_one(doc)
+        await db.ground_bookings.update_one({"id": doc["id"]}, {"$set": {
+            "discount_task_id": refs["task_id"],
+            "discount_approval_id": refs["approval_id"],
+        }})
     out = _public(doc)
     out["discount_submitted"] = bool(pricing["discountRequested"])
     return out
@@ -569,7 +616,7 @@ async def create_booking(payload: BookingCreate, user: dict = Depends(get_curren
 @router.put("/{booking_id}")
 async def update_booking(booking_id: str, payload: BookingCreate, user: dict = Depends(get_current_user)):
     _assert_manage(user)
-    doc = await db.ground_bookings.find_one({"id": booking_id}, {"_id": 0})
+    doc = await db.ground_bookings.find_one({"id": booking_id, "entity": "ALPHA"}, {"_id": 0})
     if not doc:
         raise HTTPException(404, "Booking not found")
     if doc.get("status") != "Tentative":
@@ -608,7 +655,7 @@ async def update_booking(booking_id: str, payload: BookingCreate, user: dict = D
             "edit_history": history,
         }},
     )
-    updated = await db.ground_bookings.find_one({"id": booking_id}, {"_id": 0})
+    updated = await db.ground_bookings.find_one({"id": booking_id, "entity": "ALPHA"}, {"_id": 0})
     out = _public(updated)
     out["discount_submitted"] = bool(pricing["discountRequested"] and not (doc.get("pricing") or {}).get("discountPending"))
     return out
@@ -617,35 +664,40 @@ async def update_booking(booking_id: str, payload: BookingCreate, user: dict = D
 @router.patch("/{booking_id}/status")
 async def update_status(booking_id: str, payload: BookingStatusIn, user: dict = Depends(get_current_user)):
     _assert_manage(user)
-    doc = await db.ground_bookings.find_one({"id": booking_id}, {"_id": 0})
+    doc = await db.ground_bookings.find_one({"id": booking_id, "entity": "ALPHA"}, {"_id": 0})
     if not doc:
         raise HTTPException(404, "Booking not found")
     if payload.status == "Confirmed" and (doc.get("pricing") or {}).get("discountPending"):
         raise HTTPException(400, "Confirm after Super Admin approves the discounted rate")
+    allowed_from = ALLOWED_STATUS_FROM[payload.status]
     now = now_utc().isoformat()
     editor = _editor_stamp(user, now)
-    history = list(doc.get("edit_history") or [])
-    history.append({**editor, "action": payload.status.lower()})
-    await db.ground_bookings.update_one(
-        {"id": booking_id},
-        {"$set": {
-            "status": payload.status,
-            "updated_at": now,
-            "updated_by": editor["user_id"],
-            "updated_by_name": editor["name"],
-            "updated_by_email": editor["email"],
-            "updated_by_role": editor["role"],
-            "edit_history": history,
-        }},
+    res = await db.ground_bookings.update_one(
+        {"id": booking_id, "status": {"$in": allowed_from}},
+        {
+            "$set": {
+                "status": payload.status,
+                "updated_at": now,
+                "updated_by": editor["user_id"],
+                "updated_by_name": editor["name"],
+                "updated_by_email": editor["email"],
+                "updated_by_role": editor["role"],
+            },
+            "$push": {"edit_history": {**editor, "action": payload.status.lower()}},
+        },
     )
-    updated = await db.ground_bookings.find_one({"id": booking_id}, {"_id": 0})
+    if not res.matched_count:
+        raise HTTPException(409, f"Booking cannot move from {doc.get('status')} to {payload.status}")
+    if payload.status == "Cancelled":
+        await _release_slots(booking_id)
+    updated = await db.ground_bookings.find_one({"id": booking_id, "entity": "ALPHA"}, {"_id": 0})
     return _public(updated)
 
 
 async def apply_discount_decision(req: dict, *, approved: bool) -> None:
     payload = req.get("payload") or {}
     booking_id = payload.get("booking_id") or req.get("subject_id")
-    booking = await db.ground_bookings.find_one({"id": booking_id})
+    booking = await db.ground_bookings.find_one({"id": booking_id, "entity": "ALPHA"})
     if not booking:
         raise HTTPException(404, "Ground booking not found")
     pricing = dict(booking.get("pricing") or {})

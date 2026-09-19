@@ -5,7 +5,17 @@ os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017/test")
 os.environ.setdefault("DB_NAME", "test")
 os.environ.setdefault("JWT_SECRET", "test-secret")
 
-from fee_sync import compute_amount_due, fee_related_keys_changed, unpaid_fee_is_before_admission
+import uuid
+
+import pytest
+
+from core import db
+from fee_sync import (
+    SETTLED_ROW_GUARD,
+    compute_amount_due,
+    drop_unpaid_fees_before_admission,
+    fee_related_keys_changed,
+)
 
 
 def test_fee_related_keys_changed_detects_override():
@@ -58,19 +68,80 @@ def test_compute_amount_due_applies_discount():
     assert compute_amount_due(fee, 2000, person) == 1500
 
 
-def test_unpaid_fee_is_before_admission_month():
-    person_adm = "2026-06-10"
-    assert unpaid_fee_is_before_admission(
-        {"fee_type": "Monthly", "period_month": "2015-06"}, person_adm
-    )
-    assert unpaid_fee_is_before_admission(
-        {"fee_type": "Registration", "period_month": "2015-06", "due_date": "2015-06-05"},
-        person_adm,
-    )
-    assert not unpaid_fee_is_before_admission(
-        {"fee_type": "Monthly", "period_month": "2026-06"}, person_adm
-    )
-    assert not unpaid_fee_is_before_admission(
-        {"fee_type": "Monthly", "period_month": "2026-07"}, person_adm
-    )
+def test_settled_row_guard_protects_receipted_and_discounted_rows():
+    assert SETTLED_ROW_GUARD["discount_applied"] == {"$not": {"$gt": 0}}
+    assert SETTLED_ROW_GUARD["receipt_number"] == {"$in": [None, ""]}
+    assert SETTLED_ROW_GUARD["batch_id"] == {"$in": [None, ""]}
+
+
+@pytest.mark.asyncio
+async def test_drop_before_admission_never_deletes_a_row_that_just_got_paid():
+    """The delete must re-assert status, or a concurrent collection loses its receipt."""
+    person = {"id": str(uuid.uuid4()), "date_of_admission": "2026-06-10"}
+    stale = {
+        "id": str(uuid.uuid4()),
+        "player_id": person["id"],
+        "fee_type": "Monthly",
+        "period_month": "2026-04",
+        "status": "unpaid",
+        "amount": 3000,
+        "amount_due": 3000,
+    }
+    await db.fees.insert_one(dict(stale))
+    try:
+        await db.fees.update_one({"id": stale["id"]}, {"$set": {"status": "paid"}})
+        entries = []
+        await drop_unpaid_fees_before_admission(person, entries)
+        survivor = await db.fees.find_one({"id": stale["id"]}, {"_id": 0, "status": 1})
+        assert survivor is not None, "a paid fee row was deleted by the pre-admission sweep"
+        assert entries == [], "a row that was not deleted must not be reported as deleted"
+    finally:
+        await db.fees.delete_many({"player_id": person["id"]})
+
+
+@pytest.mark.asyncio
+async def test_drop_before_admission_keeps_rows_carrying_a_concession():
+    person = {"id": str(uuid.uuid4()), "date_of_admission": "2026-06-10"}
+    discounted = {
+        "id": str(uuid.uuid4()),
+        "player_id": person["id"],
+        "fee_type": "Monthly",
+        "period_month": "2026-04",
+        "status": "unpaid",
+        "amount": 3000,
+        "amount_due": 2000,
+        "discount_applied": 1000,
+    }
+    await db.fees.insert_one(dict(discounted))
+    try:
+        await drop_unpaid_fees_before_admission(person, [])
+        kept = await db.fees.find_one({"id": discounted["id"]}, {"_id": 0, "id": 1})
+        assert kept is not None, "an approved concession was destroyed with no audit trail"
+    finally:
+        await db.fees.delete_many({"player_id": person["id"]})
+
+
+@pytest.mark.asyncio
+async def test_drop_before_admission_removes_plain_stale_rows():
+    person = {"id": str(uuid.uuid4()), "date_of_admission": "2026-06-10"}
+    stale = {
+        "id": str(uuid.uuid4()),
+        "player_id": person["id"],
+        "fee_type": "Monthly",
+        "period_month": "2026-04",
+        "status": "unpaid",
+        "amount": 3000,
+        "amount_due": 3000,
+    }
+    current = {**stale, "id": str(uuid.uuid4()), "period_month": "2026-06"}
+    await db.fees.insert_many([dict(stale), dict(current)])
+    try:
+        entries = []
+        removed = await drop_unpaid_fees_before_admission(person, entries)
+        assert removed == 1
+        assert await db.fees.find_one({"id": stale["id"]}) is None
+        assert await db.fees.find_one({"id": current["id"]}) is not None
+        assert [e["action"] for e in entries] == ["removed_before_admission"]
+    finally:
+        await db.fees.delete_many({"player_id": person["id"]})
 

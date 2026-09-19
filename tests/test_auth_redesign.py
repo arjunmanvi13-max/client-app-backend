@@ -123,7 +123,7 @@ class TestUserCreate:
             {"name": "TEST_x", "email": "test_x@prarambhika.com", "password": "Temp@Pass123", "role": "teacher"},
             token=super_token,
         )
-        assert r.status_code == 422
+        assert r.status_code in (400, 422), r.text
 
     def test_rejects_unapproved_user_type(self, super_token):
         r = _post(

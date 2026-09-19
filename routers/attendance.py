@@ -766,7 +766,7 @@ async def _validate_batch_marks(
                 await class_roster_query_for_section_ids(assigned),
             ))
         existing_ids = set(await db.people.distinct(
-            "id", {"id": {"$in": person_ids}}
+            "id", {"id": {"$in": person_ids}, "kind": {"$in": ["student", "player"]}}
         ))
         for pid in person_ids:
             if pid not in existing_ids:

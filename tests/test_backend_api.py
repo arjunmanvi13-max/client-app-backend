@@ -95,7 +95,7 @@ class TestTasks:
 
     def test_create_task_and_comment_and_status(self):
         # get teacher id
-        r = requests.get(f"{API}/users?role=teacher", headers=_hdr("admin"))
+        r = requests.get(f"{API}/users?role=teacher", headers=_hdr("super_admin"))
         assert r.status_code == 200
         teacher_id = r.json()[0]["id"]
         payload = {"title": "TEST_pytest task", "description": "auto", "priority": "high", "assignee_ids": [teacher_id]}

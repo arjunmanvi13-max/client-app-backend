@@ -1,7 +1,10 @@
 """Fee Setup report — configured PWS/ALPHA fee details per student or player."""
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+logger = logging.getLogger("pws-alpha")
 
 IDENTITY_COLUMNS = [
     "Player/Student Name",
@@ -192,7 +195,7 @@ def _alpha_amounts(
     category = _canonical_player_type(person.get("player_type") or "Daily")
     sport = person.get("sport") or ""
     hardcoded = (ALPHA_FEE_CARDS.get(category) or {}).get(sport) or {}
-    rates = apply_defense_colony_rates_for_person(person, {**hardcoded, **(catalog_rates or {})})
+    rates = {**apply_defense_colony_rates_for_person(person, hardcoded), **(catalog_rates or {})}
     catalog = _alpha_catalog_components(rates, resolved_items)
     if "registration" not in catalog:
         catalog["registration"] = int(rates.get("registration") or 0)
@@ -308,8 +311,12 @@ def fee_setup_total_row(meta: dict) -> List[Any]:
 def fee_setup_people_query(entity: str, centre: Optional[str], status: Optional[str]) -> dict:
     from core import person_entity_filter
 
-    kind = "student" if entity == "PWS" else "player"
-    q: dict = {"kind": kind}
+    if entity == "PWS":
+        q: dict = {"kind": "student"}
+    elif entity == "ALPHA":
+        q = {"kind": "player"}
+    else:
+        q = {"kind": {"$in": ["student", "player"]}}
     ent_f = person_entity_filter(entity)
     if ent_f:
         q = {"$and": [q, ent_f]}
@@ -322,10 +329,14 @@ def fee_setup_people_query(entity: str, centre: Optional[str], status: Optional[
 
 
 def _ordered_component_keys(entity: str, seen: Sequence[str]) -> List[str]:
+    pws_order = [key for _, key, _ in PWS_COMPONENTS]
+    alpha_order = [key for key, _ in ALPHA_CORE_COMPONENTS + ALPHA_OPTIONAL_COMPONENTS]
     if entity == "PWS":
-        order = [key for _, key, _ in PWS_COMPONENTS]
+        order = pws_order
+    elif entity == "ALPHA":
+        order = alpha_order
     else:
-        order = [key for key, _ in ALPHA_CORE_COMPONENTS + ALPHA_OPTIONAL_COMPONENTS]
+        order = pws_order + [key for key in alpha_order if key not in pws_order]
     extra = [key for key in seen if key not in order]
     present = set(seen)
     return [key for key in order if key in present] + extra
@@ -335,7 +346,7 @@ async def run_fee_setup(user: dict, entity: str, filters: dict) -> dict:
     from core import db
     from reports_engine import build_meta
 
-    scope = entity if entity in ("PWS", "ALPHA") else "PWS"
+    scope = entity if entity in ("PWS", "ALPHA") else "BOTH"
     q = fee_setup_people_query(scope, filters.get("centre"), filters.get("status"))
     ids_raw = (filters.get("person_ids") or "").strip()
     if ids_raw:
@@ -351,20 +362,37 @@ async def run_fee_setup(user: dict, entity: str, filters: dict) -> dict:
     else:
         seen_components = [key for key, _ in ALPHA_CORE_COMPONENTS]
 
+    rate_cache: Dict[tuple, tuple] = {}
+    catalog_degraded = False
     for person in people:
         catalog = None
         resolved_items = None
         if person.get("kind") == "player":
-            try:
-                from routers.fee_catalog import find_plan_for_person, resolve_rates_for_person
+            cache_key = (
+                person.get("player_type"),
+                person.get("sport"),
+                person.get("centre"),
+                person.get("skill_level"),
+            )
+            if cache_key in rate_cache:
+                catalog, resolved_items = rate_cache[cache_key]
+            else:
+                try:
+                    from routers.fee_catalog import find_plan_for_person, resolve_rates_for_person
 
-                catalog = await resolve_rates_for_person(person)
-                plan = await find_plan_for_person(person)
-                if plan:
-                    resolved_items = plan.get("resolved_items") or []
-            except Exception:
-                catalog = None
-                resolved_items = None
+                    catalog = await resolve_rates_for_person(person)
+                    plan = await find_plan_for_person(person)
+                    if plan:
+                        resolved_items = plan.get("resolved_items") or []
+                    rate_cache[cache_key] = (catalog, resolved_items)
+                except Exception:
+                    logger.exception(
+                        "Fee catalogue lookup failed for %s — report row falls back to the rate card",
+                        person.get("id"),
+                    )
+                    catalog = None
+                    resolved_items = None
+                    catalog_degraded = True
         row = build_fee_setup_row(person, catalog, resolved_items)
         for key in row.get("component_keys") or []:
             if key not in seen_components:
@@ -393,6 +421,7 @@ async def run_fee_setup(user: dict, entity: str, filters: dict) -> dict:
         "component_totals": component_totals,
         "total_registration": component_totals.get("registration", 0),
         "total_base_fee": component_totals.get("tuition") or component_totals.get("monthly") or 0,
+        "catalog_degraded": catalog_degraded,
     }
     return build_meta(
         "fee-setup",

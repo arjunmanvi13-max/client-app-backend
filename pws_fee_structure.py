@@ -41,8 +41,11 @@ BASE_FEES = {
 }
 
 
+DEFAULT_FEE_CLASS = "Std 1"
+
+
 def _class_idx(pws_class: str) -> int:
-    canon = normalize_class_value(pws_class) or pws_class
+    canon = normalize_class_value(pws_class) or DEFAULT_FEE_CLASS
     if canon == "LKG":
         canon = "Nursery"
     if canon in ("Std 11", "Std 12"):
@@ -50,7 +53,7 @@ def _class_idx(pws_class: str) -> int:
     try:
         return _FEE_ORDER.index(canon)
     except ValueError:
-        return 0
+        return _FEE_ORDER.index(DEFAULT_FEE_CLASS)
 
 
 def _nursery_to_iii(pws_class: str) -> bool:
@@ -254,9 +257,9 @@ def student_type_to_legacy(pws_student_type: Optional[str], is_resident: bool = 
 
 def pws_student_profile_from_person(person: dict) -> dict:
     """Normalize person document to PWS fee profile."""
-    pws_class = normalize_class_value(person.get("pws_class") or person.get("group")) or "Std 1"
+    pws_class = normalize_class_value(person.get("pws_class") or person.get("group")) or DEFAULT_FEE_CLASS
     if pws_class not in PWS_CLASSES:
-        pws_class = "Std 1"
+        pws_class = DEFAULT_FEE_CLASS
     transport_enabled = bool(person.get("transport_enabled"))
     if not transport_enabled and int(person.get("transport_fee_monthly") or 0) > 0:
         transport_enabled = True

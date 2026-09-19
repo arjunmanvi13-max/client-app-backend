@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+ALPHA_CAMPUSES = ("Balua", "Harding Park", "Defense Colony")
+
 DEFENSE_COLONY_CENTRE = "Defense Colony"
 DEFENSE_COLONY_REGISTRATION = 7500
 DEFENSE_COLONY_MONTHLY_BY_SKILL = {

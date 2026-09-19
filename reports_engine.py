@@ -223,7 +223,7 @@ def export_excel(title: str, columns: List[str], rows: List[List[Any]], subtitle
         cell.alignment = Alignment(horizontal="left")
     for ri, row in enumerate(rows, start=hr + 1):
         for ci, val in enumerate(row, start=1):
-            ws.cell(row=ri, column=ci, value=val)
+            ws.cell(row=ri, column=ci, value=_csv_safe(val))
     for col_cells in ws.columns:
         try:
             max_len = max((len(str(c.value)) for c in col_cells if c.value is not None), default=8)
@@ -240,17 +240,27 @@ def export_excel(title: str, columns: List[str], rows: List[List[Any]], subtitle
     )
 
 
+def _csv_safe(value: Any) -> Any:
+    """Neutralize spreadsheet formula injection in exported cells."""
+    if value is None:
+        return ""
+    if isinstance(value, (int, float, bool)):
+        return value
+    text = str(value)
+    return "'" + text if text[:1] in ("=", "+", "-", "@", "\t", "\r") else text
+
+
 def export_csv(title: str, columns: List[str], rows: List[List[Any]], subtitle: str, filename: str) -> StreamingResponse:
     import csv
 
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow([title])
-    writer.writerow([subtitle])
+    writer.writerow([_csv_safe(title)])
+    writer.writerow([_csv_safe(subtitle)])
     writer.writerow([])
-    writer.writerow(columns)
+    writer.writerow([_csv_safe(c) for c in columns])
     for row in rows:
-        writer.writerow(row)
+        writer.writerow([_csv_safe(c) for c in row])
     payload = buf.getvalue().encode("utf-8-sig")
     return StreamingResponse(
         iter([payload]),

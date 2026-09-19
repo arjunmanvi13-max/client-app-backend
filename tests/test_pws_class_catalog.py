@@ -1,6 +1,9 @@
+import re
+
 from pws_class_catalog import (
     CLASS_LIST,
     CLASS_TO_CODE,
+    _ALIAS_TO_CANONICAL,
     format_class_display,
     normalize_class_value,
     pws_class_mongo_filter,
@@ -36,12 +39,21 @@ def test_same_class_across_modules():
     assert not same_class("Class I", "Class II")
 
 
-def test_mongo_filter_includes_aliases():
-    filt = pws_class_mongo_filter("Std 3")
-    values = filt["pws_class"]["$in"]
-    assert "Std 3" in values
-    assert "Class III" in values
-    assert "3" in values
+def test_mongo_filter_matches_every_stored_spelling():
+    spec = pws_class_mongo_filter("Std 3")["pws_class"]
+    rx = re.compile(spec["$regex"], re.I)
+    for stored in ("Std 3", "Class III", "3", "STD_03", "Class-III", "class iii", "Standard 3", "C3"):
+        assert rx.match(stored), f"{stored!r} would be invisible to the roster query"
+    for other in ("Std 4", "Class IV", "Nursery"):
+        assert not rx.match(other), f"{other!r} must not match Std 3"
+
+
+def test_mongo_filter_read_path_covers_every_write_path_alias():
+    for canon in CLASS_LIST:
+        rx = re.compile(pws_class_mongo_filter(canon)["pws_class"]["$regex"], re.I)
+        for alias, target in _ALIAS_TO_CANONICAL.items():
+            if target == canon:
+                assert rx.match(alias), f"{alias!r} normalizes to {canon} but the query cannot find it"
 
 
 def test_class_list_order_and_codes():
