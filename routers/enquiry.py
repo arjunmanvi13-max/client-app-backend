@@ -8,6 +8,8 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from pymongo import ReturnDocument
+
 from core import (
     db,
     get_current_user,
@@ -16,6 +18,8 @@ from core import (
     is_pws_accounts_user,
     is_pws_admin_user,
     is_super_admin,
+    logger,
+    now_ist,
     now_utc,
     resolve_user_type_safe,
     today_ist,
@@ -45,7 +49,7 @@ GENDERS = ("Male", "Female", "Other")
 RELATIONSHIPS = ("Mother", "Father", "Guardian", "Other")
 ALPHA_SPORTS = ("Cricket", "Football")
 ALPHA_CATEGORIES = ("Daily", "Hostel", "Boarding", "Day Boarding")
-ALPHA_CAMPUSES = ("Balua", "Harding Park", "Defense Colony")
+from alpha_centre_rules import ALPHA_CAMPUSES
 from pws_class_catalog import CLASS_LIST as PWS_CLASSES, normalize_class_value
 
 
@@ -154,7 +158,7 @@ def _public(doc: dict) -> dict:
     out["follow_up_overdue"] = False
     if next_at and out.get("status") in ACTIVE_STATUSES and out.get("status") not in ("Pending Close",):
         try:
-            out["follow_up_overdue"] = next_at[:16] < now_utc().isoformat()[:16]
+            out["follow_up_overdue"] = next_at[:16] < now_ist().isoformat()[:16]
         except Exception:
             out["follow_up_overdue"] = False
     return out
@@ -163,17 +167,13 @@ def _public(doc: dict) -> dict:
 async def _next_enquiry_code() -> str:
     year = today_ist()[:4]
     prefix = f"ENQ-{year}-"
-    last = await db.enquiries.find(
-        {"enquiry_code": {"$regex": f"^{re.escape(prefix)}"}},
-        {"_id": 0, "enquiry_code": 1},
-    ).sort("enquiry_code", -1).to_list(1)
-    n = 1
-    if last:
-        try:
-            n = int(str(last[0].get("enquiry_code") or "").split("-")[-1]) + 1
-        except ValueError:
-            n = 1
-    return f"{prefix}{n:04d}"
+    doc = await db.counters.find_one_and_update(
+        {"id": f"enquiry_code_{year}"},
+        {"$inc": {"seq": 1}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    return f"{prefix}{int(doc.get('seq') or 1):04d}"
 
 
 class EnquiryUpsert(BaseModel):
@@ -341,17 +341,22 @@ async def list_enquiries(
     user: dict = Depends(get_current_user),
 ):
     query: dict = {}
-    if can_access_enquiries(user):
-        query.update(_entity_filter(user))
-    else:
+    scoped = can_access_enquiries(user)
+    entity_scope = _entity_filter(user) if scoped else {}
+    if not scoped:
         query["assigned_to_id"] = user["id"]
     if institution in ("PWS", "ALPHA"):
+        allowed = entity_scope.get("institution")
+        if allowed and allowed != institution:
+            raise HTTPException(403, "Entity access denied")
         query["institution"] = institution
+    elif entity_scope:
+        query.update(entity_scope)
     if status in STATUSES:
         query["status"] = status
     if source in SOURCES:
         query["source"] = source
-    if assigned_to_id:
+    if assigned_to_id and scoped:
         query["assigned_to_id"] = assigned_to_id
     if follow_up_on and re.match(r"^\d{4}-\d{2}-\d{2}$", follow_up_on):
         query["next_follow_up_at"] = {"$regex": f"^{follow_up_on}"}
@@ -440,18 +445,18 @@ async def update_enquiry(enquiry_id: str, payload: EnquiryUpsert, user: dict = D
         raise HTTPException(400, "Admitted enquiries cannot be edited")
     if payload.status in ("Not Interested", "Lost"):
         raise HTTPException(400, "Closing a lead requires Principal or Super Admin approval")
+    if payload.status == "Admitted":
+        raise HTTPException(400, "Admission is recorded by converting the enquiry")
     _validate(payload)
     assigned = await _load_user(payload.assigned_to_id) if payload.assigned_to_id else None
     fields = _core(payload, assigned)
-    history = list(doc.get("history") or [])
-    history.append(_stamp(user, "updated"))
+    history_entry = _stamp(user, "updated")
     await db.enquiries.update_one({"id": enquiry_id}, {"$set": {
         **fields,
-        "history": history,
         "updated_by": user["id"],
         "updated_by_name": user.get("name"),
         "updated_at": now_utc().isoformat(),
-    }})
+    }, "$push": {"history": history_entry}})
     out = await db.enquiries.find_one({"id": enquiry_id}, {"_id": 0})
     return _public(out)
 
@@ -496,8 +501,7 @@ async def assign_enquiry(enquiry_id: str, payload: AssignIn, user: dict = Depend
         "comments": [],
     }
     await db.tasks.insert_one(task)
-    history = list(doc.get("history") or [])
-    history.append(_stamp(user, "assigned", note))
+    history_entry = _stamp(user, "assigned", note)
     status = doc.get("status") if doc.get("status") not in ("New",) else "Contacted"
     await db.enquiries.update_one({"id": enquiry_id}, {"$set": {
         "assigned_to_id": assignee["id"],
@@ -506,11 +510,10 @@ async def assign_enquiry(enquiry_id: str, payload: AssignIn, user: dict = Depend
         "office_queue": False,
         "active_task_id": task["id"],
         "status": status,
-        "history": history,
         "updated_by": user["id"],
         "updated_by_name": user.get("name"),
         "updated_at": now,
-    }})
+    }, "$push": {"history": history_entry}})
     if assignee["id"] != user["id"]:
         await send_notification(
             assignee["id"],
@@ -546,8 +549,7 @@ async def complete_assignment(enquiry_id: str, payload: CompleteAssignIn, user: 
         }})
     office_id = doc.get("created_by")
     office = await db.users.find_one({"id": office_id}, {"_id": 0, "id": 1, "name": 1, "role": 1}) if office_id else None
-    history = list(doc.get("history") or [])
-    history.append(_stamp(user, "completed_and_returned", remarks))
+    history_entry = _stamp(user, "completed_and_returned", remarks)
     await db.enquiries.update_one({"id": enquiry_id}, {"$set": {
         "assigned_to_id": office.get("id") if office else None,
         "assigned_to_name": office.get("name") if office else "Admissions office",
@@ -556,11 +558,10 @@ async def complete_assignment(enquiry_id: str, payload: CompleteAssignIn, user: 
         "active_task_id": None,
         "last_contacted_at": now,
         "follow_up_remarks": remarks,
-        "history": history,
         "updated_by": user["id"],
         "updated_by_name": user.get("name"),
         "updated_at": now,
-    }})
+    }, "$push": {"history": history_entry}})
     if office and office.get("id") and office["id"] != user["id"]:
         await send_notification(
             office["id"],
@@ -577,23 +578,22 @@ async def complete_assignment(enquiry_id: str, payload: CompleteAssignIn, user: 
 
 @router.post("/{enquiry_id}/follow-up-done")
 async def mark_follow_up(enquiry_id: str, payload: FollowUpIn, user: dict = Depends(get_current_user)):
+    _assert_manage(user)
     doc = await db.enquiries.find_one({"id": enquiry_id}, {"_id": 0})
     if not doc:
         raise HTTPException(404, "Enquiry not found")
     _assert_access(user, doc)
     now = now_utc().isoformat()
-    history = list(doc.get("history") or [])
-    history.append(_stamp(user, "follow_up_completed", payload.remarks))
+    history_entry = _stamp(user, "follow_up_completed", payload.remarks)
     nxt = payload.next_follow_up_at or doc.get("next_follow_up_at")
     await db.enquiries.update_one({"id": enquiry_id}, {"$set": {
         "last_contacted_at": now,
         "follow_up_remarks": (payload.remarks or doc.get("follow_up_remarks")),
         "next_follow_up_at": nxt,
-        "history": history,
         "updated_by": user["id"],
         "updated_by_name": user.get("name"),
         "updated_at": now,
-    }})
+    }, "$push": {"history": history_entry}})
     out = await db.enquiries.find_one({"id": enquiry_id}, {"_id": 0})
     return _public(out)
 
@@ -667,17 +667,15 @@ async def request_close(enquiry_id: str, payload: CloseIn, user: dict = Depends(
         "comments": [],
     }
     await db.approval_requests.insert_one(approval)
-    history = list(doc.get("history") or [])
-    history.append(_stamp(user, "close_requested", payload.reason.strip()))
+    history_entry = _stamp(user, "close_requested", payload.reason.strip())
     await db.enquiries.update_one({"id": enquiry_id}, {"$set": {
         "status": "Pending Close",
         "lost_reason": payload.lost_reason or payload.reason.strip(),
         "close_approval_id": approval["id"],
-        "history": history,
         "updated_by": user["id"],
         "updated_by_name": user.get("name"),
         "updated_at": now,
-    }})
+    }, "$push": {"history": history_entry}})
     await send_to_role(
         "super_admin",
         ntype="approval_requested",
@@ -701,29 +699,26 @@ async def apply_enquiry_close_decision(req: dict, approved: bool) -> None:
     payload = req.get("payload") or {}
     task_id = payload.get("task_id")
     now = now_utc().isoformat()
-    history = list(doc.get("history") or [])
-    history.append({
+    history_entry = {
         "id": str(uuid.uuid4()),
         "at": now,
         "by_id": req.get("decided_by_id"),
         "by_name": req.get("decided_by_name"),
         "action": "close_approved" if approved else "close_rejected",
         "note": req.get("decision_note"),
-    })
+    }
     if approved:
         await db.enquiries.update_one({"id": enquiry_id}, {"$set": {
             "status": "Lost",
             "lost_reason": payload.get("lost_reason") or doc.get("lost_reason"),
-            "history": history,
             "updated_at": now,
-        }})
+        }, "$push": {"history": history_entry}})
     else:
         await db.enquiries.update_one({"id": enquiry_id}, {"$set": {
             "status": payload.get("previous_status") or "On Hold",
             "close_approval_id": None,
-            "history": history,
             "updated_at": now,
-        }})
+        }, "$push": {"history": history_entry}})
     if task_id:
         await db.tasks.update_one({"id": task_id}, {"$set": {
             "status": "completed" if approved else "cancelled",
@@ -744,9 +739,27 @@ async def convert_to_admission(enquiry_id: str, user: dict = Depends(get_current
         return {"enquiry": _public(doc), "person": person, "already_converted": True}
     inst = doc.get("institution")
     now = now_utc().isoformat()
+    if inst != "PWS" and not (doc.get("preferred_campus") and doc.get("alpha_sport") and doc.get("alpha_category")):
+        raise HTTPException(400, "ALPHA conversion needs campus, sport, and category on the enquiry")
+    person_id = str(uuid.uuid4())
+    history_entry = _stamp(user, "converted_to_admission")
+    claimed = await db.enquiries.update_one(
+        {"id": enquiry_id, "converted_person_id": None},
+        {"$set": {
+            "status": "Admitted",
+            "converted_person_id": person_id,
+            "updated_by": user["id"],
+            "updated_by_name": user.get("name"),
+            "updated_at": now,
+        }, "$push": {"history": history_entry}},
+    )
+    if not claimed.modified_count:
+        fresh = await db.enquiries.find_one({"id": enquiry_id}, {"_id": 0})
+        person = await db.people.find_one({"id": (fresh or {}).get("converted_person_id")}, {"_id": 0})
+        return {"enquiry": _public(fresh or doc), "person": person, "already_converted": True}
     if inst == "PWS":
         person = {
-            "id": str(uuid.uuid4()),
+            "id": person_id,
             "kind": "student",
             "name": doc.get("student_name"),
             "organization": "PWS",
@@ -776,16 +789,13 @@ async def convert_to_admission(enquiry_id: str, user: dict = Depends(get_current
             from routers.fees import auto_create_fees_for_student
             await auto_create_fees_for_student(person)
         except Exception:
-            pass
+            logger.exception("Fee ledger not created for converted student %s", person["id"])
+            await db.people.update_one({"id": person["id"]}, {"$set": {"fee_setup_failed": True}})
         href_kind = "students"
     else:
-        if not doc.get("preferred_campus") or not doc.get("alpha_sport") or not doc.get("alpha_category"):
-            raise HTTPException(400, "ALPHA conversion needs campus, sport, and category on the enquiry")
         category = doc.get("alpha_category")
-        if category == "Hostel":
-            category = "Hostel"
         person = {
-            "id": str(uuid.uuid4()),
+            "id": person_id,
             "kind": "player",
             "name": doc.get("student_name"),
             "organization": "ALPHA",
@@ -813,18 +823,9 @@ async def convert_to_admission(enquiry_id: str, user: dict = Depends(get_current
             from routers.fees import auto_create_fees_for_player
             await auto_create_fees_for_player(person)
         except Exception:
-            pass
+            logger.exception("Fee ledger not created for converted player %s", person["id"])
+            await db.people.update_one({"id": person["id"]}, {"$set": {"fee_setup_failed": True}})
         href_kind = "players"
-    history = list(doc.get("history") or [])
-    history.append(_stamp(user, "converted_to_admission"))
-    await db.enquiries.update_one({"id": enquiry_id}, {"$set": {
-        "status": "Admitted",
-        "converted_person_id": person["id"],
-        "history": history,
-        "updated_by": user["id"],
-        "updated_by_name": user.get("name"),
-        "updated_at": now,
-    }})
     person.pop("_id", None)
     out = await db.enquiries.find_one({"id": enquiry_id}, {"_id": 0})
     return {

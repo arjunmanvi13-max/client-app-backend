@@ -1084,8 +1084,6 @@ async def export_mvp_report(
     if not runner:
         raise HTTPException(404, f"Unknown report: {report_id}")
     inst = resolve_entity(user, entity)
-    if report_id == "fee-setup" and inst not in ("PWS", "ALPHA"):
-        inst = "PWS"
     filters = _report_filters(
         entity, date_from, date_to, grade, section_id, sport, centre, status, player_type,
         fee_collection_type, payment_method, pws_student_type,
@@ -1097,9 +1095,7 @@ async def export_mvp_report(
         from reports_fee_setup import fee_setup_total_row
 
         matrix.append(fee_setup_total_row(meta))
-    generated = meta.get("generated_at") or ""
-    by = meta.get("generated_by") or user.get("name") or ""
-    subtitle = f"{_subtitle(inst, filters, user)} · Generated {generated} by {by}".strip(" ·")
+    subtitle = _subtitle(inst, filters, user)
     fmt = (format or "xlsx").lower()
     fname = export_download_filename(report_id, meta.get("title") or report_id, filters, fmt)
     if fmt == "pdf":
@@ -1139,8 +1135,6 @@ async def run_mvp_report(
     if not runner:
         raise HTTPException(404, f"Unknown report: {report_id}")
     inst = resolve_entity(user, entity)
-    if report_id == "fee-setup" and inst not in ("PWS", "ALPHA"):
-        inst = "PWS"
     filters = _report_filters(
         entity, date_from, date_to, grade, section_id, sport, centre, status, player_type,
         fee_collection_type, payment_method, pws_student_type,

@@ -22,14 +22,14 @@ def normalize_role(raw_role: str) -> UserRole:
 def resolve_user_entity(user: dict) -> BusinessEntity:
     role = (user.get("role") or "").strip().lower()
     designation = (user.get("designation") or "").strip().upper()
+    stored = (user.get("entity_scope") or "").strip().upper()
+    if stored in ("PWS", "ALPHA", "BOTH"):
+        return BusinessEntity(stored)
     if role == "principal" or designation == "PRINCIPAL":
-        stored = (user.get("entity_scope") or "").upper()
-        if stored in ("PWS", "ALPHA", "BOTH"):
-            return BusinessEntity(stored)
         return BusinessEntity.BOTH
     perms = user.get("permissions") or {}
     rbac = user.get("permissions_rbac") or {}
-    has_pws = bool(perms.get("view_students") or perms.get("add_students") or perms.get("view_staff"))
+    has_pws = bool(perms.get("view_students") or perms.get("add_students"))
     has_alpha = bool(
         perms.get("view_players")
         or perms.get("add_players")
@@ -43,7 +43,7 @@ def resolve_user_entity(user: dict) -> BusinessEntity:
         return BusinessEntity.ALPHA
     if has_pws and not has_alpha:
         return BusinessEntity.PWS
-    raw = (user.get("entity_scope") or user.get("organization") or "PWS").upper()
+    raw = (user.get("organization") or "PWS").upper()
     try:
         return BusinessEntity(raw)
     except ValueError:
@@ -86,9 +86,10 @@ def has_permission(
     Evaluation order:
     1. Inactive users → False
     2. Super Admin → True (all permissions)
-    3. Explicit RBAC override on user.permissions_rbac[permission]
-    4. Role default from ROLE_PERMISSIONS
-    5. (optional) Legacy snake_case permissions map
+    3. Entity scope — a permission never crosses PWS/ALPHA isolation
+    4. Explicit RBAC override on user.permissions_rbac[permission]
+    5. Role default from ROLE_PERMISSIONS
+    6. (optional) Legacy snake_case permissions map
     """
     if not user or user.get("status") == "deactivated" or user.get("is_active") is False:
         return False
@@ -106,17 +107,16 @@ def has_permission(
     is_principal = (
         (user.get("role") or "").strip().lower() == "principal"
         or (user.get("designation") or "").strip().upper() == "PRINCIPAL"
-        or (user.get("permission_set") or "").strip().lower() == "principal"
     )
     if is_principal and permission in (Permission.MANAGE_PLAYERS, Permission.ADD_ALPHA_PLAYERS):
         return entity_allows(BusinessEntity.BOTH, entity)
 
+    if entity and not entity_allows(resolve_user_entity(user), entity):
+        return False
+
     rbac_overrides = user.get("permissions_rbac") or {}
     if permission.value in rbac_overrides:
         return bool(rbac_overrides[permission.value])
-
-    if entity and not entity_allows(resolve_user_entity(user), entity):
-        return False
 
     if permission in permissions_for_role(role):
         return True

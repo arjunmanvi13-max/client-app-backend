@@ -216,34 +216,3 @@ def user_type_for_admin(designation: Optional[str], organization: Optional[str])
         return UserRole.PWS_TEACHER.value
     return UserRole.PWS_ADMIN.value
 
-
-def directory_category_for_user(user: dict) -> str:
-    ut = (user.get("user_type") or "").lower()
-    role = (user.get("role") or "").lower()
-    if ut == UserRole.PWS_TEACHER.value or role in ("teacher", "pws_teacher"):
-        return "teachers"
-    if ut == UserRole.SUPER_ADMIN.value or role == "super_admin":
-        return "admins"
-    return "admins"
-
-
-def directory_category_for_person(person: dict) -> Optional[str]:
-    kind = (person.get("kind") or "").lower()
-    if kind == "student":
-        return "students"
-    if kind == "player":
-        return "players"
-    if kind == "staff":
-        return "admins"
-    return None
-
-
-def admin_designations_for_scope(scope: str) -> List[str]:
-    scope = (scope or "BOTH").upper()
-    pws = ["PRINCIPAL", "VICE_PRINCIPAL", "ACADEMIC_HEAD", "EVENT_COORDINATOR", "OPERATIONS_ADMIN", "ACCOUNTS"]
-    alpha = ["OPERATIONS_ADMIN", "ACCOUNTS", "COACH", "WARDEN"]
-    if scope == "PWS":
-        return pws
-    if scope == "ALPHA":
-        return alpha
-    return list(ADMIN_DESIGNATIONS)

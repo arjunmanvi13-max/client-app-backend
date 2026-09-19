@@ -637,10 +637,20 @@ def resolve_user_institution(user: dict, requested: Optional[str] = None) -> str
                     return resolved
                 return req
         return resolved
+    stored_scope = (user.get("entity_scope") or "").strip().upper()
+    if stored_scope in INSTITUTIONS:
+        if requested:
+            req = requested.upper()
+            if req in INSTITUTIONS:
+                if stored_scope != "BOTH" and req not in (stored_scope, "BOTH"):
+                    raise HTTPException(403, "Entity access denied")
+                if req != "BOTH":
+                    return req
+        return stored_scope
     perms = user.get("permissions") or {}
     rbac = user.get("permissions_rbac") or {}
     has_pws_records = bool(
-        perms.get("view_students") or perms.get("add_students") or perms.get("view_staff")
+        perms.get("view_students") or perms.get("add_students")
     )
     has_alpha_records = bool(
         perms.get("view_players")

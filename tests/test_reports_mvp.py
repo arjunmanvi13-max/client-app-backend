@@ -119,11 +119,21 @@ class TestReportsExport:
         assert r.headers.get("content-type", "").startswith("application/pdf")
         assert len(r.content) > 100
 
-    def test_invalid_format_rejected(self):
+    def test_csv_export_supported(self):
         r = requests.get(
             f"{API}/reports/students/export",
             headers=_hdr("super_admin"),
             params={"format": "csv"},
+            timeout=10,
+        )
+        assert r.status_code == 200, r.text
+        assert "text/csv" in r.headers.get("content-type", "")
+
+    def test_invalid_format_rejected(self):
+        r = requests.get(
+            f"{API}/reports/students/export",
+            headers=_hdr("super_admin"),
+            params={"format": "docx"},
             timeout=10,
         )
         assert r.status_code == 400

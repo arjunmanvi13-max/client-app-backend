@@ -211,6 +211,12 @@ async def _ensure_indexes() -> None:
         ("tasks", [("assignee_ids", 1), ("status", 1), ("due_date", 1)]),
         ("gate_passes", [("status", 1), ("expected_return", 1)]),
         ("report_cards", [("entity_id", 1), ("status", 1)]),
+        ("enquiries", [("id", 1)]),
+        ("enquiries", [("institution", 1), ("status", 1), ("enquiry_at", -1)]),
+        ("enquiries", [("assigned_to_id", 1), ("status", 1)]),
+        ("ground_bookings", [("id", 1)]),
+        ("ground_bookings", [("entity", 1), ("dates.startDate", 1), ("dates.endDate", 1)]),
+        ("ground_slot_locks", [("booking_id", 1)]),
     ]:
         try:
             await db[coll].create_index(fields)
@@ -255,6 +261,8 @@ async def _ensure_unique_indexes() -> None:
         ("people", [("employee_id", 1)], {"employee_id": {"$type": "string"}}),
         ("academic_marks", [("person_id", 1), ("assessment_id", 1)], None),
         ("roll_calls", [("date", 1), ("session", 1), ("resident_id", 1)], None),
+        ("ground_slot_locks", [("campus", 1), ("sport", 1), ("day", 1)], None),
+        ("enquiries", [("enquiry_code", 1)], {"enquiry_code": {"$type": "string"}}),
     ]
     for coll, fields, partial in unique_specs:
         kwargs = {"unique": True}

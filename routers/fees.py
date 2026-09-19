@@ -110,7 +110,7 @@ async def _rates_for_person(person: dict) -> dict:
         from routers.fee_catalog import resolve_rates_for_person
         catalog = await resolve_rates_for_person(person)
         if catalog:
-            return apply_defense_colony_rates_for_person(person, catalog)
+            return catalog
     except Exception:
         logger.exception(
             "Fee catalogue lookup failed for person %s — refusing to bill from the "
@@ -392,19 +392,26 @@ def _iter_months(start: str, end: str):
             m = 1; y += 1
 
 
+async def _drop_pre_admission_fees(player: dict) -> None:
+    """Clear pre-admission dues, recording every removal in the fee sync audit."""
+    from fee_sync import _write_audit_logs, drop_unpaid_fees_before_admission
+    entries: List[dict] = []
+    await drop_unpaid_fees_before_admission(player, entries)
+    if entries:
+        await _write_audit_logs(player["id"], {"id": None, "name": "system"}, entries)
+
+
 async def ensure_monthly_fees_up_to_current(player_id: str) -> List[dict]:
     """Lazily back-fill monthly recurring fees up to the current month."""
     player = await db.people.find_one({"id": player_id})
     if not player:
         return []
     if player.get("kind") == "student" and player.get("organization") == "PWS":
-        from fee_sync import drop_unpaid_fees_before_admission
-        await drop_unpaid_fees_before_admission(player)
+        await _drop_pre_admission_fees(player)
         return await _ensure_pws_recurring_fees(player)
     if player.get("organization") != "ALPHA":
         return []
-    from fee_sync import drop_unpaid_fees_before_admission
-    await drop_unpaid_fees_before_admission(player)
+    await _drop_pre_admission_fees(player)
     sport = player.get("sport") or ""
     category = _canonical_category(player.get("player_type") or "Daily")
     rates = await _rates_for_person(player)

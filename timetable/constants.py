@@ -28,24 +28,6 @@ DUTY_TYPES = ("LUNCH_DUTY", "CLUB_INCHARGE", "ASSEMBLY_DUTY")
 PRE_PRIMARY_GRADES = {"Nur", "Nursery", "LKG", "UKG"}
 PRIMARY_GRADES = {str(i) for i in range(1, 11)} | {"I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"}
 
-# Display-order class labels → grade name in db.grades
-TIMETABLE_CLASS_LABELS: List[Tuple[str, str, str | None]] = [
-    ("Nursery", "Nur", None),
-    ("LKG", "LKG", None),
-    ("UKG", "UKG", None),
-    ("Std 1", "1", None),
-    ("Std 2", "2", None),
-    ("Std 3", "3", None),
-    ("Std 4", "4", None),
-    ("Std 5", "5", None),
-    ("Std 6", "6", None),
-    ("Std 7", "7", None),
-    ("Std 8", "8", None),
-    ("Std 9", "9", None),
-    ("Std 10 A", "10", "A"),
-    ("Std 10 B", "10", "B"),
-]
-
 TIMETABLE_SUBJECTS = [
     "English", "Hindi", "Sanskrit", "Mathematics", "EVS", "General Awareness",
     "Science", "Physics", "Chemistry", "Biology", "Social Science", "History",

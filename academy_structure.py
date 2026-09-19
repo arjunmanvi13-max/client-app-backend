@@ -55,6 +55,8 @@ PWS_DB_CLASS_TO_KEY = {
     "Std 8": "std8",
     "Std 9": "std9",
     "Std 10": "std10",
+    "Std 11": "std11",
+    "Std 12": "std12",
 }
 
 ALPHA_CATEGORY_KEYS = ["dayBoarding", "boarding", "hostel", "dailyPlayers"]

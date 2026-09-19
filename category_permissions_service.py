@@ -184,7 +184,7 @@ async def permissions_for_user_type(user_type: str) -> Optional[Dict[str, Any]]:
     }
 
 
-async def get_permission_set(code: str) -> Dict[str, Any]:
+async def get_permission_set(code: str, compat_override: Optional[str] = None) -> Dict[str, Any]:
     from directory_workflow import PERMISSION_SET_BY_CODE, PERMISSION_SET_CODES
     from rbac.enums import UserRole
     if code not in PERMISSION_SET_CODES:
@@ -193,7 +193,7 @@ async def get_permission_set(code: str) -> Dict[str, Any]:
     catalog = permissions_catalog()
     leaves = leaf_module_ids(catalog)
     stored = await db.permission_sets.find_one({"code": code}, {"_id": 0})
-    compat = meta.get("compat_user_type") or UserRole.PWS_ADMIN.value
+    compat = compat_override or meta.get("compat_user_type") or UserRole.PWS_ADMIN.value
     if stored and stored.get("modules"):
         modules = {mid: bool(stored["modules"].get(mid)) for mid in leaves}
     else:
@@ -298,6 +298,22 @@ async def save_permission_set(code: str, modules: Dict[str, bool], actor: dict) 
     return out
 
 
+def _compat_for_entity(compat: str, user: dict) -> str:
+    """Permission sets are shared across entities; the modules they map to are not."""
+    from rbac.enums import UserRole
+
+    pairs = {
+        UserRole.PWS_ADMIN.value: UserRole.ALPHA_ADMIN.value,
+        UserRole.PWS_ACCOUNTS.value: UserRole.ALPHA_ACCOUNTS.value,
+    }
+    scope = (user.get("entity_scope") or user.get("organization") or "").strip().upper()
+    if scope == "ALPHA":
+        return pairs.get(compat, compat)
+    if scope == "PWS":
+        return {v: k for k, v in pairs.items()}.get(compat, compat)
+    return compat
+
+
 async def overlay_permission_set(user: dict) -> dict:
     """Attach the current permission-set grants onto a user document for this request."""
     from directory_workflow import PERMISSION_SET_BY_CODE, permission_set_for_user
@@ -326,9 +342,11 @@ async def overlay_permission_set(user: dict) -> dict:
     had_bound_set = (user.get("permission_set") or "").strip().lower() in PERMISSION_SET_BY_CODE
     try:
         compat = (PERMISSION_SET_BY_CODE.get(code) or {}).get("compat_user_type") or UserRole.PWS_ADMIN.value
-        set_doc = await get_permission_set(code)
+        compat = _compat_for_entity(compat, user)
+        set_doc = await get_permission_set(code, compat_override=compat)
         legacy, rbac_derived = derive_permissions_from_modules(compat, set_doc.get("modules") or {})
-        user["permissions"] = legacy
+        held = {k: True for k, v in (user.get("permissions") or {}).items() if v}
+        user["permissions"] = {**legacy, **held}
         user["permissions_rbac"] = rbac_derived
         user["permission_set"] = code
         persist: dict = {}

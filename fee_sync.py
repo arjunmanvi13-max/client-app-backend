@@ -9,10 +9,18 @@ import logging
 import uuid
 from typing import Any, Dict, List, Optional, Set
 
+from pymongo.errors import DuplicateKeyError
+
 from core import db, now_utc, today_ist
 from fee_override_approval import FEE_OVERRIDE_KEYS
 
 log = logging.getLogger("fee_sync")
+
+SETTLED_ROW_GUARD = {
+    "discount_applied": {"$not": {"$gt": 0}},
+    "receipt_number": {"$in": [None, ""]},
+    "batch_id": {"$in": [None, ""]},
+}
 
 FEE_PROFILE_KEYS = FEE_OVERRIDE_KEYS + (
     "transport_enabled",
@@ -42,13 +50,6 @@ def _month_key(date_iso: str) -> str:
     return date_iso[:7]
 
 
-def unpaid_fee_is_before_admission(fee: dict, admission_iso: str) -> bool:
-    """True when an unpaid ledger row is dated before the admission month."""
-    start = (admission_iso or "")[:7]
-    period = (fee.get("period_month") or fee.get("due_date") or "")[:7]
-    return bool(start) and bool(period) and period < start
-
-
 async def drop_unpaid_fees_before_admission(
     person: dict,
     audit_buffer: Optional[List[dict]] = None,
@@ -74,6 +75,7 @@ async def drop_unpaid_fees_before_admission(
         "fee_type": "Registration",
         "status": {"$ne": "paid"},
         "period_month": {"$lt": start_month},
+        **SETTLED_ROW_GUARD,
     }).to_list(50)
     dest_reg = await db.fees.find_one({
         "player_id": person_id,
@@ -82,14 +84,38 @@ async def drop_unpaid_fees_before_admission(
     })
     for fee in regs:
         if dest_reg:
-            await db.fees.delete_one({"id": fee["id"]})
+            res = await db.fees.delete_one({"id": fee["id"], "status": {"$ne": "paid"}})
+            if not res.deleted_count:
+                continue
             action = "removed_before_admission"
         else:
-            await db.fees.update_one({"id": fee["id"]}, {"$set": {
-                "period_month": start_month,
-                "due_date": admission if len(admission) >= 10 else f"{start_month}-01",
-                "fee_synced_at": now_utc().isoformat(),
-            }})
+            try:
+                res = await db.fees.update_one(
+                    {"id": fee["id"], "status": {"$ne": "paid"}},
+                    {"$set": {
+                        "period_month": start_month,
+                        "due_date": admission if len(admission) >= 10 else f"{start_month}-01",
+                        "fee_synced_at": now_utc().isoformat(),
+                    }},
+                )
+            except DuplicateKeyError:
+                res = await db.fees.delete_one({"id": fee["id"], "status": {"$ne": "paid"}})
+                if not res.deleted_count:
+                    continue
+                buffer.append({
+                    "fee_id": fee["id"],
+                    "fee_type": "Registration",
+                    "period_month": fee.get("period_month"),
+                    "previous_amount": int(fee.get("amount") or 0),
+                    "new_amount": 0,
+                    "previous_amount_due": int(fee.get("amount_due") or 0),
+                    "new_amount_due": 0,
+                    "action": "removed_before_admission",
+                })
+                changed += 1
+                continue
+            if not res.modified_count:
+                continue
             dest_reg = {**fee, "period_month": start_month}
             action = "moved_to_admission_month"
         buffer.append({
@@ -110,9 +136,12 @@ async def drop_unpaid_fees_before_admission(
         "period_month": {"$lt": start_month},
         "is_adhoc": {"$ne": True},
         "fee_type": {"$ne": "Registration"},
+        **SETTLED_ROW_GUARD,
     })
     async for fee in cursor:
-        await db.fees.delete_one({"id": fee["id"]})
+        res = await db.fees.delete_one({"id": fee["id"], "status": {"$ne": "paid"}})
+        if not res.deleted_count:
+            continue
         buffer.append({
             "fee_id": fee["id"],
             "fee_type": fee.get("fee_type"),

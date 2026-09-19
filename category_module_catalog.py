@@ -77,7 +77,9 @@ MODULE_GROUPS: List[Dict[str, Any]] = [
                 UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value, UserRole.ALPHA_ADMIN.value,
                 UserRole.PWS_ACCOUNTS.value, UserRole.ALPHA_ACCOUNTS.value,
             ]),
-            _mod("admins", "Admins", permission_keys=["manage_users", "view_staff"], rbac=[Permission.CREATE_USERS.value, Permission.MANAGE_COACHES.value],
+            _mod("admins", "Admins", permission_keys=["view_staff"], rbac=[Permission.MANAGE_COACHES.value],
+                  user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value, UserRole.ALPHA_ADMIN.value]),
+            _mod("admins-manage", "Create & Manage Logins", permission_keys=["manage_users"], rbac=[Permission.CREATE_USERS.value],
                   user_types=[UserRole.SUPER_ADMIN.value, UserRole.PWS_ADMIN.value, UserRole.ALPHA_ADMIN.value]),
             _mod("teachers-directory", "Teachers", permission_keys=["manage_users", "view_students"],
                   rbac=[Permission.MANAGE_TEACHERS_MAP_SUBJECTS.value, Permission.ADD_NEW_TEACHER.value],
@@ -275,7 +277,7 @@ DEFAULT_ENABLED_MODULES: Dict[str, Set[str]] = {
     UserRole.PWS_ADMIN.value: {
         "dashboard", "reports", "approvals", "tasks",
         "directory-master", "admins", "teachers-directory", "students",
-        "pws-expenses",
+        "collect-fees", "defaulters", "finance-reports", "pws-expenses",
         "attendance-take", "attendance-reports", "teacher-attendance", "hostel", "enquiry",
         "academic-structure", "marks-entry", "marks-setup", "report-cards", "coach-assessments",
         "settings", "notifications",
@@ -283,7 +285,7 @@ DEFAULT_ENABLED_MODULES: Dict[str, Set[str]] = {
     UserRole.ALPHA_ADMIN.value: {
         "dashboard", "reports", "approvals", "tasks",
         "directory-master", "admins", "players",
-        "alpha-expenses",
+        "collect-fees", "defaulters", "finance-reports", "alpha-expenses",
         "attendance-take", "attendance-reports", "coach-attendance-admin", "ground-booking", "enquiry",
         "player-assessments", "coach-assessments",
         "settings", "notifications",

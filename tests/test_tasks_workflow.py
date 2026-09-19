@@ -74,7 +74,7 @@ def purge_test_tasks():
 
 class TestTaskWorkflow:
     def test_create_with_workflow_fields(self):
-        users = requests.get(f"{API}/users?role=teacher", headers=_hdr("admin"), timeout=15)
+        users = requests.get(f"{API}/users?role=teacher", headers=_hdr("super_admin"), timeout=15)
         assert users.status_code == 200
         teacher_id = users.json()[0]["id"]
         payload = {
