@@ -603,8 +603,9 @@ async def create_person(payload: PersonCreate, user: dict = Depends(get_current_
     # Auto-create fees for ALPHA player or PWS student
     if payload.kind == "player":
         try:
-            from routers.fees import auto_create_fees_for_player
+            from routers.fees import auto_create_fees_for_player, ensure_monthly_fees_up_to_current
             await auto_create_fees_for_player(doc)
+            await ensure_monthly_fees_up_to_current(doc["id"])
         except Exception as e:
             import logging
             logging.getLogger("fees").exception("Auto fee creation failed for player %s: %s", doc.get("id"), e)
@@ -787,11 +788,11 @@ async def update_person(person_id: str, payload: PersonUpdate, user: dict = Depe
             "approval": approval_out(approval_doc),
         }
 
-    if fee_keys_changed and fresh.get("kind") in ("player", "student"):
+    if fresh.get("kind") in ("player", "student") and not fee_pending_approval:
         try:
             from fee_sync import sync_person_fees_to_financials
             sync_result = await sync_person_fees_to_financials(
-                fresh, user, changed_keys=fee_keys_changed,
+                fresh, user, changed_keys=fee_keys_changed or None,
             )
             fresh = {**fresh, "fee_sync": sync_result}
         except Exception:

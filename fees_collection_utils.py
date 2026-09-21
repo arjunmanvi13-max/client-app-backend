@@ -2,7 +2,22 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List
+from typing import List, Optional
+
+
+def normalize_person_date(value: Optional[str], fallback: Optional[str] = None) -> str:
+    """Normalize Directory dates (YYYY-MM-DD or DD/MM/YYYY) to ISO YYYY-MM-DD."""
+    s = (value or "").strip()
+    if not s:
+        return fallback or ""
+    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+        return s[:10]
+    if "/" in s:
+        parts = [p.strip() for p in s.split("/")]
+        if len(parts) == 3 and len(parts[2]) == 4:
+            day, month, year = parts[0].zfill(2), parts[1].zfill(2), parts[2]
+            return f"{year}-{month}-{day}"
+    return s[:10] if len(s) >= 10 else (fallback or s)
 
 
 def days_overdue(due_date_str: str, today: str) -> int:

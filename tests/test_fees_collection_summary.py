@@ -1,5 +1,5 @@
 """Unit tests for fees collection summary helpers."""
-from fees_collection_utils import compute_player_fee_status
+from fees_collection_utils import compute_player_fee_status, expand_player_type_filter, normalize_person_date
 
 
 def test_compute_status_paid_no_unpaid():
@@ -36,3 +36,11 @@ def test_expand_player_type_filter_hostel_aliases():
     assert expand_player_type_filter("") is None
     assert expand_player_type_filter("Daily,Day Boarding") == ["Daily", "Day Boarding"]
     assert expand_player_type_filter("Hostel Only") == ["Hostel", "Hostel Only"]
+
+
+def test_directory_dates_normalize_to_iso_month():
+    assert normalize_person_date("09/02/2025") == "2025-02-09"
+    assert normalize_person_date("09/02/2025")[:7] == "2025-02"
+    assert normalize_person_date("2025-02-09") == "2025-02-09"
+    assert normalize_person_date("") == ""
+    assert normalize_person_date("", fallback="2026-09-21") == "2026-09-21"

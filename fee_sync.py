@@ -47,7 +47,8 @@ def fee_related_keys_changed(upd: dict, target: dict) -> Set[str]:
 
 
 def _month_key(date_iso: str) -> str:
-    return date_iso[:7]
+    from fees_collection_utils import normalize_person_date
+    return (normalize_person_date(date_iso) or date_iso)[:7]
 
 
 async def drop_unpaid_fees_before_admission(

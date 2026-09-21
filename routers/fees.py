@@ -37,7 +37,7 @@ from rbac.guards import can_collect_fees_for
 logger = logging.getLogger("pws-alpha.fees")
 
 from alpha_centre_rules import apply_defense_colony_rates_for_person
-from fees_collection_utils import compute_player_fee_status, expand_player_type_filter
+from fees_collection_utils import compute_player_fee_status, expand_player_type_filter, normalize_person_date as _normalize_person_date
 from starlette.concurrency import run_in_threadpool
 from pymongo.errors import DuplicateKeyError
 
@@ -104,13 +104,25 @@ def get_pws_fee_rates(category: str) -> dict:
     return PWS_RATE_CARDS.get(category, {})
 
 
+def normalize_person_date(value: Optional[str]) -> str:
+    """Normalize Directory dates (YYYY-MM-DD or DD/MM/YYYY) to ISO YYYY-MM-DD."""
+    return _normalize_person_date(value, fallback=today_ist())
+
+
+def _hardcoded_rates_for_person(person: dict) -> dict:
+    if person.get("kind") == "student" and "PWS" in derive_person_entities(person):
+        return dict(get_pws_fee_rates(_pws_category(person)) or {})
+    category = _canonical_category(person.get("player_type") or "Daily")
+    sport = person.get("sport") or ""
+    return dict(apply_defense_colony_rates_for_person(person, get_fee_rates(category, sport)) or {})
+
+
 async def _rates_for_person(person: dict) -> dict:
-    """Resolve rates from fee catalogue/plan, falling back to hardcoded cards."""
+    """Catalogue rates overlay the Directory rate card; missing heads keep the card."""
+    fallback = _hardcoded_rates_for_person(person)
     try:
         from routers.fee_catalog import resolve_rates_for_person
         catalog = await resolve_rates_for_person(person)
-        if catalog:
-            return catalog
     except Exception:
         logger.exception(
             "Fee catalogue lookup failed for person %s — refusing to bill from the "
@@ -118,11 +130,17 @@ async def _rates_for_person(person: dict) -> dict:
             person.get("id"),
         )
         raise HTTPException(503, "Fee configuration unavailable — please retry")
-    if person.get("kind") == "student" and "PWS" in derive_person_entities(person):
-        return get_pws_fee_rates(_pws_category(person))
-    category = _canonical_category(person.get("player_type") or "Daily")
-    sport = person.get("sport") or ""
-    return apply_defense_colony_rates_for_person(person, get_fee_rates(category, sport))
+    if not catalog:
+        return fallback
+    merged = dict(fallback)
+    for key, amt in catalog.items():
+        try:
+            ival = int(amt)
+        except (TypeError, ValueError):
+            continue
+        if ival > 0:
+            merged[key] = ival
+    return merged
 
 
 async def _recurring_amounts_async(person: dict) -> dict:
@@ -160,14 +178,14 @@ def get_fee_rates(category: str, sport: str) -> dict:
 
 def first_month_amount(monthly: int, admission_iso: str) -> int:
     try:
-        d = datetime.fromisoformat(admission_iso).day
+        d = datetime.fromisoformat(normalize_person_date(admission_iso)).day
     except Exception:
         d = 1
     return monthly if d <= 15 else int(monthly / 2)
 
 
 def _month_key(date_iso: str) -> str:
-    return date_iso[:7]  # "YYYY-MM"
+    return normalize_person_date(date_iso)[:7]
 
 
 def _fy_end(month_key: str) -> str:
@@ -234,13 +252,13 @@ async def auto_create_fees_for_player(player: dict) -> List[dict]:
     rates = await _rates_for_person(player)
     if not rates:
         return []
-    admission = player.get("date_of_admission") or today_ist()
+    admission = normalize_person_date(player.get("date_of_admission") or today_ist())
     period = _month_key(admission)
     created: List[dict] = []
     # Registration (one-time) — with optional Super Admin override
-    reg_amt = int(player.get("registration_fee_override") or 0) or rates["registration"]
+    reg_amt = int(player.get("registration_fee_override") or 0) or int(rates.get("registration") or 0)
     existing_reg = await db.fees.find_one({"player_id": player["id"], "fee_type": "Registration"})
-    if not existing_reg:
+    if not existing_reg and reg_amt > 0:
         reg = _build_fee(player, "Registration", reg_amt, reg_amt, period, admission)
         await db.fees.insert_one(reg)
         created.append(reg)
@@ -248,10 +266,10 @@ async def auto_create_fees_for_player(player: dict) -> List[dict]:
     override = int(player.get("monthly_fee_override") or 0) or 0
     if not override and category in ("Hostel", "Hostel Only"):
         override = int(player.get("hostel_fee_override") or 0) or 0
-    monthly_amt = override or rates["monthly"]
+    monthly_amt = override or int(rates.get("monthly") or 0)
     first_amt = first_month_amount(monthly_amt, admission)
     existing_m = await db.fees.find_one({"player_id": player["id"], "fee_type": "Monthly", "period_month": period})
-    if not existing_m:
+    if not existing_m and monthly_amt > 0:
         mfee = _build_fee(player, "Monthly", monthly_amt, first_amt, period, admission, extra={
             "is_first_month": True,
             "first_month_discounted": first_amt < monthly_amt,
@@ -391,14 +409,18 @@ def _build_fee(player: dict, fee_type: str, amount: int, amount_due: int, period
 
 def _iter_months(start: str, end: str):
     """Yield 'YYYY-MM' strings inclusive from start to end (e.g., '2026-01' to '2026-05')."""
-    sy, sm = map(int, start.split("-"))
-    ey, em = map(int, end.split("-"))
+    try:
+        sy, sm = map(int, start.split("-"))
+        ey, em = map(int, end.split("-"))
+    except Exception:
+        return
     y, m = sy, sm
     while (y, m) <= (ey, em):
         yield f"{y:04d}-{m:02d}"
         m += 1
         if m > 12:
-            m = 1; y += 1
+            m = 1
+            y += 1
 
 
 async def _drop_pre_admission_fees(player: dict) -> None:
@@ -425,17 +447,28 @@ async def ensure_monthly_fees_up_to_current(player_id: str) -> List[dict]:
     if player.get("kind") == "player" and "ALPHA" in ents:
         rates = await _rates_for_person(player)
         if rates:
-            admission = player.get("date_of_admission") or today_ist()
+            admission = normalize_person_date(player.get("date_of_admission") or today_ist())
             start_month = _month_key(admission)
             current_month = current_month_ist()
             amounts = await _recurring_amounts_async(player)
             monthly_amt = amounts["monthly"]
             tport = amounts["transport"]
             for period in _iter_months(start_month, current_month):
-                if period == start_month:
-                    continue
-                for fee_type, amt in (("Monthly", monthly_amt), ("Transport", tport)):
-                    made = await _ensure_recurring_fee(player, fee_type, amt, period)
+                monthly_due = (
+                    first_month_amount(monthly_amt, admission)
+                    if period == start_month
+                    else monthly_amt
+                )
+                tport_due = (
+                    first_month_amount(tport, admission)
+                    if period == start_month
+                    else tport
+                )
+                for fee_type, amt, due in (
+                    ("Monthly", monthly_amt, monthly_due),
+                    ("Transport", tport, tport_due),
+                ):
+                    made = await _ensure_recurring_fee(player, fee_type, amt, period, amount_due=due)
                     if made:
                         created.append(made)
     if is_pws_linked_player(player) and player.get("pws_class"):
@@ -443,15 +476,30 @@ async def ensure_monthly_fees_up_to_current(player_id: str) -> List[dict]:
     return created
 
 
-async def _ensure_recurring_fee(person: dict, fee_type: str, amount: int, period: str) -> Optional[dict]:
+async def _ensure_recurring_fee(
+    person: dict, fee_type: str, amount: int, period: str, amount_due: Optional[int] = None,
+) -> Optional[dict]:
     """Insert one recurring fee row if it does not already exist.
 
-    Uses $setOnInsert against the unique (player_id, fee_type, period_month) index,
-    so two concurrent callers cannot both create the row and bill the family twice.
+    Matches existing rows with or without entity_id so a unique-index
+    collision cannot hide a Directory monthly from Collect Fees.
     """
     if amount <= 0:
         return None
-    doc = _build_fee(person, fee_type, amount, amount, period, f"{period}-05")
+    due = amount if amount_due is None else amount_due
+    doc = _build_fee(person, fee_type, amount, due, period, f"{period}-05")
+    existing = await db.fees.find_one({
+        "player_id": person["id"],
+        "fee_type": fee_type,
+        "period_month": period,
+    }, {"_id": 0, "id": 1, "entity_id": 1})
+    if existing:
+        if not existing.get("entity_id") and doc.get("entity_id"):
+            await db.fees.update_one(
+                {"id": existing["id"]},
+                {"$set": {"entity_id": doc["entity_id"]}},
+            )
+        return None
     key = {
         "player_id": person["id"],
         "fee_type": fee_type,
@@ -505,14 +553,20 @@ async def ensure_all_players_monthly_fees(force: bool = False) -> int:
         {"kind": "player", "organization": {"$in": ["ALPHA", "BOTH"]}, "status": {"$ne": "deactivated"}},
         {"_id": 0, "id": 1},
     ):
-        created = await ensure_monthly_fees_up_to_current(p["id"])
-        count += len(created)
+        try:
+            created = await ensure_monthly_fees_up_to_current(p["id"])
+            count += len(created)
+        except Exception:
+            logger.exception("ensure monthly failed for player %s", p.get("id"))
     async for s in db.people.find(
         {"kind": "student", "organization": {"$in": ["PWS", "BOTH"]}, "status": {"$ne": "deactivated"}},
         {"_id": 0, "id": 1},
     ):
-        created = await ensure_monthly_fees_up_to_current(s["id"])
-        count += len(created)
+        try:
+            created = await ensure_monthly_fees_up_to_current(s["id"])
+            count += len(created)
+        except Exception:
+            logger.exception("ensure monthly failed for student %s", s.get("id"))
     return count
 
 
@@ -626,6 +680,12 @@ async def fees_collection_summary(
         }
 
     people = await db.people.find(pq, {"_id": 0}).sort("name", 1).to_list(2000)
+    if search:
+        for person in people:
+            try:
+                await ensure_monthly_fees_up_to_current(person["id"])
+            except Exception:
+                logger.exception("ensure monthly failed for person %s", person.get("id"))
     player_ids = [p["id"] for p in people]
     fee_match = _fee_match_for_institution(inst, player_ids)
     all_fees = await db.fees.find(fee_match, {"_id": 0}).to_list(20000)
