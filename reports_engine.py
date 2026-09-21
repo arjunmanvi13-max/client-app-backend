@@ -521,6 +521,23 @@ def _merge_coach_player_scope(user: dict, q: dict, sport: Optional[str]) -> dict
 async def run_students(user: dict, entity: str, filters: dict) -> dict:
     q = _people_base_query("student", entity, filters.get("centre"), filters.get("sport"), filters.get("status"), filters.get("section_id"), filters.get("grade"))
     rows_raw = await db.people.find(q, {"_id": 0}).sort("name", 1).to_list(3000)
+    if entity in ("PWS", "BOTH"):
+        from academic_class_roster import PWS_LINKED_PLAYER_TYPES
+        pq: dict = {
+            "kind": "player",
+            "player_type": {"$in": list(PWS_LINKED_PLAYER_TYPES)},
+            "status": {"$ne": "deactivated"},
+        }
+        if filters.get("section_id"):
+            pq["section_id"] = filters["section_id"]
+        if filters.get("status") and str(filters.get("status")).lower() != "all":
+            pq["status"] = filters["status"]
+        ent_f = person_entity_filter(entity)
+        if ent_f:
+            pq = {"$and": [pq, ent_f]}
+        linked = await db.people.find(pq, {"_id": 0}).sort("name", 1).to_list(3000)
+        seen = {p.get("id") for p in rows_raw}
+        rows_raw.extend([p for p in linked if p.get("id") not in seen])
     columns = ["Entity", "Name", "Admission No.", "Roll No.", "Grade/Section", "Status", "Resident"]
     rows = []
     for p in rows_raw:
@@ -529,7 +546,7 @@ async def run_students(user: dict, entity: str, filters: dict) -> dict:
             "name": p.get("name"),
             "admission_number": p.get("admission_number"),
             "roll_number": p.get("roll_number"),
-            "grade_section": p.get("group"),
+            "grade_section": p.get("group") or p.get("pws_class"),
             "status": p.get("status", "active"),
             "is_resident": "Yes" if p.get("is_resident") else "No",
         })

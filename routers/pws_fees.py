@@ -69,6 +69,8 @@ async def sync_pws_fees_for_student(student: dict) -> List[dict]:
             "fee_type": item.fee_type,
             "period_month": item.period_month,
         }
+        if student.get("kind") == "player":
+            key["entity_id"] = "pws"
         if await db.fees.find_one(key, {"_id": 1}):
             continue
         amt = item.amount
@@ -80,6 +82,7 @@ async def sync_pws_fees_for_student(student: dict) -> List[dict]:
         doc = _build_fee(student, item.fee_type, item.amount, amt, item.period_month, due, extra={
             "pws_category": item.category,
             "academic_year": PWS_ACADEMIC_YEAR,
+            **({"entity_id": "pws"} if student.get("kind") == "player" else {}),
         })
         try:
             res = await db.fees.update_one(key, {"$setOnInsert": doc}, upsert=True)

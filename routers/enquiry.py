@@ -816,6 +816,10 @@ async def convert_to_admission(enquiry_id: str, user: dict = Depends(get_current
             "enquiry_id": enquiry_id,
             "created_at": now,
         }
+        from academic_class_roster import apply_pws_linked_player_entity
+        from core import derive_person_entities
+        person = apply_pws_linked_player_entity(person)
+        person["entities"] = derive_person_entities(person)
         from people_enrollment import assign_enrollment_ids
         person = await assign_enrollment_ids(person)
         await db.people.insert_one(person)

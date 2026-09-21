@@ -11,7 +11,7 @@ from routers.academic import (
     assert_teacher_section_access,
     assigned_section_ids_for_teacher,
 )
-from academic_class_roster import class_roster_query_for_section_ids, is_pws_linked_player, is_pws_linked_player_type
+from academic_class_roster import class_roster_query_for_section_ids, is_pws_linked_player, is_pws_linked_player_type, apply_pws_linked_player_entity
 from coach_scope import (
     coach_scope_metadata,
     validate_coach_sport_param,
@@ -313,6 +313,9 @@ async def list_people(
         if kind in ("student", "teacher"):
             return []
     rows = await db.people.find(query, {"_id": 0}).sort("name", 1).to_list(1000)
+    for row in rows:
+        if is_pws_linked_player(row):
+            apply_pws_linked_player_entity(row)
     if kind == "student":
         rows = await enrich_students_for_list(rows)
     if is_coach_user(user) and kind == "player":
@@ -337,6 +340,8 @@ async def get_person(person_id: str, user: dict = Depends(get_current_user)):
     person = await db.people.find_one({"id": person_id}, {"_id": 0})
     if not person:
         raise HTTPException(404, "Person not found")
+    if is_pws_linked_player(person):
+        apply_pws_linked_player_entity(person)
     if is_teacher_user(user) and is_pws_linked_player(person):
         await assert_teacher_section_access(user, person.get("section_id") or "")
     else:
@@ -504,6 +509,7 @@ async def create_person(payload: PersonCreate, user: dict = Depends(get_current_
     doc = _normalize_guardian_fields(doc)
     doc = _normalize_pws_student(doc)
     doc = _normalize_alpha_player(doc)
+    doc = apply_pws_linked_player_entity(doc)
     doc["entities"] = derive_person_entities(doc)
     if payload.kind in ("player", "student"):
         doc = await assign_enrollment_ids(doc)
@@ -561,9 +567,10 @@ async def create_person(payload: PersonCreate, user: dict = Depends(get_current_
                 doc.pop("registration_fee_override", None)
 
     if payload.kind == "player":
-        # Players default to ALPHA; super admin may set entities for dual participation
-        if not payload.entities and payload.organization != "BOTH":
-            doc["organization"] = "ALPHA"
+        doc = apply_pws_linked_player_entity(doc)
+        if not is_pws_linked_player_type(doc.get("player_type")):
+            if not payload.entities and payload.organization != "BOTH":
+                doc["organization"] = "ALPHA"
         doc["entities"] = derive_person_entities(doc)
         doc["assigned_coach_id"] = None
         if not fee_pending_approval:
@@ -662,6 +669,10 @@ async def update_person(person_id: str, payload: PersonUpdate, user: dict = Depe
             sid, _label = await resolve_section_group(upd["section_id"])
             upd["section_id"] = sid
         merged_player = {**target, **upd}
+        merged_player = apply_pws_linked_player_entity(merged_player)
+        upd["organization"] = merged_player.get("organization")
+        upd["entities"] = merged_player.get("entities")
+        upd["is_dual_participation"] = merged_player.get("is_dual_participation")
         if is_pws_linked_player_type(merged_player.get("player_type")):
             if not (merged_player.get("pws_class") or "").strip() or not merged_player.get("section_id"):
                 raise HTTPException(400, "PWS class and section are required for Boarding and Day Boarding players")

@@ -41,7 +41,7 @@ async def default_fees_player(person: dict) -> Dict[str, Any]:
         "monthly": int(rates.get("monthly") or 0),
         "transport": 0,
     }
-    if person.get("player_type") == "Boarding" and person.get("pws_class"):
+    if person.get("player_type") in ("Boarding", "Day Boarding") and person.get("pws_class"):
         profile = pws_student_profile_from_person(base)
         pws_defaults = resolve_category_amounts(
             profile["pws_class"],
@@ -71,7 +71,7 @@ async def effective_fees_player(person: dict) -> Dict[str, Any]:
         "monthly": monthly,
         "transport": int(person.get("transport_fee_monthly") or 0),
     }
-    if person.get("player_type") == "Boarding":
+    if person.get("player_type") in ("Boarding", "Day Boarding"):
         overrides = person.get("pws_fee_overrides") or {}
         if overrides.get("Tuition") is not None:
             effective["pws_tuition"] = int(overrides["Tuition"])

@@ -1,9 +1,20 @@
 from academic_class_roster import (
     academic_class_roster_query,
+    apply_pws_linked_player_entity,
     group_aliases_for_section,
     is_pws_linked_player,
     is_pws_linked_player_type,
 )
+
+
+def test_boarding_player_maps_to_both_entities():
+    from core import derive_person_entities
+    boarding = apply_pws_linked_player_entity({"kind": "player", "player_type": "Boarding", "organization": "ALPHA"})
+    assert boarding["organization"] == "BOTH"
+    assert set(boarding["entities"]) == {"PWS", "ALPHA"}
+    assert derive_person_entities({"kind": "player", "player_type": "Day Boarding", "organization": "ALPHA"}) == ["ALPHA", "PWS"]
+    daily = derive_person_entities({"kind": "player", "player_type": "Daily", "organization": "ALPHA"})
+    assert daily == ["ALPHA"]
 
 
 def _student_groups(query: dict) -> list[str]:

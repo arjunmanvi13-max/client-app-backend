@@ -60,8 +60,13 @@ def test_entity_from_person_student_is_pws():
     assert entity_id_from_person({"kind": "student", "organization": "PWS"}) == "pws"
 
 
-def test_entity_from_person_player_is_alpha():
-    assert entity_id_from_person({"kind": "player", "organization": "ALPHA"}) == "alpha"
+def test_dual_player_allows_pws_and_alpha_fee_batches():
+    from entity_receipt_branding import entity_id_from_fee_batch, person_allows_fee_entity
+    player = {"kind": "player", "player_type": "Boarding", "organization": "BOTH", "entities": ["PWS", "ALPHA"]}
+    assert person_allows_fee_entity(player, "pws")
+    assert person_allows_fee_entity(player, "alpha")
+    assert entity_id_from_fee_batch([{"entity_id": "pws"}], player) == "pws"
+    assert entity_id_from_fee_batch([{"entity_id": "alpha"}], player) == "alpha"
 
 
 def test_infer_entity_id_from_fee_student_id():

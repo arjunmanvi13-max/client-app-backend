@@ -195,11 +195,11 @@ async def command_center(user: dict = Depends(get_current_user)):
             "coaches": await db.users.count_documents({"role": "coach"}),
             "staff": await db.people.count_documents({"kind": "staff", "organization": "ALPHA"}),
             "students": 0,
-            "players": await db.people.count_documents({"kind": "player", "organization": "ALPHA", "status": {"$ne": "deactivated"}}),
-            "deactivated_players": await db.people.count_documents({"kind": "player", "organization": "ALPHA", "status": "deactivated"}),
+            "players": await db.people.count_documents({"kind": "player", "organization": {"$in": ["ALPHA", "BOTH"]}, "status": {"$ne": "deactivated"}}),
+            "deactivated_players": await db.people.count_documents({"kind": "player", "organization": {"$in": ["ALPHA", "BOTH"]}, "status": "deactivated"}),
         }
         deactivated_players = await db.people.find(
-            {"kind": "player", "organization": "ALPHA", "status": "deactivated"}, {"_id": 0}
+            {"kind": "player", "organization": {"$in": ["ALPHA", "BOTH"]}, "status": "deactivated"}, {"_id": 0}
         ).sort("name", 1).to_list(500)
         # Strip PWS-only attendance kinds
         att = {k: v for k, v in att.items() if k not in ("student", "teacher")}

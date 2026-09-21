@@ -282,13 +282,7 @@ async def _reconcile_from_schedule(
 
 
 def _alpha_person_with_boarding_tuition(person: dict) -> dict:
-    """Boarding ALPHA players may store tuition in pws_fee_overrides."""
-    pws_ov = person.get("pws_fee_overrides") or {}
-    if not isinstance(pws_ov, dict):
-        return person
-    tuition = pws_ov.get("Tuition")
-    if tuition and not person.get("monthly_fee_override"):
-        return {**person, "monthly_fee_override": tuition}
+    """ALPHA sports monthly stays on the rate card; PWS tuition is a separate ledger."""
     return person
 
 
@@ -442,8 +436,20 @@ async def sync_person_fees_to_financials(
 
     if kind == "student" and person.get("pws_class"):
         result = await _reconcile_pws_student(person, audit_buffer)
-    elif kind == "player" and person.get("organization") == "ALPHA":
+    elif kind == "player":
+        from academic_class_roster import is_pws_linked_player
+        from core import derive_person_entities
+        if "ALPHA" not in derive_person_entities(person):
+            return {"skipped": True, "reason": "unsupported_profile"}
         result = await _reconcile_alpha_player(person, audit_buffer)
+        if is_pws_linked_player(person) and person.get("pws_class"):
+            pws_result = await _reconcile_pws_student(person, audit_buffer)
+            result = {
+                "updated": result.get("updated", 0) + pws_result.get("updated", 0),
+                "inserted": result.get("inserted", 0) + pws_result.get("inserted", 0),
+                "removed_before_admission": result.get("removed_before_admission", 0)
+                + pws_result.get("removed_before_admission", 0),
+            }
     elif kind == "student" and person.get("organization") == "PWS":
         result = await _reconcile_legacy_pws_student(person, audit_buffer)
     else:

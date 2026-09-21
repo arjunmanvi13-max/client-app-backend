@@ -84,14 +84,19 @@ def infer_entity_id_from_fee(fee: dict) -> Optional[str]:
 
 def _derive_person_entities(person: dict) -> List[str]:
     """Lightweight copy of core.derive_person_entities (no DB dependency)."""
+    kind = person.get("kind")
+    ptype = (person.get("player_type") or "").strip()
+    if ptype == "Hostel":
+        ptype = "Hostel Only"
+    if kind == "player" and ptype in ("Boarding", "Day Boarding"):
+        return ["ALPHA", "PWS"]
     raw = person.get("entities") or []
     cleaned = sorted({str(e).upper() for e in raw if str(e).upper() in ("PWS", "ALPHA")})
     if cleaned:
         return cleaned
     org = (person.get("organization") or "").upper()
     if org == "BOTH":
-        return ["PWS", "ALPHA"]
-    kind = person.get("kind")
+        return ["ALPHA", "PWS"]
     if kind in ("student", "teacher"):
         return ["PWS"] if org in ("", "PWS", "BOTH") else [org]
     if kind in ("player", "coach"):
@@ -101,14 +106,26 @@ def _derive_person_entities(person: dict) -> List[str]:
     return ["PWS"]
 
 
+def person_allows_fee_entity(player: dict, entity_id: str) -> bool:
+    eid = (entity_id or "").lower()
+    ents = _derive_person_entities(player)
+    if eid == "pws":
+        return "PWS" in ents or player.get("kind") == "student"
+    if eid == "alpha":
+        return "ALPHA" in ents or player.get("kind") == "player"
+    return False
+
+
 def entity_id_from_person(player: dict) -> str:
-    """Resolve entity from a person record (server-side)."""
+    """Resolve default ledger entity from a person record (server-side)."""
     kind = player.get("kind")
     org = (player.get("organization") or "").upper()
     ents = _derive_person_entities(player)
 
     if kind == "student":
         return "pws"
+    if kind == "player" and "PWS" in ents and "ALPHA" in ents:
+        return "alpha"
     if kind == "player":
         return "alpha"
     if "PWS" in ents and "ALPHA" not in ents:
@@ -138,10 +155,9 @@ def entity_id_from_fee_batch(fees: List[dict], player: Optional[dict] = None) ->
     if len(ids) == 1:
         resolved = ids.pop()
         if player:
-            expected = entity_id_from_person(player)
-            if resolved != expected:
+            if not person_allows_fee_entity(player, resolved):
                 raise ValueError(
-                    f"Fee batch entity {resolved!r} does not match person entity {expected!r}"
+                    f"Fee batch entity {resolved!r} does not match person entity {entity_id_from_person(player)!r}"
                 )
         return resolved
     if player:
@@ -224,8 +240,8 @@ async def next_legacy_fee_receipt_number(entity_id: str) -> str:
 
 def validate_player_entity_match(player: dict, entity_id: str) -> None:
     """Ensure player belongs to the fee batch entity (server-side guard)."""
-    expected = entity_id_from_person(player)
-    if expected != entity_id:
+    if not person_allows_fee_entity(player, entity_id):
+        expected = entity_id_from_person(player)
         raise ValueError(
             f"Player entity {expected!r} does not match fee batch entity {entity_id!r}"
         )

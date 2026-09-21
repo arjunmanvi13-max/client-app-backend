@@ -37,6 +37,22 @@ def is_pws_linked_player(person: dict) -> bool:
     return person.get("kind") == "player" and is_pws_linked_player_type(person.get("player_type"))
 
 
+def apply_pws_linked_player_entity(doc: dict) -> dict:
+    """Directory source of truth: Boarding / Day Boarding players belong to Both entities."""
+    if doc.get("kind") != "player":
+        return doc
+    if is_pws_linked_player_type(doc.get("player_type")):
+        doc["organization"] = "BOTH"
+        doc["entities"] = ["ALPHA", "PWS"]
+        doc["is_dual_participation"] = True
+    elif (doc.get("organization") or "").upper() != "BOTH":
+        doc.setdefault("organization", "ALPHA")
+        if not doc.get("entities"):
+            doc["entities"] = ["ALPHA"]
+        doc["is_dual_participation"] = False
+    return doc
+
+
 def pws_classes_for_grade_name(grade_name: Optional[str]) -> list[str]:
     canon = normalize_class_value(grade_name)
     return [canon] if canon else []

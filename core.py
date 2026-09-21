@@ -765,14 +765,19 @@ def fee_entity_filter(inst: str) -> dict:
 
 def derive_person_entities(person: dict) -> List[str]:
     """Compute entity participation for a person record."""
+    kind = person.get("kind")
+    ptype = (person.get("player_type") or "").strip()
+    if ptype == "Hostel":
+        ptype = "Hostel Only"
+    if kind == "player" and ptype in ("Boarding", "Day Boarding"):
+        return ["ALPHA", "PWS"]
     raw = person.get("entities") or []
     cleaned = sorted({str(e).upper() for e in raw if str(e).upper() in ("PWS", "ALPHA")})
     if cleaned:
         return cleaned
     org = (person.get("organization") or "").upper()
     if org == "BOTH":
-        return ["PWS", "ALPHA"]
-    kind = person.get("kind")
+        return ["ALPHA", "PWS"]
     if kind in ("student", "teacher"):
         return ["PWS"] if org in ("", "PWS", "BOTH") else [org]
     if kind in ("player", "coach"):
@@ -801,7 +806,14 @@ def person_entity_filter(inst: str) -> dict:
         ],
     }
     if inst == "PWS":
-        return {"$or": [{"entities": "PWS"}, {"entities": {"$in": ["PWS"]}}, pws_legacy]}
+        return {
+            "$or": [
+                {"entities": "PWS"},
+                {"entities": {"$in": ["PWS"]}},
+                pws_legacy,
+                {"kind": "player", "player_type": {"$in": ["Boarding", "Day Boarding"]}},
+            ]
+        }
     return {"$or": [{"entities": "ALPHA"}, {"entities": {"$in": ["ALPHA"]}}, alpha_legacy]}
 
 

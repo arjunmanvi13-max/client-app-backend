@@ -245,11 +245,15 @@ async def _ensure_unique_indexes() -> None:
     because until it succeeds the corresponding race is still live. Run
     `scripts/find_duplicates.py` to list offending rows.
     """
+    try:
+        await db.fees.drop_index("player_id_1_fee_type_1_period_month_1")
+    except Exception:
+        pass
     unique_specs = [
         ("attendance", [("kind", 1), ("person_id", 1), ("date", 1), ("session", 1)], None),
         (
             "fees",
-            [("player_id", 1), ("fee_type", 1), ("period_month", 1)],
+            [("player_id", 1), ("fee_type", 1), ("period_month", 1), ("entity_id", 1)],
             {"fee_type": {"$in": PROTECTED_FEE_TYPES}},
         ),
         (

@@ -28,7 +28,7 @@ from core import (
     db, get_current_user, is_admin, is_super_admin, assert_perm, now_utc, get_perm, notify_role,
     resolve_user_institution, fee_entity_filter, derive_person_entities, person_entity_filter,
     is_sports_admin, format_date_display, format_datetime_display, format_month_display, logger,
-    assert_entity_access, today_ist, current_month_ist, ALPHA_CENTRES,
+    assert_entity_access, today_ist, current_month_ist, ALPHA_CENTRES, merge_mongo_query,
 
     to_ist_day,
 )
@@ -227,7 +227,7 @@ async def auto_create_fees_for_player(player: dict) -> List[dict]:
 
     Rate-card driven based on player_type. Super Admin can override defaults via
     `monthly_fee_override` / `registration_fee_override` / `hostel_fee_override` on the Person record."""
-    if player.get("kind") != "player" or player.get("organization") != "ALPHA":
+    if player.get("kind") != "player" or "ALPHA" not in derive_person_entities(player):
         return []
     sport = player.get("sport") or ""
     category = _canonical_category(player.get("player_type") or "Daily")
@@ -277,6 +277,15 @@ async def auto_create_fees_for_player(player: dict) -> List[dict]:
             message=f"{player['name']} ({player.get('centre')}/{sport}/{category}) — {len(created)} fee(s) auto-generated",
             entity_id="alpha",
         )
+    from academic_class_roster import is_pws_linked_player
+    if is_pws_linked_player(player) and player.get("pws_class"):
+        try:
+            from routers.pws_fees import sync_pws_fees_for_student
+            created.extend(await sync_pws_fees_for_student(player))
+        except HTTPException:
+            raise
+        except Exception:
+            logger.exception("PWS fee sync failed for dual-entity player %s", player.get("id"))
     return created
 
 
@@ -406,31 +415,31 @@ async def ensure_monthly_fees_up_to_current(player_id: str) -> List[dict]:
     player = await db.people.find_one({"id": player_id})
     if not player:
         return []
-    if player.get("kind") == "student" and player.get("organization") == "PWS":
-        await _drop_pre_admission_fees(player)
-        return await _ensure_pws_recurring_fees(player)
-    if player.get("organization") != "ALPHA":
-        return []
-    await _drop_pre_admission_fees(player)
-    sport = player.get("sport") or ""
-    category = _canonical_category(player.get("player_type") or "Daily")
-    rates = await _rates_for_person(player)
-    if not rates:
-        return []
-    admission = player.get("date_of_admission") or today_ist()
-    start_month = _month_key(admission)
-    current_month = current_month_ist()
+    ents = derive_person_entities(player)
     created: List[dict] = []
-    amounts = await _recurring_amounts_async(player)
-    monthly_amt = amounts["monthly"]
-    tport = amounts["transport"]
-    for period in _iter_months(start_month, current_month):
-        if period == start_month:
-            continue
-        for fee_type, amt in (("Monthly", monthly_amt), ("Transport", tport)):
-            made = await _ensure_recurring_fee(player, fee_type, amt, period)
-            if made:
-                created.append(made)
+    await _drop_pre_admission_fees(player)
+    from academic_class_roster import is_pws_linked_player
+    if player.get("kind") == "student" and "PWS" in ents:
+        created.extend(await _ensure_pws_recurring_fees(player))
+        return created
+    if player.get("kind") == "player" and "ALPHA" in ents:
+        rates = await _rates_for_person(player)
+        if rates:
+            admission = player.get("date_of_admission") or today_ist()
+            start_month = _month_key(admission)
+            current_month = current_month_ist()
+            amounts = await _recurring_amounts_async(player)
+            monthly_amt = amounts["monthly"]
+            tport = amounts["transport"]
+            for period in _iter_months(start_month, current_month):
+                if period == start_month:
+                    continue
+                for fee_type, amt in (("Monthly", monthly_amt), ("Transport", tport)):
+                    made = await _ensure_recurring_fee(player, fee_type, amt, period)
+                    if made:
+                        created.append(made)
+    if is_pws_linked_player(player) and player.get("pws_class"):
+        created.extend(await _ensure_pws_recurring_fees(player))
     return created
 
 
@@ -443,7 +452,12 @@ async def _ensure_recurring_fee(person: dict, fee_type: str, amount: int, period
     if amount <= 0:
         return None
     doc = _build_fee(person, fee_type, amount, amount, period, f"{period}-05")
-    key = {"player_id": person["id"], "fee_type": fee_type, "period_month": period}
+    key = {
+        "player_id": person["id"],
+        "fee_type": fee_type,
+        "period_month": period,
+        "entity_id": doc.get("entity_id"),
+    }
     try:
         res = await db.fees.update_one(key, {"$setOnInsert": doc}, upsert=True)
     except DuplicateKeyError:
@@ -487,10 +501,16 @@ async def ensure_all_players_monthly_fees(force: bool = False) -> int:
         return 0
     _bulk_ensure_state["ts"] = now
     count = 0
-    async for p in db.people.find({"kind": "player", "organization": "ALPHA", "status": {"$ne": "deactivated"}}, {"_id": 0, "id": 1}):
+    async for p in db.people.find(
+        {"kind": "player", "organization": {"$in": ["ALPHA", "BOTH"]}, "status": {"$ne": "deactivated"}},
+        {"_id": 0, "id": 1},
+    ):
         created = await ensure_monthly_fees_up_to_current(p["id"])
         count += len(created)
-    async for s in db.people.find({"kind": "student", "organization": "PWS", "status": {"$ne": "deactivated"}}, {"_id": 0, "id": 1}):
+    async for s in db.people.find(
+        {"kind": "student", "organization": {"$in": ["PWS", "BOTH"]}, "status": {"$ne": "deactivated"}},
+        {"_id": 0, "id": 1},
+    ):
         created = await ensure_monthly_fees_up_to_current(s["id"])
         count += len(created)
     return count
@@ -517,8 +537,12 @@ async def _collection_people_query(
         inst = "ALPHA"
     query: dict = {"status": {"$ne": "deactivated"}}
     if inst == "PWS":
-        query["kind"] = "student"
-        query.update(person_entity_filter("PWS"))
+        from academic_class_roster import PWS_LINKED_PLAYER_TYPES
+        query["$or"] = [
+            {"kind": "student"},
+            {"kind": "player", "player_type": {"$in": list(PWS_LINKED_PLAYER_TYPES)}},
+        ]
+        query = merge_mongo_query(query, person_entity_filter("PWS"))
         section = group or centre
         if section:
             query["group"] = section
@@ -885,7 +909,7 @@ async def get_player_dues(player_id: str, user: dict = Depends(get_current_user)
     if not player:
         raise HTTPException(404, "Person not found")
     person_entities = derive_person_entities(player)
-    if player.get("kind") == "player" and "ALPHA" not in person_entities:
+    if player.get("kind") == "player" and "ALPHA" not in person_entities and "PWS" not in person_entities:
         raise HTTPException(400, "Fee dues are only available for ALPHA players or PWS students")
     if player.get("kind") == "student" and "PWS" not in person_entities:
         raise HTTPException(400, "Fee dues are only available for PWS students")
@@ -1206,9 +1230,9 @@ async def create_adhoc_fee(payload: AdHocFeeIn, user: dict = Depends(get_current
     person = await db.people.find_one({"id": payload.player_id})
     if not person:
         raise HTTPException(404, "Person not found")
-    if person.get("kind") == "player" and person.get("organization") != "ALPHA":
+    if person.get("kind") == "player" and "ALPHA" not in derive_person_entities(person):
         raise HTTPException(400, "Ad-hoc fees can only be created for ALPHA players or PWS students")
-    if person.get("kind") == "student" and person.get("organization") != "PWS":
+    if person.get("kind") == "student" and "PWS" not in derive_person_entities(person):
         raise HTTPException(400, "Ad-hoc fees can only be created for PWS students")
     if person.get("kind") not in ("player", "student"):
         raise HTTPException(400, "Ad-hoc fees can only be created for players or students")
